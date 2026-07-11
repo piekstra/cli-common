@@ -262,10 +262,44 @@ fn replace_self(binary_name: &str, binary: &[u8]) -> Result<(), CliError> {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| CliError::Other(format!("setting permissions: {e}")))?;
     }
+    #[cfg(target_os = "macos")]
+    resign_stable_identity(&tmp);
     let result = self_replace::self_replace(&tmp)
         .map_err(|e| CliError::Other(format!("replacing the running binary: {e}")));
     let _ = std::fs::remove_file(&tmp);
     result
+}
+
+/// The stable, self-signed family code-signing identity (created once by
+/// `cli-common/scripts/setup-dev-signing.sh`). A keychain "Always Allow" grant
+/// binds to this identity's designated requirement, so signing every installed
+/// build with it keeps the grant valid across versions — a self-updated binary
+/// is not re-prompted.
+#[cfg(target_os = "macos")]
+const CODESIGN_IDENTITY: &str = "pk-cli-codesign";
+
+/// Best-effort re-sign of the incoming binary with [`CODESIGN_IDENTITY`].
+/// Silently a no-op when the identity or `codesign` isn't available (e.g. a
+/// machine that never ran `setup-dev-signing.sh`) — the OS then prompts once,
+/// exactly as it would for any unsigned binary, so this never makes things worse.
+#[cfg(target_os = "macos")]
+fn resign_stable_identity(path: &std::path::Path) {
+    // Only attempt it when the identity actually exists, so we don't shell out
+    // for nothing on machines without the dev-signing setup.
+    let have_identity = std::process::Command::new("/usr/bin/security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(CODESIGN_IDENTITY))
+        .unwrap_or(false);
+    if !have_identity {
+        return;
+    }
+    let _ = std::process::Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", CODESIGN_IDENTITY])
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 fn version_gt(a: &str, b: &str) -> bool {
