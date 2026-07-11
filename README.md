@@ -58,6 +58,14 @@ $ example-cli --json auth status
 }
 ```
 
+## macOS dev signing
+
+Plain `cargo build` ad-hoc signs, so macOS keychain "Always Allow" grants die
+on every rebuild. One-time: `scripts/setup-dev-signing.sh` creates a stable
+self-signed `pk-cli-codesign` identity; then re-sign dev builds with
+`scripts/dev-sign.sh target/debug/<bin>` (each family CLI wires this up as
+`make dev`). One final "Always Allow" per CLI and the prompts stop.
+
 ## Development
 
 ```console

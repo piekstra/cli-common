@@ -16,6 +16,13 @@ Shared surface spec + library crates for the piekstra CLI family. Read
 - Keep crates dependency-light; provider-specific logic belongs in the CLIs,
   not here.
 
+## Dev signing (macOS)
+
+`scripts/setup-dev-signing.sh` (one-time) + `scripts/dev-sign.sh <bin>` keep
+keychain ACL grants stable across rebuilds by signing dev builds with the
+`pk-cli-codesign` identity. The identity lives only in the owner's login
+keychain — never commit or distribute it.
+
 ## Workflow
 
 - `cargo test --workspace && cargo clippy --workspace --all-targets` must be
