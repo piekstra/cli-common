@@ -104,10 +104,10 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             Ok(())
         }
         Command::SelfUpdate(args) => Updater {
-            repo: REPO,
-            binary: BIN,
-            target: env!("BUILD_TARGET"),
-            current: env!("CARGO_PKG_VERSION"),
+            repo: REPO.into(),
+            binary: BIN.into(),
+            target: env!("BUILD_TARGET").into(),
+            current: env!("CARGO_PKG_VERSION").into(),
         }
         .run(args, cli.common.json, cli.common.quiet),
         Command::Completions { shell } => {

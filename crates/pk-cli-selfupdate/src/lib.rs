@@ -34,11 +34,24 @@ pub struct SelfUpdateArgs {
 /// (`env!("BUILD_TARGET")`), `current` is `env!("CARGO_PKG_VERSION")`.
 pub struct Updater {
     /// GitHub `owner/repo`.
-    pub repo: &'static str,
+    pub repo: String,
     /// Binary name inside the release archive.
-    pub binary: &'static str,
-    pub target: &'static str,
-    pub current: &'static str,
+    pub binary: String,
+    /// Substring identifying this platform's release asset — a target triple
+    /// (`env!("BUILD_TARGET")`) or an `<os>-<arch>` pair, whatever the
+    /// repo's release workflow names assets with.
+    pub target: String,
+    pub current: String,
+}
+
+/// `<os>-<arch>` (e.g. `macos-aarch64`) for repos whose release assets are
+/// named that way instead of with a full target triple.
+pub fn os_arch() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "macos",
+        other => other,
+    };
+    format!("{}-{}", os, std::env::consts::ARCH)
 }
 
 pub struct UpdateCheck {
@@ -83,8 +96,8 @@ impl Updater {
             .unwrap_or_default();
         let latest = tag.trim_start_matches('v').to_string();
         Ok(UpdateCheck {
-            current: self.current.to_string(),
-            available: version_gt(&latest, self.current),
+            current: self.current.clone(),
+            available: version_gt(&latest, &self.current),
             release_url: release
                 .get("html_url")
                 .and_then(|v| v.as_str())
@@ -105,7 +118,7 @@ impl Updater {
         })?;
         let archive = self.download(&asset_url)?;
         let binary = self.extract_binary(&archive)?;
-        replace_self(self.binary, &binary)
+        replace_self(&self.binary, &binary)
     }
 
     /// The full standard `self-update` command: check, report, and (unless
@@ -189,7 +202,7 @@ impl Updater {
             .find(|a| {
                 a.get("name")
                     .and_then(|n| n.as_str())
-                    .map(|n| n.contains(self.target) && n.ends_with(".tar.gz"))
+                    .map(|n| n.contains(self.target.as_str()) && n.ends_with(".tar.gz"))
                     .unwrap_or(false)
             })
             .and_then(|a| a.get("browser_download_url"))
@@ -228,7 +241,7 @@ impl Updater {
             let is_bin = entry
                 .path()
                 .ok()
-                .and_then(|p| p.file_name().map(|n| n == self.binary))
+                .and_then(|p| p.file_name().map(|n| n == self.binary.as_str()))
                 .unwrap_or(false);
             if is_bin {
                 let mut buf = Vec::new();
