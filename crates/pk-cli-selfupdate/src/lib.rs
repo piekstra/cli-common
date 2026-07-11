@@ -47,11 +47,7 @@ pub struct Updater {
 /// `<os>-<arch>` (e.g. `macos-aarch64`) for repos whose release assets are
 /// named that way instead of with a full target triple.
 pub fn os_arch() -> String {
-    let os = match std::env::consts::OS {
-        "macos" => "macos",
-        other => other,
-    };
-    format!("{}-{}", os, std::env::consts::ARCH)
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 pub struct UpdateCheck {
