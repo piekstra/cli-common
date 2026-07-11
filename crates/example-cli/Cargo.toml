@@ -1,0 +1,27 @@
+[package]
+name = "example-cli"
+description = "Template CLI exercising every pk-cli-* crate — copy this to start a new family CLI. Not published."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "example-cli"
+path = "src/main.rs"
+
+[dependencies]
+pk-cli-core = { workspace = true }
+pk-cli-secrets = { workspace = true }
+pk-cli-config = { workspace = true }
+pk-cli-selfupdate = { workspace = true }
+pk-cli-auth = { workspace = true }
+pk-cli-http = { workspace = true }
+clap = { workspace = true }
+clap_complete = "4"
+serde = { workspace = true }
+serde_json = { workspace = true }

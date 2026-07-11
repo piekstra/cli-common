@@ -1,0 +1,15 @@
+[package]
+name = "pk-cli-config"
+description = "Non-secret on-disk config for the piekstra CLI family: XDG-located JSON store with typed load/save."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+pk-cli-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

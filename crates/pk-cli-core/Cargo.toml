@@ -1,0 +1,15 @@
+[package]
+name = "pk-cli-core"
+description = "Shared CLI surface for the piekstra CLI family: error/exit-code contract, output rendering, global flags, dates, money."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

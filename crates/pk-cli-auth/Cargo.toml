@@ -1,0 +1,17 @@
+[package]
+name = "pk-cli-auth"
+description = "Standard auth surface for the piekstra CLI family: auth-status/v1 DTO, login/set-credential arg structs, logout semantics."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+pk-cli-core = { workspace = true }
+pk-cli-secrets = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

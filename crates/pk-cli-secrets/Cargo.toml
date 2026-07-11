@@ -1,0 +1,27 @@
+[package]
+name = "pk-cli-secrets"
+description = "Keychain-backed secret handling for the piekstra CLI family: redacting Secret type, credential store, stdin/env ingestion."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+pk-cli-core = { workspace = true }
+clap = { workspace = true }
+rpassword = { workspace = true }
+zeroize = { workspace = true }
+
+# Platform-native secret stores (macOS Keychain, Windows Credential Manager,
+# Linux Secret Service with pure-Rust crypto).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust"] }
