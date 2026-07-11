@@ -26,5 +26,6 @@ status here.
 | fpl | conforms (v0.2.0) — `init` kept alongside `auth login` |
 | lrfl | conforms (v0.2.0) — `config set-account` spelling retained; guest reads need no auth |
 | tojfl | conforms (v0.1.x) — SDK keychain service name unchanged; `config set/unset` pending |
+| gpm2op | conforms (v0.2.0) — no keychain (delegates to `op`); no `config`/`auth` commands (nothing to store) |
 | target-cli | planned |
 | babylist-cli | planned |

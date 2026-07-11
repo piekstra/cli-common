@@ -2,7 +2,7 @@
 
 Status: draft v1 · 2026-07-11
 
-The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `target-cli`, `babylist-cli`
+The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
 all self-updating from GitHub releases — but each spells those things slightly
 differently. This repo defines (1) a **surface specification** every CLI conforms
