@@ -22,9 +22,9 @@ status here.
 | CLI | Status |
 |---|---|
 | example-cli | reference implementation |
-| xfin | migrating |
-| fpl | migrating |
-| lrfl | migrating |
-| tojfl | migrating |
+| xfin | conforms (v0.2.0) — `set-credential` also kept top-level |
+| fpl | conforms (v0.2.0) — `init` kept alongside `auth login` |
+| lrfl | conforms (v0.2.0) — `config set-account` spelling retained; guest reads need no auth |
+| tojfl | conforms (v0.1.x) — SDK keychain service name unchanged; `config set/unset` pending |
 | target-cli | planned |
 | babylist-cli | planned |
