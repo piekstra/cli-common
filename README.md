@@ -1,9 +1,9 @@
 # cli-common
 
 Shared surface specification and library crates for a family of Rust CLIs
-([`fpl`](https://github.com/piekstra/fpl),
-[`tojfl`](https://github.com/piekstra/town-of-jupiter-fl),
-[`lrfl`](https://github.com/piekstra/loxahatchee-river-fl),
+([`fpl`](https://github.com/piekstra/fpl-cli),
+[`tojfl`](https://github.com/piekstra/town-of-jupiter-fl-cli),
+[`lrfl`](https://github.com/piekstra/loxahatchee-river-fl-cli),
 [`xfin`](https://github.com/piekstra/xfinity-cli), and friends) so that
 scripts, agents, and driver tools like
 [`utiman`](https://github.com/piekstra/utiman) can treat every CLI the same

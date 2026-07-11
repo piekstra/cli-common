@@ -142,7 +142,7 @@ without parsing messages.
   "schema": "cli-info/v1",
   "name": "fpl", "version": "0.4.0",
   "spec": "piekstra-cli/1",
-  "repo": "https://github.com/piekstra/fpl",
+  "repo": "https://github.com/piekstra/fpl-cli",
   "auth": { "required": true, "method": "password", "login_hint": "fpl auth login" },
   "capabilities": ["accounts", "bills", "payments", "usage", "transactions", "outages", "api"]
 }
