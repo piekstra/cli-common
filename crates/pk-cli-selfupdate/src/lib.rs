@@ -148,10 +148,7 @@ impl Updater {
         }
 
         if !quiet {
-            eprintln!(
-                "downloading {} for {}…",
-                check.latest, self.target
-            );
+            eprintln!("downloading {} for {}…", check.latest, self.target);
         }
         self.install(&check)?;
         if !quiet {
@@ -164,10 +161,7 @@ impl Updater {
     }
 
     fn latest_release(&self) -> Result<Value, CliError> {
-        let url = format!(
-            "https://api.github.com/repos/{}/releases/latest",
-            self.repo
-        );
+        let url = format!("https://api.github.com/repos/{}/releases/latest", self.repo);
         let resp = self
             .http()?
             .get(&url)

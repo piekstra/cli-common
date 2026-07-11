@@ -54,10 +54,7 @@ impl ConfigStore {
             Ok(s) => serde_json::from_str(&s)
                 .map_err(|e| CliError::Other(format!("parsing {}: {e}", path.display()))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-            Err(e) => Err(CliError::Other(format!(
-                "reading {}: {e}",
-                path.display()
-            ))),
+            Err(e) => Err(CliError::Other(format!("reading {}: {e}", path.display()))),
         }
     }
 
@@ -80,10 +77,7 @@ impl ConfigStore {
         match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(CliError::Other(format!(
-                "removing {}: {e}",
-                path.display()
-            ))),
+            Err(e) => Err(CliError::Other(format!("removing {}: {e}", path.display()))),
         }
     }
 }

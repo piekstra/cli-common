@@ -147,7 +147,11 @@ fn auth(
                     "a credential is already stored; pass --overwrite to replace it".into(),
                 ));
             }
-            let prompt = if args.non_interactive { None } else { Some("Password") };
+            let prompt = if args.non_interactive {
+                None
+            } else {
+                Some("Password")
+            };
             let secret = args.source.read(prompt)?;
             creds.set(&user, &secret)?;
             eprintln!("credential stored in the OS keychain");

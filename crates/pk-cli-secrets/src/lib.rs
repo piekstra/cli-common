@@ -203,7 +203,10 @@ mod tests {
     #[test]
     fn env_ingestion() {
         std::env::set_var("PK_CLI_TEST_SECRET", "hunter2");
-        assert_eq!(read_from_env("PK_CLI_TEST_SECRET").unwrap().expose(), "hunter2");
+        assert_eq!(
+            read_from_env("PK_CLI_TEST_SECRET").unwrap().expose(),
+            "hunter2"
+        );
         assert!(read_from_env("PK_CLI_TEST_UNSET_VAR").is_err());
     }
 }

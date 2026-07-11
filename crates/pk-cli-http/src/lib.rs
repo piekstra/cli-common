@@ -110,9 +110,15 @@ mod tests {
     #[test]
     fn url_resolution() {
         let a = args("GET", "/v1/x", None);
-        assert_eq!(a.url("https://api.example.com/"), "https://api.example.com/v1/x");
+        assert_eq!(
+            a.url("https://api.example.com/"),
+            "https://api.example.com/v1/x"
+        );
         let b = args("GET", "https://other.example.com/y", None);
-        assert_eq!(b.url("https://api.example.com"), "https://other.example.com/y");
+        assert_eq!(
+            b.url("https://api.example.com"),
+            "https://other.example.com/y"
+        );
     }
 
     #[test]

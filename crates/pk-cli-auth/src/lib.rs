@@ -86,10 +86,16 @@ impl AuthStatus {
             println!("Account:       {a}");
         }
         if let Some(k) = self.credential_in_keychain {
-            println!("Keychain:      {}", if k { "credential stored" } else { "empty" });
+            println!(
+                "Keychain:      {}",
+                if k { "credential stored" } else { "empty" }
+            );
         }
         if let Some(s) = self.session_valid {
-            println!("Session:       {}", if s { "valid" } else { "invalid/expired" });
+            println!(
+                "Session:       {}",
+                if s { "valid" } else { "invalid/expired" }
+            );
         }
         if let Some(e) = &self.expires_at {
             println!("Expires:       {e}");
