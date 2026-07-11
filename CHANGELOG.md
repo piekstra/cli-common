@@ -21,3 +21,7 @@ code from `fpl`/`xfin`.
 - `pk-cli-http`: family-default blocking client builder, `ApiArgs`
   passthrough, response→exit-code mapping.
 - `example-cli`: runnable template exercising the full surface.
+
+## v0.1.1 — 2026-07-11
+
+- pk-cli-core: optional `reqwest` feature adding `From<reqwest::Error> for CliError` (→ Upstream, exit 5).

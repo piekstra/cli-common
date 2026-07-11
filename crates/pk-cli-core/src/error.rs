@@ -75,6 +75,13 @@ impl fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
+#[cfg(feature = "reqwest")]
+impl From<reqwest::Error> for CliError {
+    fn from(e: reqwest::Error) -> Self {
+        CliError::Upstream(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
