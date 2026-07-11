@@ -25,3 +25,7 @@ code from `fpl`/`xfin`.
 ## v0.1.1 — 2026-07-11
 
 - pk-cli-core: optional `reqwest` feature adding `From<reqwest::Error> for CliError` (→ Upstream, exit 5).
+
+## v0.1.2 — 2026-07-11
+
+- pk-cli-selfupdate: `Updater` fields are owned `String`s; added `os_arch()` for `<os>-<arch>` release-asset naming.
