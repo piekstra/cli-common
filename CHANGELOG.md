@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.3 — 2026-07-11
+
+- `pk-cli-selfupdate`: on macOS, re-sign the downloaded binary with the stable
+  `pk-cli-codesign` identity before installing it, so a prior keychain "Always
+  Allow" grant keeps applying across self-updates (no re-prompt on a new
+  version). Best-effort — a silent no-op when the identity isn't present.
+
 ## v0.1.0 — 2026-07-11
 
 Initial release: SPEC v1 (`DESIGN.md`) and the first extraction of shared
