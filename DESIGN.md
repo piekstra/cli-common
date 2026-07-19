@@ -193,7 +193,7 @@ the ones the provider supports; spellings are canonical):
 <bin> payments list|methods         # payment-list/v1
 <bin> payments create --amount X [--date D] [--method M] [--force]
 <bin> pay quote|open                # hosted-page hand-off (no credential spend)
-<bin> usage list|stats              # usage-period-list/v1
+<bin> usage list                     # usage-period-list/v1
 <bin> transactions list             # transaction-list/v1 (full ledger)
 <bin> outages list                  # provider extras stay provider-shaped
 ```
