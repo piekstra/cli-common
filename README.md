@@ -11,7 +11,9 @@ way: same auth commands, same `--json` contract, same exit codes, same
 self-update.
 
 **[DESIGN.md](DESIGN.md)** is the specification (SPEC v1);
-**[conformance.md](conformance.md)** is the per-CLI checklist.
+**[conformance.md](conformance.md)** is the per-CLI checklist;
+**[PROFILES.md](PROFILES.md)** is the bar for adding domain profiles
+(when a domain boundary earns a `pk-cli-<domain>` crate).
 
 ## Crates
 
@@ -23,6 +25,7 @@ self-update.
 | `pk-cli-selfupdate` | `self-update [--check] [-y]` from GitHub Releases, `self-update/v1` DTO |
 | `pk-cli-auth` | `auth login/status/logout/set-credential` arg structs and the canonical `auth-status/v1` DTO |
 | `pk-cli-http` | blocking client builder with family defaults, raw `api` passthrough command |
+| `pk-cli-utility` | the `utility/v1` domain profile: `utility-summary/v1` + statement/payment/usage/transaction DTOs, `Paged` list envelope, `--limit/--since/--until` range flags |
 | `example-cli` | a runnable template wiring it all together — copy it to start a new family CLI |
 
 ## Consuming
@@ -45,7 +48,9 @@ Exit codes: `0` ok · `1` other · `2` usage · `3` auth · `4` not found ·
 
 `--json` on any command → the DTO alone on stdout; on failure,
 `{"error": {"code", "message"}}` plus the matching exit code. Canonical DTOs
-carry a `"schema"` tag: `auth-status/v1`, `self-update/v1`, `cli-info/v1`.
+carry a `"schema"` tag: `auth-status/v1`, `self-update/v1`, `cli-info/v1`,
+plus per-profile shapes (e.g. `utility-summary/v1`). A CLI declares its
+domain profiles in `info` (`"profiles": ["utility/v1"]`).
 
 ```console
 $ example-cli --json auth status

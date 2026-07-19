@@ -15,6 +15,10 @@ pub struct CliInfo {
     pub repo: String,
     pub auth: AuthInfo,
     pub capabilities: Vec<String>,
+    /// Domain profiles this CLI conforms to (SPEC v1.1 §1.8), e.g.
+    /// `utility/v1`. Additive: absent for CLIs that predate profiles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +46,14 @@ impl CliInfo {
             repo: repo.into(),
             auth,
             capabilities: capabilities.iter().map(|s| s.to_string()).collect(),
+            profiles: Vec::new(),
         }
+    }
+
+    /// Declare domain-profile conformance (e.g. `utility/v1`).
+    pub fn with_profiles(mut self, profiles: &[&str]) -> Self {
+        self.profiles = profiles.iter().map(|s| s.to_string()).collect();
+        self
     }
 }
 
@@ -68,5 +79,25 @@ mod tests {
         assert_eq!(v["spec"], "piekstra-cli/1");
         assert_eq!(v["capabilities"][1], "payments");
         assert!(v["auth"].get("login_hint").is_none());
+        // profiles is omitted entirely when empty (additive within v1)
+        assert!(v.get("profiles").is_none());
+    }
+
+    #[test]
+    fn info_declares_profiles() {
+        let info = CliInfo::new(
+            "demo",
+            "0.1.0",
+            "https://github.com/piekstra/demo",
+            AuthInfo {
+                required: true,
+                method: "password".into(),
+                login_hint: None,
+            },
+            &["summary", "bills"],
+        )
+        .with_profiles(&["utility/v1"]);
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["profiles"][0], "utility/v1");
     }
 }

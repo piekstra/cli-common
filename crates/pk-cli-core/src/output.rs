@@ -32,6 +32,9 @@ pub fn kv(obj: &Value, indent: usize) {
     if let Some(map) = obj.as_object() {
         for (k, val) in map {
             match val {
+                Value::Object(_) if as_money(val).is_some() => {
+                    println!("{pad}{k}: {}", scalar(val));
+                }
                 Value::Object(_) => {
                     println!("{pad}{k}:");
                     kv(val, indent + 2);
@@ -90,13 +93,32 @@ pub fn table(arr: &[Value]) {
     }
 }
 
-/// Render a JSON scalar without quotes; null renders empty.
+/// Render a JSON scalar without quotes; null renders empty. A `Money` object
+/// (`{"amount", "currency"}`) renders as `$12.34` / `12.34 EUR` so tables and
+/// blocks stay readable.
 pub fn scalar(v: &Value) -> String {
+    if let Some(money) = as_money(v) {
+        return money;
+    }
     match v {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+fn as_money(v: &Value) -> Option<String> {
+    let map = v.as_object()?;
+    if map.len() != 2 {
+        return None;
+    }
+    let amount = map.get("amount")?.as_str()?;
+    let currency = map.get("currency")?.as_str()?;
+    Some(if currency == "USD" {
+        format!("${amount}")
+    } else {
+        format!("{amount} {currency}")
+    })
 }
 
 /// Terminal error path: in `--json` mode emit the error DTO on stdout, always
@@ -120,5 +142,22 @@ mod tests {
         assert_eq!(scalar(&json!("hi")), "hi");
         assert_eq!(scalar(&json!(3)), "3");
         assert_eq!(scalar(&Value::Null), "");
+    }
+
+    #[test]
+    fn scalar_renders_money_objects() {
+        assert_eq!(
+            scalar(&json!({"amount": "42.00", "currency": "USD"})),
+            "$42.00"
+        );
+        assert_eq!(
+            scalar(&json!({"amount": "9.99", "currency": "EUR"})),
+            "9.99 EUR"
+        );
+        // not money: wrong keys or extra fields pass through untouched
+        assert_eq!(
+            scalar(&json!({"amount": "1.00", "kind": "fee"})),
+            r#"{"amount":"1.00","kind":"fee"}"#
+        );
     }
 }
