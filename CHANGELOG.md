@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2.0 — unreleased
+## v0.2.0 — 2026-07-19
 
 Domain profiles (SPEC v1.1 §1.8): an optional second layer over the surface
 spec — canonical spellings + shared DTOs per domain, declared via `info`.
