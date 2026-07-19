@@ -1,6 +1,7 @@
 //! Template family CLI (SPEC v1). Copy this crate to start a new one: it
 //! wires every pk-cli-* crate into the standard surface — `auth`, `config`,
-//! `self-update`, `completions`, `info` — with a stub domain command.
+//! `self-update`, `completions`, `info` — plus the utility/v1 domain profile
+//! (`summary`, `balance`, `bills list`) to show the shared DTOs in use.
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -10,6 +11,7 @@ use pk_cli_core::info::{AuthInfo, CliInfo};
 use pk_cli_core::{output, CliError, CommonArgs};
 use pk_cli_secrets::CredentialStore;
 use pk_cli_selfupdate::{SelfUpdateArgs, Updater};
+use pk_cli_utility::{Paged, RangeArgs, Statement, UtilitySummary};
 use serde::{Deserialize, Serialize};
 
 const BIN: &str = "example-cli";
@@ -34,8 +36,13 @@ enum Command {
     /// Non-secret settings.
     #[command(subcommand)]
     Config(ConfigCmd),
-    /// A stub domain read, to show the output contract.
+    /// Account overview: amount due and due date (utility-summary/v1).
+    Summary,
+    /// Same DTO as `summary` — the profile's second entry point.
     Balance,
+    /// Bills/statements (utility/v1 profile).
+    #[command(subcommand)]
+    Bills(BillsCmd),
     /// Update to the latest release from GitHub.
     SelfUpdate(SelfUpdateArgs),
     /// Print a shell completion script.
@@ -54,6 +61,13 @@ enum AuthCmd {
     Logout(LogoutArgs),
     /// Raw keychain write for rotation / headless setup.
     SetCredential(SetCredentialArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum BillsCmd {
+    /// List statements, newest first (statement-list/v1).
+    #[command(visible_alias = "ls")]
+    List(RangeArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -90,17 +104,32 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     match &cli.command {
         Command::Auth(cmd) => auth(cli, cmd, &store, &creds),
         Command::Config(cmd) => config(cli, cmd, &store),
-        Command::Balance => {
-            let dto = serde_json::json!({
-                "schema": "balance/v1",
-                "balance": pk_cli_core::Money::usd("42.00"),
-                "due_date": "2026-08-01",
-            });
-            if cli.common.json {
-                output::json(&dto);
-            } else {
-                output::render(&dto);
-            }
+        Command::Summary | Command::Balance => {
+            let mut dto = UtilitySummary::new(pk_cli_core::Money::usd("42.00"));
+            dto.due_date = Some("2026-08-01".into());
+            pk_cli_utility::emit(&dto, cli.common.json);
+            Ok(())
+        }
+        Command::Bills(BillsCmd::List(range)) => {
+            range.validate()?;
+            let statements = vec![
+                Statement {
+                    id: "2026-07".into(),
+                    date: Some("2026-07-15".into()),
+                    amount: pk_cli_core::Money::usd("42.00"),
+                    due_date: Some("2026-08-01".into()),
+                    paid: Some(false),
+                },
+                Statement {
+                    id: "2026-06".into(),
+                    date: Some("2026-06-15".into()),
+                    amount: pk_cli_core::Money::usd("39.75"),
+                    due_date: Some("2026-07-01".into()),
+                    paid: Some(true),
+                },
+            ];
+            let n = range.limit.unwrap_or(u32::MAX) as usize;
+            Paged::new("statement", statements.into_iter().take(n).collect()).emit(cli.common.json);
             Ok(())
         }
         Command::SelfUpdate(args) => Updater {
@@ -124,8 +153,9 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     method: "password".into(),
                     login_hint: Some(format!("{BIN} auth login")),
                 },
-                &["balance"],
-            );
+                &["summary", "balance", "bills"],
+            )
+            .with_profiles(&[pk_cli_utility::PROFILE]);
             output::json(&serde_json::to_value(&info).unwrap());
             Ok(())
         }

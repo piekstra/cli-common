@@ -7,11 +7,12 @@ members = [
     "crates/pk-cli-selfupdate",
     "crates/pk-cli-auth",
     "crates/pk-cli-http",
+    "crates/pk-cli-utility",
     "crates/example-cli",
 ]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
@@ -20,12 +21,13 @@ homepage = "https://github.com/piekstra/cli-common"
 authors = ["piekstra"]
 
 [workspace.dependencies]
-pk-cli-core = { path = "crates/pk-cli-core", version = "0.1.3" }
-pk-cli-secrets = { path = "crates/pk-cli-secrets", version = "0.1.3" }
-pk-cli-config = { path = "crates/pk-cli-config", version = "0.1.3" }
-pk-cli-selfupdate = { path = "crates/pk-cli-selfupdate", version = "0.1.3" }
-pk-cli-auth = { path = "crates/pk-cli-auth", version = "0.1.3" }
-pk-cli-http = { path = "crates/pk-cli-http", version = "0.1.3" }
+pk-cli-core = { path = "crates/pk-cli-core", version = "0.2.0" }
+pk-cli-secrets = { path = "crates/pk-cli-secrets", version = "0.2.0" }
+pk-cli-config = { path = "crates/pk-cli-config", version = "0.2.0" }
+pk-cli-selfupdate = { path = "crates/pk-cli-selfupdate", version = "0.2.0" }
+pk-cli-auth = { path = "crates/pk-cli-auth", version = "0.2.0" }
+pk-cli-http = { path = "crates/pk-cli-http", version = "0.2.0" }
+pk-cli-utility = { path = "crates/pk-cli-utility", version = "0.2.0" }
 
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }

@@ -21,6 +21,7 @@ pk-cli-config = { workspace = true }
 pk-cli-selfupdate = { workspace = true }
 pk-cli-auth = { workspace = true }
 pk-cli-http = { workspace = true }
+pk-cli-utility = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"
 serde = { workspace = true }

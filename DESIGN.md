@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -159,6 +159,55 @@ conventions alone; TOML manifests stay as the escape hatch for non-conforming CL
 - Public repos: no internal-employer names, no real account numbers/addresses in
   fixtures, docs, or git history.
 
+### 1.8 Domain profiles (v1.1)
+
+Part 1 above is the **surface** layer: every family CLI implements it, whatever
+its domain. A **domain profile** is an optional second layer: canonical command
+spellings + shared DTOs for one domain, so a driver can consume any CLI in that
+domain with zero per-provider configuration. Profiles are versioned
+independently of the spec (`utility/v1`) and declared in `info`:
+
+```json
+{ "schema": "cli-info/v1", ..., "profiles": ["utility/v1"] }
+```
+
+Rules that apply to every profile:
+
+- A profile owns **spellings and shapes**, never provider logic.
+- Profile DTOs follow §1.4 (schema tags, `Money`, ISO dates, snake_case).
+- Every profile `list` command emits the `Paged` envelope — records under
+  `items`, optional `next_cursor`/`total` — and takes the shared range flags
+  `--limit N`, `--since YYYY-MM-DD`, `--until YYYY-MM-DD` (`RangeArgs`).
+- When a profile earns a crate, and how to add one: see **[PROFILES.md](PROFILES.md)**.
+
+#### The `utility/v1` profile (crate `pk-cli-utility`)
+
+For account-portal CLIs (`fpl`, `tojfl`, `lrfl`, `xfin`). Commands (implement
+the ones the provider supports; spellings are canonical):
+
+```
+<bin> summary                       # utility-summary/v1 (balance + due date)
+<bin> balance                       # same DTO as summary — second entry point
+<bin> bills list|latest|get <ID>    # statement-list/v1 / statement/v1
+<bin> bills download <ID> -o <PATH> # statement PDF, where available
+<bin> payments list|methods         # payment-list/v1
+<bin> payments create --amount X [--date D] [--method M] [--force]
+<bin> pay quote|open                # hosted-page hand-off (no credential spend)
+<bin> usage list                     # usage-period-list/v1
+<bin> transactions list             # transaction-list/v1 (full ledger)
+<bin> outages list                  # provider extras stay provider-shaped
+```
+
+DTOs: `UtilitySummary` (`utility-summary/v1`), `Statement`, `Payment`,
+`UsagePeriod` (quantity + explicit unit — quantities are not money),
+`Transaction`, `Paged<T>`. `payments create` is the only real-money mutation
+and keeps §1.3's confirmation rules; `pay open` (portal hand-off) is the
+driver-safe alternative and drivers (utiman) only ever invoke the latter.
+
+With this profile, utiman's `[summary]`/`[[series]]` manifest sections
+(`balance-fields`, `scale = "cents"`, `items-path`) collapse to defaults:
+`summary --json` → `balance` + `due_date`, lists → `items`.
+
 ---
 
 ## Part 2 — The `cli-common` workspace
@@ -176,7 +225,7 @@ AGENTS.md, same house style as the CLIs.
 | `pk-cli-selfupdate` | GitHub-release check + in-place replace, `--check`/`-y`/`--json`, `self-update/v1` DTO, release-asset naming convention | ~580 duplicated lines across 4 repos |
 | `pk-cli-auth` | `AuthCmd` clap enum + driver trait: CLI supplies `verify()`/`login()`, crate supplies status DTO (`auth-status/v1`), logout, prompting rules | four auth command modules |
 | `pk-cli-http` | reqwest client builder (UA, cookie store, timeouts, retry-with-backoff), `api` passthrough command impl, error→exit-code-5 mapping | per-CLI `client.rs` boilerplate (session logic stays per-CLI) |
-| `pk-cli-dto` (later) | shared cross-provider DTOs: `Balance`, `Statement`, `Payment`, `UsagePeriod`, `Transaction`, `Paged<T>` — only once ≥2 CLIs want the same shape | — |
+| `pk-cli-utility` | the `utility/v1` domain profile (§1.8): `UtilitySummary`, `Statement`, `Payment`, `UsagePeriod`, `Transaction`, `Paged<T>`, `RangeArgs` | utiman's per-provider `balance-fields`/`scale`/`items-path` manifest hacks |
 
 Each crate is small and independent; a CLI adopts them piecemeal. Provider
 scraping/session logic (tojfl's DNN dance, xfin's browser-session replay) stays
