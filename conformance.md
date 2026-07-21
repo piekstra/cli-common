@@ -26,10 +26,10 @@ Drift notes are from the 2026-07-19 family audit.
 | example-cli | reference implementation (incl. `utility/v1` profile demo) |
 | lofty | conforms (cli-common v0.1.2) — `properties list` uses domain paging (`--page`/`--per-page`) |
 | discord | conforms (cli-common v0.1.2) — domain nouns flat-plural, no `list|get` verbs |
-| xfin | conforms (v0.2.0) — `set-credential` also kept top-level. Drift: pinned cli-common v0.1.2; **no `config` subcommand**; second auth surface `payments login|logout`; no `--limit` |
-| fpl | conforms (v0.2.0) — `init` kept alongside `auth login`. Drift: **no `config` subcommand**; three date formats in one binary (`usage hourly` is `MM-DD-YYYY`); no `--limit` |
-| lrfl | conforms (v0.2.0) — `config set-account` spelling retained; guest reads need no auth. Drift: hand-rolled `self-update` supports only `--check` (no `--yes`/`--json` — breaks driver probes); hidden legacy `login`/`logout`/`whoami` |
-| tojfl | conforms (v0.1.x) — SDK keychain service name unchanged; `config set/unset` pending. Drift: skips pk-cli-secrets/pk-cli-config; no `auth set-credential`; no `api` |
+| xfin | conforms (v0.7.0, cli-common v0.2.0) — gained `config path|show|set|unset`, `summary`/`balance` entry points, `--limit`/range flags on statements. Remaining: `set-credential` also top-level; second auth surface `payments login|logout` |
+| fpl | conforms (v0.3.0, cli-common v0.2.0) — gained `config path|show|set|unset` and range flags on lists. Remaining: `init` kept alongside `auth login`; `usage hourly` still `MM-DD-YYYY` |
+| lrfl | conforms (v0.6.0 pending — profile PR open) — shared `self-update` (fixes the `--check`-only probe break). Remaining: `config set-account` spelling; hidden legacy `login`/`logout`/`whoami` |
+| tojfl | conforms (v0.3.0, cli-common v0.2.0). Remaining: SDK keychain service name unchanged; skips pk-cli-secrets/pk-cli-config; no `auth set-credential`; no `api` |
 | gpm2op | conforms (v0.2.0) — no keychain (delegates to `op`); no `config`/`auth` commands (nothing to store) |
 | target-cli | planned — the credential-free template case (`auth status` with `required: false`) |
 | babylist-cli | planned |
@@ -43,4 +43,10 @@ Drift notes are from the 2026-07-19 family audit.
 | CLI | utility/v1 |
 |---|---|
 | example-cli | demo |
-| fpl, tojfl, lrfl, xfin | pending — adopt `pk-cli-utility` DTOs + canonical spellings, then declare via `info.profiles` |
+| tojfl | **adopted** (v0.3.0) — summary/balance → utility-summary/v1, bills/usage/transactions → Paged envelopes |
+| xfin | **adopted** (v0.7.0) — new summary/balance entry points, statements → Paged |
+| fpl | **adopted** (v0.3.0) — summary/accounts balance → utility-summary/v1, bills/payments/history → Paged |
+| lrfl | adopted, PR open (v0.6.0) — summary/balance + history → payment-list/v1 |
+
+Consumer: utiman parses the profile shapes from their schema tags with zero
+manifest field config (fast path + label-field chains, utiman #22/#26).
