@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.1 — 2026-07-30
+
+- `pk-cli-selfupdate`: private-repo support. When `GITHUB_TOKEN` (then
+  `GH_TOKEN`; first non-empty wins, no other source) is exported, the
+  `releases/latest` lookup is sent with `Authorization: Bearer <token>` and
+  assets are downloaded through the GitHub API asset endpoint
+  (`/repos/{repo}/releases/assets/{id}` with `Accept:
+  application/octet-stream`) instead of `browser_download_url`, which does
+  not accept a bare token. With no token, behavior is unchanged (public
+  repos unaffected). A 404 on `releases/latest` without a token now
+  mentions that the repo may be private, in addition to "no releases yet".
+  schwopts (`piekstra/schwab-options-cli`) is the first private family CLI
+  to need this.
+
 ## v0.2.0 — 2026-07-19
 
 Domain profiles (SPEC v1.1 §1.8): an optional second layer over the surface

@@ -9,6 +9,18 @@
 //! // build.rs
 //! println!("cargo:rustc-env=BUILD_TARGET={}", std::env::var("TARGET").unwrap());
 //! ```
+//!
+//! ## Private repos
+//!
+//! Public repos need nothing extra. For a private repo, export a GitHub
+//! token before running `self-update` — `GITHUB_TOKEN` is checked first,
+//! then `GH_TOKEN` (first non-empty wins; this crate never reads a token
+//! from anywhere else — no keychain, no shelling out to `gh` — to stay
+//! dependency-light and side-effect-free). With a token set, the release
+//! lookup is authenticated and assets are downloaded through the GitHub API
+//! asset endpoint (the only way to fetch a private release's assets); with
+//! no token, behavior is unchanged from a public-repo check. The token is
+//! never logged.
 
 use std::io::Read;
 use std::time::Duration;
@@ -48,6 +60,44 @@ pub struct Updater {
 /// named that way instead of with a full target triple.
 pub fn os_arch() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// Discover a GitHub token for authenticated API calls: `GITHUB_TOKEN` first,
+/// then `GH_TOKEN`; empty values are skipped. No other sources — no
+/// keychain, no `gh` invocation — so this crate stays dependency-light and
+/// side-effect-free. `None` means "no token", which keeps every call
+/// unauthenticated and byte-identical to a public-repo check. Never logged.
+fn github_token() -> Option<String> {
+    github_token_from(|key| std::env::var(key).ok())
+}
+
+/// Pure precedence logic behind [`github_token`], parameterized over the
+/// lookup so tests exercise it without touching the real environment.
+fn github_token_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    ["GITHUB_TOKEN", "GH_TOKEN"]
+        .into_iter()
+        .find_map(|key| lookup(key).filter(|v| !v.is_empty()))
+}
+
+/// The GitHub API asset-download endpoint for asset `id` in `repo` — the
+/// only URL that works for a private repo's release assets (a bare token
+/// against `browser_download_url` does not).
+fn asset_api_url(repo: &str, id: i64) -> String {
+    format!("https://api.github.com/repos/{repo}/releases/assets/{id}")
+}
+
+/// The message for a 404 on `releases/latest`. With a token, 404 plainly
+/// means no releases. Without one, it could also mean the repo is private
+/// (GitHub 404s rather than 401/403 on private-repo release lookups to
+/// unauthenticated callers), so the message names both possibilities.
+fn no_releases_message(repo: &str, has_token: bool) -> String {
+    if has_token {
+        format!("no published releases for {repo} yet — build from source")
+    } else {
+        format!(
+            "no published releases for {repo} yet — build from source (or the repo is private — export GITHUB_TOKEN to check private repos)"
+        )
+    }
 }
 
 pub struct UpdateCheck {
@@ -106,13 +156,17 @@ impl Updater {
     /// Download the release asset for this platform and atomically replace
     /// the running binary.
     pub fn install(&self, check: &UpdateCheck) -> Result<(), CliError> {
-        let asset_url = self.asset_download_url(&check.release).ok_or_else(|| {
-            CliError::NotFound(format!(
-                "release v{} has no `{}-{}.tar.gz` asset",
-                check.latest, self.binary, self.target
-            ))
-        })?;
-        let archive = self.download(&asset_url)?;
+        let token = github_token();
+        let url = self
+            .find_asset(&check.release)
+            .and_then(|asset| self.asset_target(asset, token.as_deref()))
+            .ok_or_else(|| {
+                CliError::NotFound(format!(
+                    "release v{} has no `{}-{}.tar.gz` asset",
+                    check.latest, self.binary, self.target
+                ))
+            })?;
+        let archive = self.download(&url, token.as_deref())?;
         let binary = self.extract_binary(&archive)?;
         replace_self(&self.binary, &binary)
     }
@@ -161,17 +215,20 @@ impl Updater {
     }
 
     fn latest_release(&self) -> Result<Value, CliError> {
+        let token = github_token();
         let url = format!("https://api.github.com/repos/{}/releases/latest", self.repo);
-        let resp = self
+        let mut req = self
             .http()?
             .get(&url)
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .map_err(|e| CliError::Upstream(e.to_string()))?;
+            .header("Accept", "application/vnd.github+json");
+        if let Some(t) = &token {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+        let resp = req.send().map_err(|e| CliError::Upstream(e.to_string()))?;
         if resp.status().as_u16() == 404 {
-            return Err(CliError::NotFound(format!(
-                "no published releases for {} yet — build from source",
-                self.repo
+            return Err(CliError::NotFound(no_releases_message(
+                &self.repo,
+                token.is_some(),
             )));
         }
         if !resp.status().is_success() {
@@ -184,7 +241,9 @@ impl Updater {
             .map_err(|e| CliError::Other(format!("parsing GitHub release JSON: {e}")))
     }
 
-    fn asset_download_url(&self, release: &Value) -> Option<String> {
+    /// Find this platform's release asset (the `.tar.gz` whose name contains
+    /// `self.target`) in a `releases/latest` (or single-release) JSON payload.
+    fn find_asset<'a>(&self, release: &'a Value) -> Option<&'a Value> {
         release
             .get("assets")
             .and_then(|a| a.as_array())?
@@ -195,17 +254,46 @@ impl Updater {
                     .map(|n| n.contains(self.target.as_str()) && n.ends_with(".tar.gz"))
                     .unwrap_or(false)
             })
-            .and_then(|a| a.get("browser_download_url"))
-            .and_then(|u| u.as_str())
-            .map(String::from)
     }
 
-    fn download(&self, url: &str) -> Result<Vec<u8>, CliError> {
-        let resp = self
-            .http()?
-            .get(url)
-            .send()
-            .map_err(|e| CliError::Upstream(e.to_string()))?;
+    /// Where to fetch an asset's bytes from, given the current auth state.
+    ///
+    /// With a token: the GitHub API asset endpoint (`asset_api_url`), which
+    /// works for private repos and requires `Accept: application/octet-stream`
+    /// plus the `Authorization` header (added in [`Updater::download`]).
+    /// Without one: the plain `browser_download_url` — unauthenticated,
+    /// exactly as before private-repo support existed, so public-repo
+    /// behavior is unchanged.
+    fn asset_target(&self, asset: &Value, token: Option<&str>) -> Option<String> {
+        if token.is_some() {
+            let id = asset.get("id").and_then(|v| v.as_i64())?;
+            Some(asset_api_url(&self.repo, id))
+        } else {
+            asset
+                .get("browser_download_url")
+                .and_then(|u| u.as_str())
+                .map(String::from)
+        }
+    }
+
+    /// Fetch asset bytes from `url`. When `token` is `Some`, `url` is
+    /// expected to be the API asset endpoint: sends `Accept:
+    /// application/octet-stream` and `Authorization: Bearer <token>`.
+    /// GitHub's asset endpoint responds with a redirect to a different host
+    /// (its blob storage); reqwest's default redirect policy strips
+    /// `Authorization` (and `Cookie`/`Proxy-Authorization`) on any cross-host
+    /// hop (see `reqwest::redirect::remove_sensitive_headers`), so the token
+    /// is never forwarded past api.github.com. When `token` is `None`, this
+    /// sends a bare `GET` with no extra headers — byte-identical to the
+    /// pre-private-repo-support request.
+    fn download(&self, url: &str, token: Option<&str>) -> Result<Vec<u8>, CliError> {
+        let mut req = self.http()?.get(url);
+        if let Some(t) = token {
+            req = req
+                .header("Accept", "application/octet-stream")
+                .header("Authorization", format!("Bearer {t}"));
+        }
+        let resp = req.send().map_err(|e| CliError::Upstream(e.to_string()))?;
         if !resp.status().is_success() {
             return Err(CliError::Upstream(format!(
                 "download failed: HTTP {}",
@@ -347,5 +435,139 @@ mod tests {
         assert_eq!(v["schema"], "self-update/v1");
         assert_eq!(v["update_available"], true);
         assert_eq!(v["current"], "0.1.0");
+    }
+
+    // -- token discovery ---------------------------------------------------
+    // Exercised through `github_token_from`'s injected lookup so these never
+    // read or write the real process environment (no flakiness from a dev
+    // shell or CI runner that happens to already export GITHUB_TOKEN).
+
+    #[test]
+    fn token_discovery_prefers_github_token_over_gh_token() {
+        let lookup = |key: &str| match key {
+            "GITHUB_TOKEN" => Some("primary".to_string()),
+            "GH_TOKEN" => Some("fallback".to_string()),
+            _ => None,
+        };
+        assert_eq!(github_token_from(lookup).as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn token_discovery_falls_back_to_gh_token() {
+        let lookup = |key: &str| match key {
+            "GH_TOKEN" => Some("fallback".to_string()),
+            _ => None,
+        };
+        assert_eq!(github_token_from(lookup).as_deref(), Some("fallback"));
+    }
+
+    #[test]
+    fn token_discovery_ignores_empty_values() {
+        // Empty GITHUB_TOKEN is skipped in favor of a non-empty GH_TOKEN.
+        let lookup = |key: &str| match key {
+            "GITHUB_TOKEN" => Some(String::new()),
+            "GH_TOKEN" => Some("fallback".to_string()),
+            _ => None,
+        };
+        assert_eq!(github_token_from(lookup).as_deref(), Some("fallback"));
+
+        // All-empty-or-unset yields no token, not `Some("")`.
+        let all_empty = |key: &str| match key {
+            "GITHUB_TOKEN" => Some(String::new()),
+            "GH_TOKEN" => Some(String::new()),
+            _ => None,
+        };
+        assert_eq!(github_token_from(all_empty), None);
+    }
+
+    #[test]
+    fn token_discovery_none_when_unset() {
+        assert_eq!(github_token_from(|_| None), None);
+    }
+
+    // -- asset endpoint + error messaging -----------------------------------
+
+    #[test]
+    fn asset_api_url_construction() {
+        assert_eq!(
+            asset_api_url("piekstra/schwab-options-cli", 123456789),
+            "https://api.github.com/repos/piekstra/schwab-options-cli/releases/assets/123456789"
+        );
+    }
+
+    #[test]
+    fn no_releases_message_mentions_private_repo_only_without_token() {
+        let without_token = no_releases_message("piekstra/schwab-options-cli", false);
+        assert!(without_token.contains("no published releases"));
+        assert!(without_token.contains("private"));
+        assert!(without_token.contains("GITHUB_TOKEN"));
+
+        let with_token = no_releases_message("piekstra/schwab-options-cli", true);
+        assert!(with_token.contains("no published releases"));
+        assert!(!with_token.contains("private"));
+        assert!(!with_token.contains("GITHUB_TOKEN"));
+    }
+
+    // -- asset resolution ----------------------------------------------------
+
+    fn sample_release() -> Value {
+        json!({
+            "tag_name": "v0.1.0",
+            "html_url": "https://github.com/piekstra/schwab-options-cli/releases/tag/v0.1.0",
+            "assets": [
+                {
+                    "id": 111,
+                    "name": "schwopts-aarch64-apple-darwin.tar.gz",
+                    "browser_download_url": "https://github.com/piekstra/schwab-options-cli/releases/download/v0.1.0/schwopts-aarch64-apple-darwin.tar.gz"
+                },
+                {
+                    "id": 222,
+                    "name": "schwopts-x86_64-apple-darwin.tar.gz",
+                    "browser_download_url": "https://github.com/piekstra/schwab-options-cli/releases/download/v0.1.0/schwopts-x86_64-apple-darwin.tar.gz"
+                }
+            ]
+        })
+    }
+
+    fn sample_updater(target: &str) -> Updater {
+        Updater {
+            repo: "piekstra/schwab-options-cli".into(),
+            binary: "schwopts".into(),
+            target: target.into(),
+            current: "0.1.0".into(),
+        }
+    }
+
+    #[test]
+    fn asset_target_uses_browser_url_without_token() {
+        let updater = sample_updater("aarch64-apple-darwin");
+        let release = sample_release();
+        let asset = updater.find_asset(&release).expect("asset found");
+        let url = updater.asset_target(asset, None).expect("url");
+        assert_eq!(
+            url,
+            "https://github.com/piekstra/schwab-options-cli/releases/download/v0.1.0/schwopts-aarch64-apple-darwin.tar.gz"
+        );
+    }
+
+    #[test]
+    fn asset_target_uses_api_endpoint_with_token() {
+        let updater = sample_updater("x86_64-apple-darwin");
+        let release = sample_release();
+        let asset = updater.find_asset(&release).expect("asset found");
+        let url = updater
+            .asset_target(asset, Some("secret-token"))
+            .expect("url");
+        assert_eq!(
+            url,
+            "https://api.github.com/repos/piekstra/schwab-options-cli/releases/assets/222"
+        );
+    }
+
+    #[test]
+    fn find_asset_none_when_no_match() {
+        let updater = sample_updater("windows-x86_64");
+        let release = sample_release();
+        assert!(updater.find_asset(&release).is_none());
     }
 }
