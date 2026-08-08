@@ -8,6 +8,7 @@ members = [
     "crates/pk-cli-auth",
     "crates/pk-cli-http",
     "crates/pk-cli-utility",
+    "crates/pk-cli-scrape",
     "crates/example-cli",
 ]
 
@@ -28,10 +29,17 @@ pk-cli-selfupdate = { path = "crates/pk-cli-selfupdate", version = "0.2.1" }
 pk-cli-auth = { path = "crates/pk-cli-auth", version = "0.2.1" }
 pk-cli-http = { path = "crates/pk-cli-http", version = "0.2.1" }
 pk-cli-utility = { path = "crates/pk-cli-utility", version = "0.2.1" }
+pk-cli-scrape = { path = "crates/pk-cli-scrape", version = "0.2.1" }
 
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order makes object key order insertion order rather than
+# alphabetical. `output::table_view` exists to choose and order table columns,
+# and `output::kv` renders DTO fields in the order the code builds them — both
+# contracts are only real with this on. Cargo features are additive, so setting
+# it here gives every consumer the same documented behaviour instead of leaving
+# it to whether each CLI happens to enable the flag itself.
+serde_json = { version = "1", features = ["preserve_order"] }
 rpassword = "7"
 zeroize = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "cookies", "rustls-tls"] }
