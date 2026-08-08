@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+Bearer-token support. `cpmfl`
+(`piekstra/campbell-property-management-hoa-cli`, a Vantaca HOA portal) is the
+first family CLI whose session is a JWT rather than a cookie, and both
+additions below came out of building it — each was written once privately and
+is generic enough that the next token-auth CLI shouldn't rewrite it.
+
+- **`pk-cli-auth::token`** — read the claims of a cached bearer token so a CLI
+  can answer "is this session still usable?" without spending a request:
+  `claims`, `numeric_claim`, `expiry`, `expires_at` (RFC 3339, ready for
+  `auth-status/v1`'s existing but until-now unpopulated `expires_at` field),
+  and `is_expired(token, now, skew)`. Verifies **nothing** — no signature,
+  issuer, or audience check; a CLI is the bearer, not the validator, and the
+  server stays the only authority. Accordingly, a token whose claims can't be
+  read is reported as *not* expired, so an unfamiliar shape still reaches the
+  server rather than locking a user out of a good session. The clock skew is a
+  caller argument rather than a house rule; `DEFAULT_SKEW_SECS` (60) is offered
+  as a starting point.
+- **`pk-cli-core`: `Money::from_cents`** — build `Money` from minor units with
+  integer arithmetic (no float touches the value). Providers that report an
+  integer number of cents are common, and some mix scales across endpoints —
+  the same transaction arriving as `25000` from one and `250.00` from another —
+  where an open-coded `/100` is a silent 100× error waiting to happen.
+- **`pk-cli-core::dates`: `fmt_rfc3339` and `civil_from_unix`** — a Unix
+  timestamp as RFC 3339 UTC, reusing the existing Hinnant conversion so the
+  family still needs no calendar crate. Correct for pre-epoch timestamps.
+
 ## v0.2.1 — 2026-07-30
 
 - `pk-cli-selfupdate`: private-repo support. When `GITHUB_TOKEN` (then
