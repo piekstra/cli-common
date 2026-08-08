@@ -3,6 +3,8 @@
 //! rendering for status. Each CLI supplies its own credential verification;
 //! this crate owns the shapes so drivers can treat every CLI identically.
 
+pub mod reauth;
+
 use pk_cli_core::output;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

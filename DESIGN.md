@@ -226,6 +226,7 @@ AGENTS.md, same house style as the CLIs.
 | `pk-cli-auth` | `AuthCmd` clap enum + driver trait: CLI supplies `verify()`/`login()`, crate supplies status DTO (`auth-status/v1`), logout, prompting rules | four auth command modules |
 | `pk-cli-http` | reqwest client builder (UA, cookie store, timeouts, retry-with-backoff), `api` passthrough command impl, error→exit-code-5 mapping | per-CLI `client.rs` boilerplate (session logic stays per-CLI) |
 | `pk-cli-utility` | the `utility/v1` domain profile (§1.8): `UtilitySummary`, `Statement`, `Payment`, `UsagePeriod`, `Transaction`, `Paged<T>`, `RangeArgs` | utiman's per-provider `balance-fields`/`scale`/`items-path` manifest hacks |
+| `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages: elements, attributes, table rows/cells, entity decoding — all total, never panicking | a DOM-parser dependency, and the ad-hoc `str::find` scraping each portal CLI grows on its own |
 
 Each crate is small and independent; a CLI adopts them piecemeal. Provider
 scraping/session logic (tojfl's DNN dance, xfin's browser-session replay) stays
