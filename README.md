@@ -23,7 +23,7 @@ self-update.
 | `pk-cli-secrets` | redacting `Secret` type, OS-keychain `CredentialStore` (`piekstra.<bin>`), `--stdin`/`--from-env` ingestion (secrets never on argv) |
 | `pk-cli-config` | non-secret JSON config at `~/.config/<bin>/config.json` |
 | `pk-cli-selfupdate` | `self-update [--check] [-y]` from GitHub Releases, `self-update/v1` DTO |
-| `pk-cli-auth` | `auth login/status/logout/set-credential` arg structs and the canonical `auth-status/v1` DTO |
+| `pk-cli-auth` | `auth login/status/logout/set-credential` arg structs, the canonical `auth-status/v1` DTO, and `token` (bearer-token claim reads: expiry, `expires_at`) |
 | `pk-cli-http` | blocking client builder with family defaults, raw `api` passthrough command |
 | `pk-cli-utility` | the `utility/v1` domain profile: `utility-summary/v1` + statement/payment/usage/transaction DTOs, `Paged` list envelope, `--limit/--since/--until` range flags |
 | `example-cli` | a runnable template wiring it all together — copy it to start a new family CLI |
