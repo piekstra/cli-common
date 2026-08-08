@@ -26,6 +26,7 @@ self-update.
 | `pk-cli-auth` | `auth login/status/logout/set-credential` arg structs, the canonical `auth-status/v1` DTO, and `token` (bearer-token claim reads: expiry, `expires_at`) |
 | `pk-cli-http` | blocking client builder with family defaults, raw `api` passthrough command |
 | `pk-cli-utility` | the `utility/v1` domain profile: `utility-summary/v1` + statement/payment/usage/transaction DTOs, `Paged` list envelope, `--limit/--since/--until` range flags |
+| `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages rather than JSON |
 | `example-cli` | a runnable template wiring it all together — copy it to start a new family CLI |
 
 ## Consuming
