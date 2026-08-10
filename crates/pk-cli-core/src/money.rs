@@ -21,6 +21,29 @@ impl Money {
         }
     }
 
+    /// Build from **minor units** (US cents, pence, …).
+    ///
+    /// Plenty of provider APIs report money as an integer number of minor
+    /// units, and some mix the two scales across endpoints — the same
+    /// transaction arriving as `25000` from one and `250.00` from another.
+    /// Doing the conversion by hand invites a silent 100× error, so it lives
+    /// here with the rest of the money handling. Integer arithmetic
+    /// throughout: no float ever touches the value.
+    ///
+    /// ```
+    /// # use pk_cli_core::Money;
+    /// assert_eq!(Money::from_cents(25_000).amount, "250.00");
+    /// assert_eq!(Money::from_cents(-5).amount, "-0.05");
+    /// ```
+    pub fn from_cents(cents: i64) -> Self {
+        Money::usd(format!(
+            "{}{}.{:02}",
+            if cents < 0 { "-" } else { "" },
+            (cents / 100).abs(),
+            (cents % 100).abs()
+        ))
+    }
+
     /// Parse a provider-formatted amount like `$1,234.50`, `1234.5`, or
     /// `(12.34)` (accounting negative) into a normalized two-decimal string.
     pub fn parse_usd(raw: &str) -> Option<Self> {
@@ -70,6 +93,37 @@ mod tests {
         assert_eq!(Money::parse_usd("-3").unwrap().amount, "-3.00");
         assert!(Money::parse_usd("").is_none());
         assert!(Money::parse_usd("n/a").is_none());
+    }
+
+    #[test]
+    fn builds_from_minor_units() {
+        assert_eq!(Money::from_cents(25_000).amount, "250.00");
+        assert_eq!(Money::from_cents(250).amount, "2.50");
+        assert_eq!(Money::from_cents(0).amount, "0.00");
+        assert_eq!(Money::from_cents(5).amount, "0.05");
+        assert_eq!(Money::from_cents(-25_000).amount, "-250.00");
+        // The sign must survive a magnitude below one unit, where `cents / 100`
+        // truncates to zero and would otherwise lose it.
+        assert_eq!(Money::from_cents(-5).amount, "-0.05");
+        assert_eq!(Money::from_cents(i64::MAX).currency, "USD");
+    }
+
+    /// The two constructors must agree, since a provider may report the same
+    /// amount either way and a CLI can end up calling both.
+    #[test]
+    fn minor_units_agree_with_parsed_decimals() {
+        for (cents, decimal) in [
+            (25_000, "250.00"),
+            (250, "2.50"),
+            (-1_234, "-12.34"),
+            (99, "0.99"),
+        ] {
+            assert_eq!(
+                Money::from_cents(cents),
+                Money::parse_usd(decimal).expect("parses"),
+                "{cents} cents should equal {decimal}"
+            );
+        }
     }
 
     #[test]

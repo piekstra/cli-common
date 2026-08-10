@@ -37,6 +37,27 @@ pub fn today() -> Civil {
     civil_from_days(epoch_days())
 }
 
+/// The civil date a Unix timestamp falls on, in UTC.
+pub fn civil_from_unix(secs: i64) -> Civil {
+    civil_from_days(secs.div_euclid(86_400))
+}
+
+/// A Unix timestamp as RFC 3339 UTC (`2026-08-07T21:04:05Z`).
+///
+/// The format `auth-status/v1` specifies for `expires_at`, so a CLI whose
+/// session carries a known lifetime — a bearer token with an `exp` claim, say
+/// — can report it without pulling in a calendar crate.
+pub fn fmt_rfc3339(secs: i64) -> String {
+    let (y, m, d) = civil_from_unix(secs);
+    let time = secs.rem_euclid(86_400);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        time / 3600,
+        (time % 3600) / 60,
+        time % 60
+    )
+}
+
 pub fn yesterday() -> Civil {
     civil_from_days(epoch_days() - 1)
 }
@@ -88,6 +109,23 @@ mod tests {
         assert_eq!(fmt_iso((2024, 3, 5)), "2024-03-05");
         assert_eq!(fmt_mm_dd_yyyy((2024, 3, 5)), "03-05-2024");
         assert_eq!(fmt_mm_slash_dd_yyyy((2024, 3, 5)), "03/05/2024");
+    }
+
+    #[test]
+    fn rfc3339_round_numbers() {
+        assert_eq!(fmt_rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(fmt_rfc3339(1_700_000_000), "2023-11-14T22:13:20Z");
+        // Last second of a day, then the first of the next.
+        assert_eq!(fmt_rfc3339(86_399), "1970-01-01T23:59:59Z");
+        assert_eq!(fmt_rfc3339(86_400), "1970-01-02T00:00:00Z");
+    }
+
+    /// Pre-epoch timestamps must not wrap into a negative clock time —
+    /// `rem_euclid` rather than `%` is what keeps this right.
+    #[test]
+    fn rfc3339_handles_pre_epoch() {
+        assert_eq!(fmt_rfc3339(-1), "1969-12-31T23:59:59Z");
+        assert_eq!(civil_from_unix(-1), (1969, 12, 31));
     }
 
     #[test]
