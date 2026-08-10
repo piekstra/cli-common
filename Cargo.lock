@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "example-cli"
-version = "0.3.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-auth"
-version = "0.3.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "pk-cli-core",
@@ -1316,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-config"
-version = "0.3.0"
+version = "0.2.1"
 dependencies = [
  "pk-cli-core",
  "serde",
@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-core"
-version = "0.3.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "reqwest",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-http"
-version = "0.3.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "pk-cli-core",
@@ -1345,11 +1345,11 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-scrape"
-version = "0.3.0"
+version = "0.2.1"
 
 [[package]]
 name = "pk-cli-secrets"
-version = "0.3.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "keyring",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-selfupdate"
-version = "0.3.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "flate2",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-utility"
-version = "0.3.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "pk-cli-core",

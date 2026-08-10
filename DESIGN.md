@@ -96,6 +96,13 @@ Stdout = data only; progress/confirmation/diagnostics = stderr.
   RFC 3339); money as `{"amount": "123.45", "currency": "USD"}` (string
   decimal — never floats); omit unknown fields rather than emitting null noise.
 - Each top-level DTO carries `"schema": "<name>/v1"` so consumers can detect shape changes.
+- **Field and column order is insertion order** — the order the code builds the
+  DTO, not alphabetical. `output::table_view` chooses and orders table columns,
+  `output::kv` renders fields in build order, and the workspace enables
+  `serde_json`'s `preserve_order` so both hold for every consumer. Lead with the
+  identifying fields. This binds rendered text and JSON key order only: JSON
+  objects are unordered by definition, so it never affects a conforming
+  consumer's ability to read a field.
 
 **Canonical `auth status --json` (schema `auth-status/v1`):**
 ```json
