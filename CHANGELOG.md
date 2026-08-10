@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 — 2026-08-10
 
 Bearer-token support. `cpmfl`
 (`piekstra/campbell-property-management-hoa-cli`, a Vantaca HOA portal) is the
