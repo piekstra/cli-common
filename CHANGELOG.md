@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 — 2026-08-10
 
 Scraped-portal support. `wabhoa` (`piekstra/westernalliancebank-hoa-cli`, a
 Western Alliance Bank HOA assessment portal) is the first family CLI whose
