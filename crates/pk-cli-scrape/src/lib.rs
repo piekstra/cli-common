@@ -233,6 +233,10 @@ pub fn strip_tags(html: &str) -> String {
         .join(" ")
 }
 
+/// How far past an `&` to look for the closing `;`. The longest entity this
+/// decodes is `&#NNNNNN;`, so a dozen bytes is generous.
+const ENTITY_SCAN_BYTES: usize = 12;
+
 /// Decode the entities that appear in practice in provider markup.
 pub fn decode_entities(s: &str) -> String {
     if !s.contains('&') {
@@ -243,7 +247,15 @@ pub fn decode_entities(s: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
-        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+        // Scan by char, not by byte: an entity is short, but the text after
+        // `&` is arbitrary provider content, and slicing to a fixed byte
+        // offset panics when a multi-byte character straddles it.
+        let semi = rest
+            .char_indices()
+            .take_while(|(i, _)| *i < ENTITY_SCAN_BYTES)
+            .find(|(_, c)| *c == ';')
+            .map(|(i, _)| i);
+        let Some(semi) = semi else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -422,6 +434,37 @@ mod tests {
             "Dear Caleb, Hi"
         );
         assert_eq!(strip_tags(""), "");
+    }
+
+    /// The crate promises totality, and the byte-slicing lookahead in
+    /// `decode_entities` broke it: a multi-byte character straddling the scan
+    /// cap panicked with "not a char boundary". Provider pages carry accented
+    /// names and addresses, so this is ordinary input, not a fuzz case.
+    #[test]
+    fn multibyte_text_near_an_ampersand_does_not_panic() {
+        // `&` + 10 ASCII digits puts `é` across the 12-byte cap exactly.
+        assert_eq!(decode_entities("&0123456789\u{e9};"), "&0123456789\u{e9};");
+        // A multi-byte char at every offset around the cap.
+        for pad in 0..16 {
+            let s = format!("&{}\u{e9};x", "0".repeat(pad));
+            let _ = decode_entities(&s);
+            let _ = strip_tags(&s);
+        }
+        // Real-world shapes: an accented name beside a literal ampersand.
+        assert_eq!(decode_entities("Ren\u{e9} & Co"), "Ren\u{e9} & Co");
+        assert_eq!(decode_entities("caf\u{e9}&amp;bar"), "caf\u{e9}&bar");
+        // Multi-byte inside what looks like an entity.
+        assert_eq!(decode_entities("&\u{4e2d}\u{6587};"), "&\u{4e2d}\u{6587};");
+    }
+
+    /// A well-formed entity must still decode when multi-byte text surrounds
+    /// it — the fix must not narrow the scan so far that real entities miss.
+    #[test]
+    fn entities_still_decode_amid_multibyte_text() {
+        assert_eq!(decode_entities("\u{e9}&nbsp;\u{e9}"), "\u{e9} \u{e9}");
+        assert_eq!(decode_entities("&#160;\u{4e2d}"), " \u{4e2d}");
+        // The longest form this decodes, unaffected by the cap.
+        assert_eq!(decode_entities("&#128512;"), "\u{1f600}");
     }
 
     #[test]
