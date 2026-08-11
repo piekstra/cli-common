@@ -23,14 +23,28 @@ keychain ACL grants stable by signing with the `pk-cli-codesign` identity. The
 identity lives only in the owner's login keychain — never commit or distribute
 it.
 
-**Sign installed binaries too, not just dev builds.** `cargo install` ad-hoc
-signs, which gives the binary a *new* code identity on every install. macOS
-scopes keychain "Always Allow" grants to that identity, so an unsigned
-reinstall silently revokes the grant and the next run prompts again — which
-reads as a flaky keychain rather than a signing problem. Consuming CLIs should
-wire the same step into `make install`:
+**Sign every target that produces a binary.** `cargo build` and
+`cargo install` both ad-hoc sign, giving the binary a *new* code identity each
+time. macOS scopes keychain "Always Allow" grants to that identity, so any
+unsigned rebuild silently revokes the grant and the next run prompts again —
+which reads as a flaky keychain rather than a signing problem.
+
+Signing only `install` and `dev` is not enough: the binary most often run
+during development is `./target/release/<bin>`, produced by `release` and by
+`verify` through `smoke`. Miss it and the prompts do not stop, they just move.
+Wire the same step into `build`, `release`, `install`, and `dev`:
 
 ```make
+build: SIGN_TARGET = target/debug/$(BIN)
+build:
+	$(CARGO) build
+	@$(SIGN)
+
+release: SIGN_TARGET = target/release/$(BIN)
+release:
+	$(CARGO) build --release
+	@$(SIGN)
+
 install: SIGN_TARGET = $${CARGO_INSTALL_ROOT:-$$HOME/.cargo}/bin/$(BIN)
 install:
 	$(CARGO) install --path . --force
