@@ -19,13 +19,14 @@ self-update.
 
 | Crate | What it gives a CLI |
 |---|---|
-| `pk-cli-core` | error type + stable exit codes (0–6), `--json`/text output renderer, common global flags, date & `Money` helpers, `cli-info/v1` DTO |
+| `pk-cli-core` | error type + stable exit codes (0–6), `--json`/text output renderer, common global flags, date & `Money` helpers, `cli-info/v1` DTO, shared list primitives (`Paged` envelope + `--limit/--since/--until` range flags) |
 | `pk-cli-secrets` | redacting `Secret` type, OS-keychain `CredentialStore` (`piekstra.<bin>`), `--stdin`/`--from-env` ingestion (secrets never on argv) |
 | `pk-cli-config` | non-secret JSON config at `~/.config/<bin>/config.json` |
 | `pk-cli-selfupdate` | `self-update [--check] [-y]` from GitHub Releases, `self-update/v1` DTO |
 | `pk-cli-auth` | `auth login/status/logout/set-credential` arg structs, the canonical `auth-status/v1` DTO, `token` (bearer-token claim reads: expiry, `expires_at`), and `reauth::with_reauth` (retry a read once after re-authenticating, with the retry-once/no-login-storm rails) |
 | `pk-cli-http` | blocking client builder with family defaults, raw `api` passthrough command |
-| `pk-cli-utility` | the `utility/v1` domain profile: `utility-summary/v1` + statement/payment/usage/transaction DTOs, `Paged` list envelope, `--limit/--since/--until` range flags |
+| `pk-cli-utility` | the `utility/v1` domain profile: `utility-summary/v1` + statement/payment/usage/transaction DTOs |
+| `pk-cli-documents` | the `documents/v1` domain profile: list & download a portal's published files (`document-list/v1`, `document-download/v1`, …) |
 | `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages rather than JSON |
 | `example-cli` | a runnable template wiring it all together — copy it to start a new family CLI |
 

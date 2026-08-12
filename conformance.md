@@ -50,3 +50,18 @@ Drift notes are from the 2026-07-19 family audit.
 
 Consumer: utiman parses the profile shapes from their schema tags with zero
 manifest field config (fast path + label-field chains, utiman #22/#26).
+
+| CLI | documents/v1 |
+|---|---|
+| example-cli | demo (`documents list`) |
+| pmac | reference shape — already emits `document-list/v1` / `document-download*/v1` (pre-crate); migrate to `pk-cli-documents` v0.5.0, keep `statements` alias |
+| wabhoa | planned — has `statements list` (metadata); gains `documents list` + `download` once a live capture confirms the PDF endpoint |
+| fpl, tojfl, lrfl | planned — fold `bills download`/`bill --save` into `documents download` (old spellings kept as aliases) |
+| rpmfl | planned — `documents`/`forms` → profile shapes |
+
+Consumer: the `organize-scans` archiver — one `documents list --json` +
+`documents download <id> -o` per CLI replaces its per-CLI download-command
+adapter table. The migration is **deferred to the v0.5.0 release window, not
+skipped** (PROFILES.md step 7): the CLIs pin `cli-common` by tag and adopt the
+crate only after v0.5.0 tags, and `organize-scans` migrates after the CLIs
+expose `documents`. Sequencing and status tracked in issue #8.
