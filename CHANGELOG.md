@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.5.0 — 2026-08-11
+## v0.5.0 — 2026-08-12
 
 The `documents/v1` domain profile (SPEC §1.8), and the list primitives it
 shares with `utility/v1` move to their correct home. Additive: existing
