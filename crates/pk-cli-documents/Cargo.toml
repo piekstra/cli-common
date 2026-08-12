@@ -1,0 +1,15 @@
+[package]
+name = "pk-cli-documents"
+description = "Documents-domain profile (documents/v1) for the piekstra CLI family: list & download the files a portal publishes — statements, notices, tax forms — with one spelling and one DTO across providers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+pk-cli-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

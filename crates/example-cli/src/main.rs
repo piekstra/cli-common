@@ -1,7 +1,8 @@
 //! Template family CLI (SPEC v1). Copy this crate to start a new one: it
 //! wires every pk-cli-* crate into the standard surface — `auth`, `config`,
-//! `self-update`, `completions`, `info` — plus the utility/v1 domain profile
-//! (`summary`, `balance`, `bills list`) to show the shared DTOs in use.
+//! `self-update`, `completions`, `info` — plus two domain profiles: utility/v1
+//! (`summary`, `balance`, `bills list`) and documents/v1 (`documents list`),
+//! to show the shared DTOs in use.
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -9,6 +10,7 @@ use pk_cli_auth::{AuthStatus, LoginArgs, LogoutArgs, SetCredentialArgs};
 use pk_cli_config::ConfigStore;
 use pk_cli_core::info::{AuthInfo, CliInfo};
 use pk_cli_core::{output, CliError, CommonArgs};
+use pk_cli_documents::Document;
 use pk_cli_secrets::CredentialStore;
 use pk_cli_selfupdate::{SelfUpdateArgs, Updater};
 use pk_cli_utility::{Paged, RangeArgs, Statement, UtilitySummary};
@@ -43,6 +45,9 @@ enum Command {
     /// Bills/statements (utility/v1 profile).
     #[command(subcommand)]
     Bills(BillsCmd),
+    /// Published documents (documents/v1 profile).
+    #[command(subcommand)]
+    Documents(DocumentsCmd),
     /// Update to the latest release from GitHub.
     SelfUpdate(SelfUpdateArgs),
     /// Print a shell completion script.
@@ -68,6 +73,15 @@ enum BillsCmd {
     /// List statements, newest first (statement-list/v1).
     #[command(visible_alias = "ls")]
     List(RangeArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum DocumentsCmd {
+    /// List published documents, newest first (document-list/v1).
+    #[command(visible_alias = "ls")]
+    List(RangeArgs),
+    // A real CLI adds `download <ID> -o <PATH>` (document-download/v1) here;
+    // the demo has no files to stream, so it shows the list shape only.
 }
 
 #[derive(Subcommand, Debug)]
@@ -132,6 +146,21 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             Paged::new("statement", statements.into_iter().take(n).collect()).emit(cli.common.json);
             Ok(())
         }
+        Command::Documents(DocumentsCmd::List(range)) => {
+            range.validate()?;
+            let mut stmt = Document::new("2026-07", "July 2026 Statement");
+            stmt.date = Some("2026-07-15".into());
+            stmt.category = Some("statement".into());
+            stmt.file = Some("2026-07-statement.pdf".into());
+            let mut tax = Document::new("2025-1098", "2025 Form 1098");
+            tax.date = Some("2026-01-31".into());
+            tax.category = Some("tax".into());
+            tax.file = Some("2025-1098.pdf".into());
+            let docs = vec![stmt, tax];
+            let n = range.limit.unwrap_or(u32::MAX) as usize;
+            Paged::new("document", docs.into_iter().take(n).collect()).emit(cli.common.json);
+            Ok(())
+        }
         Command::SelfUpdate(args) => Updater {
             repo: REPO.into(),
             binary: BIN.into(),
@@ -153,9 +182,9 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     method: "password".into(),
                     login_hint: Some(format!("{BIN} auth login")),
                 },
-                &["summary", "balance", "bills"],
+                &["summary", "balance", "bills", "documents"],
             )
-            .with_profiles(&[pk_cli_utility::PROFILE]);
+            .with_profiles(&[pk_cli_utility::PROFILE, pk_cli_documents::PROFILE]);
             output::json(&serde_json::to_value(&info).unwrap());
             Ok(())
         }

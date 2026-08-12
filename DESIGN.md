@@ -185,6 +185,10 @@ Rules that apply to every profile:
 - Every profile `list` command emits the `Paged` envelope — records under
   `items`, optional `next_cursor`/`total` — and takes the shared range flags
   `--limit N`, `--since YYYY-MM-DD`, `--until YYYY-MM-DD` (`RangeArgs`).
+  Both are profile-agnostic and live in `pk-cli-core` (`pk_cli_core::{Paged,
+  RangeArgs}`); profile crates re-export them, so a CLI that adopts two
+  profiles gets one type, not two, and a non-utility CLI never depends on the
+  utility crate just to page a list.
 - When a profile earns a crate, and how to add one: see **[PROFILES.md](PROFILES.md)**.
 
 #### The `utility/v1` profile (crate `pk-cli-utility`)
@@ -215,6 +219,37 @@ With this profile, utiman's `[summary]`/`[[series]]` manifest sections
 (`balance-fields`, `scale = "cents"`, `items-path`) collapse to defaults:
 `summary --json` → `balance` + `due_date`, lists → `items`.
 
+#### The `documents/v1` profile (crate `pk-cli-documents`)
+
+For any portal that publishes **files** — statements, escrow analyses, tax
+forms, notices, meeting minutes (`pmac`, `rpmfl`, `wabhoa`, `fpl`/`tojfl`/`lrfl`
+for their bill PDFs). Orthogonal to `utility/v1`: a CLI may declare both. All
+commands are reads — nothing here spends money — so §1.3's confirmation rules
+do not apply.
+
+```
+<bin> documents list                       # document-list/v1 (newest first)
+<bin> documents download <ID> -o <PATH>    # document-download/v1 (alias: get)
+<bin> documents download --all -o <DIR>    # document-download-batch/v1
+<bin> documents open <ID>                  # document-open/v1 (optional; system viewer)
+```
+
+`-o <PATH>` writes to a file (or `-` for stdout); `-o <DIR>`/`--all` writes a
+directory; with neither, the portal's own filename in the current directory.
+Old spellings stay as hidden aliases for one major version (`bills download`,
+`statements`, `bill --save`).
+
+DTOs: `Document` (`document/v1` — `id`, `name`, optional `date`/`category`/
+`file`; **no** financial fields — a statement's amount belongs to `utility/v1`,
+not the file), `SavedDocument` (`document-download/v1`), `DownloadBatch`
+(`document-download-batch/v1`), `OpenedDocument` (`document-open/v1`), all over
+`Paged<T>`.
+
+With this profile, the `organize-scans` archiver's per-CLI download-command
+table (`pmac documents download --all`, `fpl bills download --date … -o`,
+`tojfl bills get <n> -o`, `lrfl bill --save`, …) collapses to one call shape:
+`<cli> documents list --json` then `<cli> documents download <id> -o <path>`.
+
 ---
 
 ## Part 2 — The `cli-common` workspace
@@ -232,7 +267,9 @@ AGENTS.md, same house style as the CLIs.
 | `pk-cli-selfupdate` | GitHub-release check + in-place replace, `--check`/`-y`/`--json`, `self-update/v1` DTO, release-asset naming convention | ~580 duplicated lines across 4 repos |
 | `pk-cli-auth` | `AuthCmd` clap enum + driver trait: CLI supplies `verify()`/`login()`, crate supplies status DTO (`auth-status/v1`), logout, prompting rules | four auth command modules |
 | `pk-cli-http` | reqwest client builder (UA, cookie store, timeouts, retry-with-backoff), `api` passthrough command impl, error→exit-code-5 mapping | per-CLI `client.rs` boilerplate (session logic stays per-CLI) |
-| `pk-cli-utility` | the `utility/v1` domain profile (§1.8): `UtilitySummary`, `Statement`, `Payment`, `UsagePeriod`, `Transaction`, `Paged<T>`, `RangeArgs` | utiman's per-provider `balance-fields`/`scale`/`items-path` manifest hacks |
+| `pk-cli-core` (list) | profile-agnostic list primitives — `Paged<T>` envelope + `RangeArgs` (`--limit`/`--since`/`--until`) — shared by every domain profile | duplicated paging/range structs, and non-utility CLIs depending on `pk-cli-utility` just to page |
+| `pk-cli-utility` | the `utility/v1` domain profile (§1.8): `UtilitySummary`, `Statement`, `Payment`, `UsagePeriod`, `Transaction` (re-exports core's `Paged`/`RangeArgs`) | utiman's per-provider `balance-fields`/`scale`/`items-path` manifest hacks |
+| `pk-cli-documents` | the `documents/v1` domain profile (§1.8): `Document`, `SavedDocument`, `DownloadBatch`, `OpenedDocument` — list & download a portal's published files | `organize-scans`' per-CLI download-command adapter table |
 | `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages: elements, attributes, table rows/cells, entity decoding — all total, never panicking | a DOM-parser dependency, and the ad-hoc `str::find` scraping each portal CLI grows on its own |
 
 Each crate is small and independent; a CLI adopts them piecemeal. Provider

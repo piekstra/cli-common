@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.5.0 — 2026-08-11
+
+The `documents/v1` domain profile (SPEC §1.8), and the list primitives it
+shares with `utility/v1` move to their correct home. Additive: existing
+`pk_cli_utility::{Paged, RangeArgs}` imports keep compiling unchanged.
+
+- **`pk-cli-documents`** (new crate) — the `documents/v1` profile: one spelling
+  and one shape for "list the files a portal published, and download them",
+  which every portal grew its own name for (`pmac documents list|download`,
+  `fpl bills download -o`, `tojfl bills get -o`, `lrfl bill --save`, `wabhoa
+  statements list` with no download at all). DTOs: `Document`
+  (`document/v1` — `id`/`name` + optional `date`/`category`/`file`, and
+  deliberately **no** financial fields; a statement's amount is `utility/v1`'s
+  concern), `SavedDocument` (`document-download/v1`), `DownloadBatch`
+  (`document-download-batch/v1`), `OpenedDocument` (`document-open/v1`), over
+  `Paged<T>`. The shapes are promoted verbatim from what `pmac` already ships,
+  so it is a rename-to-canonical, not a new invention. Commands are all reads
+  (§1.3 confirmation does not apply). Consumer: the `organize-scans` archiver's
+  per-CLI download-command table collapses to `<cli> documents list --json` +
+  `<cli> documents download <id> -o <path>` (see issue #8, PROFILES.md bar).
+- **`pk-cli-core::list`: `Paged<T>`, `RangeArgs`** — moved here from
+  `pk-cli-utility`. They are profile-*agnostic* (a list is a list whatever the
+  records), so a second profile would otherwise have duplicated them, and a
+  non-utility CLI like `pmac` was already depending on `pk-cli-utility` purely
+  to page a list — the smell PROFILES.md names ("a DTO generic to all CLIs
+  belongs in `pk-cli-core`, not a profile"). `pk-cli-utility` re-exports both,
+  so nothing downstream changes; new adopters use `pk_cli_core::{Paged,
+  RangeArgs}` (or a profile crate's re-export).
+- **`example-cli`** — demonstrates both profiles now: `documents list` emits
+  `document-list/v1`, and `info` advertises `["utility/v1", "documents/v1"]`.
+
 ## v0.4.0 — 2026-08-10
 
 Scraped-portal support. `wabhoa` (`piekstra/westernalliancebank-hoa-cli`, a
