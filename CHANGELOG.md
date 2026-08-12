@@ -18,8 +18,12 @@ shares with `utility/v1` move to their correct home. Additive: existing
   `Paged<T>`. The shapes are promoted verbatim from what `pmac` already ships,
   so it is a rename-to-canonical, not a new invention. Commands are all reads
   (§1.3 confirmation does not apply). Consumer: the `organize-scans` archiver's
-  per-CLI download-command table collapses to `<cli> documents list --json` +
-  `<cli> documents download <id> -o <path>` (see issue #8, PROFILES.md bar).
+  per-CLI download-command table is designed to collapse to `<cli> documents
+  list --json` + `<cli> documents download <id> -o <path>` once each CLI adopts
+  the profile. That adoption is a **release-window migration, not part of this
+  change** — the CLIs pin `cli-common` by tag, so they adopt after v0.5.0 tags;
+  `example-cli` demonstrates the profile in-repo here. Sequencing and status
+  tracked in issue #8 (PROFILES.md step 7 / bar condition 2).
 - **`pk-cli-core::list`: `Paged<T>`, `RangeArgs`** — moved here from
   `pk-cli-utility`. They are profile-*agnostic* (a list is a list whatever the
   records), so a second profile would otherwise have duplicated them, and a

@@ -245,10 +245,13 @@ not the file), `SavedDocument` (`document-download/v1`), `DownloadBatch`
 (`document-download-batch/v1`), `OpenedDocument` (`document-open/v1`), all over
 `Paged<T>`.
 
-With this profile, the `organize-scans` archiver's per-CLI download-command
-table (`pmac documents download --all`, `fpl bills download --date … -o`,
-`tojfl bills get <n> -o`, `lrfl bill --save`, …) collapses to one call shape:
-`<cli> documents list --json` then `<cli> documents download <id> -o <path>`.
+The profile exists to collapse the `organize-scans` archiver's per-CLI
+download-command table (`pmac documents download --all`, `fpl bills download
+--date … -o`, `tojfl bills get <n> -o`, `lrfl bill --save`, …) to one call
+shape — `<cli> documents list --json` then `<cli> documents download <id> -o
+<path>` — once each CLI adopts it. That consumer migration lands across the
+release window (the CLIs pin `cli-common` by tag, so they adopt after the
+version tags), tracked in issue #8; `conformance.md` marks each CLI's status.
 
 ---
 

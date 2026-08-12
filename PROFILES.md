@@ -81,6 +81,17 @@ consumer, which glue exists) belongs in the PR that adds the profile.
 6. CHANGELOG + minor version bump (adding a profile is additive).
 7. Migrate the consumer (e.g. utiman fast path) in the same release window —
    a profile with no consumer migration shipped is a red flag for (2).
+   **"Release window", not "same commit":** the consumers live in separate
+   repos that pin `cli-common` by git tag, so they physically cannot adopt the
+   new crate until the version is tagged, which is *after* the profile PR
+   merges. The window therefore spans the tag plus the immediate follow-on
+   adoption PRs, and `utility/v1` shipped exactly this way (tojfl/xfin/fpl
+   adopted across v0.3.0–v0.7.0, not in the introducing PR). What is *not*
+   allowed is silence: the introducing PR must (a) demonstrate the profile in
+   `example-cli` (step 4), and (b) land a linked tracking issue enumerating the
+   consumer migrations, with `conformance.md` marking each `planned`. A profile
+   whose consumers are merely *asserted* — no demo, no tracked plan — still
+   fails (2).
 
 ## Non-goals
 

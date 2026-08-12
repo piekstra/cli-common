@@ -61,4 +61,7 @@ manifest field config (fast path + label-field chains, utiman #22/#26).
 
 Consumer: the `organize-scans` archiver — one `documents list --json` +
 `documents download <id> -o` per CLI replaces its per-CLI download-command
-adapter table (crate issue #8).
+adapter table. The migration is **deferred to the v0.5.0 release window, not
+skipped** (PROFILES.md step 7): the CLIs pin `cli-common` by tag and adopt the
+crate only after v0.5.0 tags, and `organize-scans` migrates after the CLIs
+expose `documents`. Sequencing and status tracked in issue #8.
