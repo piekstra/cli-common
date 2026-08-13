@@ -11,7 +11,7 @@ Additive: no existing API changes.
     not a document until it matches its **declared filetype**. `%PDF` magic
     for PDFs; for text types (`csv`, `html`, …), rejection of the failure
     shapes an expired pre-signed link actually serves (HTML login page, S3
-    XML error, DRF JSON error) plus a UTF-8 head check that tolerates a
+    XML error, any JSON error object) plus a UTF-8 head check that tolerates a
     multi-byte character cut by the inspection window. Genesis: a brokerage's
     consolidated-1099 season ships a PDF *and* a CSV export, and an
     unconditional `%PDF` rule refused the CSV — correctly, which is what

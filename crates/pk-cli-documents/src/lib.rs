@@ -59,7 +59,9 @@ pub fn emit<T: Serialize>(dto: &T, json_mode: bool) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     /// Stable identifier used by `documents download <ID>`. A string so GUID
-    /// and numeric providers share one shape.
+    /// and numeric providers share one shape. Provider-controlled — like
+    /// [`Document::file`], pass through [`verify::fs_safe`] if it ever
+    /// becomes part of a path (e.g. an undated-document filename fallback).
     pub id: String,
     /// Issue/posting date, ISO `YYYY-MM-DD`, when the provider states one.
     #[serde(skip_serializing_if = "Option::is_none")]
