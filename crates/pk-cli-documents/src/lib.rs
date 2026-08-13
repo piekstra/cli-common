@@ -71,7 +71,10 @@ pub struct Document {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
     /// The portal's own filename, used to name the saved file when the caller
-    /// gives no explicit path.
+    /// gives no explicit path. **Provider-controlled** — pass it (or each
+    /// component it is built from) through [`verify::fs_safe`] before it
+    /// becomes a path, or a crafted response can traverse out of the output
+    /// directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 }

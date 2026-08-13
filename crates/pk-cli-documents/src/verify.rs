@@ -52,6 +52,12 @@ pub fn verify_pdf(bytes: &[u8]) -> Result<(), CliError> {
 
 /// Text formats (CSV, HTML, …) have no magic bytes, so the check is the
 /// failure shapes we know arrive instead of documents.
+///
+/// Each rejection is waived when the declared filetype *is* that shape — an
+/// HTML statement is allowed to be HTML, a declared JSON export is allowed
+/// to be a JSON object — because for those types a real document and an
+/// error body are indistinguishable by shape, and refusing everything would
+/// make the type undownloadable.
 fn verify_text(bytes: &[u8], label: &str) -> Result<(), CliError> {
     let head_bytes = &bytes[..bytes.len().min(256)];
     let head = match std::str::from_utf8(head_bytes) {
@@ -64,11 +70,17 @@ fn verify_text(bytes: &[u8], label: &str) -> Result<(), CliError> {
         Err(_) => return Err(not_the_document(bytes, label)),
     };
     let head = head.trim_start().to_lowercase();
-    let looks_like_json_error = head.starts_with("{\"detail\"") || head.starts_with("{ \"detail\"");
+    // Any JSON object head, not just one provider's `{"detail"` spelling —
+    // `{"error"`, `{"message"`, and friends are equally common ways for an
+    // expired link to answer. No legitimate CSV/HTML/TSV body starts `{"`.
+    let looks_like_json = head.starts_with('{') && head.contains('"');
     let looks_like_xml = head.starts_with("<?xml");
     let looks_like_html = head.starts_with("<!doctype") || head.starts_with("<html");
+    let json_ok = label.eq_ignore_ascii_case("json");
+    let xml_ok = label.eq_ignore_ascii_case("xml");
     let html_ok = label.eq_ignore_ascii_case("html");
-    if looks_like_json_error || looks_like_xml || (looks_like_html && !html_ok) {
+    if (looks_like_json && !json_ok) || (looks_like_xml && !xml_ok) || (looks_like_html && !html_ok)
+    {
         return Err(not_the_document(bytes, label));
     }
     Ok(())
@@ -155,6 +167,25 @@ mod tests {
         // Unknown filetypes get the failure-shape screen, not a hard reject.
         assert!(verify_download(b"some,future,format", Some("tsv")).is_ok());
         assert!(verify_download(b"<html>error</html>", Some("tsv")).is_err());
+    }
+
+    /// The JSON-error screen is any object head, not one provider's
+    /// `{"detail"` spelling — and each markup rejection is waived when the
+    /// declared type *is* that shape.
+    #[test]
+    fn error_shapes_are_generic_and_declared_types_are_exempt() {
+        for body in [
+            &b"{\"error\":\"Unauthorized\"}"[..],
+            &b"{\"message\":\"link expired\"}"[..],
+            &b"{\"errors\":[{\"code\":401}]}"[..],
+        ] {
+            assert!(verify_download(body, Some("csv")).is_err(), "{body:?}");
+        }
+        // A declared JSON export is allowed to be a JSON object…
+        assert!(verify_download(b"{\"rows\": []}", Some("json")).is_ok());
+        // …but not an HTML page; and a declared XML feed may be XML.
+        assert!(verify_download(b"<html>login</html>", Some("json")).is_err());
+        assert!(verify_download(b"<?xml version=\"1.0\"?><feed/>", Some("xml")).is_ok());
     }
 
     /// A multi-byte character straddling the 256-byte inspection window is a
