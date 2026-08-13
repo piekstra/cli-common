@@ -36,8 +36,16 @@ use pk_cli_core::CliError;
 /// artifact. (`from_utf8_lossy` alone would wave genuinely binary bodies
 /// through as replacement characters.)
 pub fn verify_download(bytes: &[u8], filetype: Option<&str>) -> Result<(), CliError> {
+    // A zero-byte body is never a document, whatever type was declared —
+    // and it would otherwise sail through every text check below.
+    if bytes.is_empty() {
+        return Err(not_the_document(bytes, filetype.unwrap_or("a document")));
+    }
     match filetype {
-        None | Some("pdf") => verify_pdf(bytes),
+        None => verify_pdf(bytes),
+        // Case-insensitive, matching every other label comparison here — a
+        // provider that says "PDF" must not fall into the text path.
+        Some(ft) if ft.eq_ignore_ascii_case("pdf") => verify_pdf(bytes),
         Some(other) => verify_text(bytes, other),
     }
 }
@@ -167,6 +175,18 @@ mod tests {
         // Unknown filetypes get the failure-shape screen, not a hard reject.
         assert!(verify_download(b"some,future,format", Some("tsv")).is_ok());
         assert!(verify_download(b"<html>error</html>", Some("tsv")).is_err());
+    }
+
+    /// A zero-byte body is never a document, whatever the declared type —
+    /// and the PDF dispatch is case-insensitive like every other label
+    /// comparison.
+    #[test]
+    fn empty_bodies_fail_and_pdf_dispatch_ignores_case() {
+        for ft in [None, Some("pdf"), Some("csv"), Some("html"), Some("tsv")] {
+            assert!(verify_download(b"", ft).is_err(), "{ft:?}");
+        }
+        assert!(verify_download(b"%PDF-1.7\n...", Some("PDF")).is_ok());
+        assert!(verify_download(b"1099-DIV,ACCOUNT\n", Some("PDF")).is_err());
     }
 
     /// The JSON-error screen is any object head, not one provider's

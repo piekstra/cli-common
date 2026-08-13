@@ -239,6 +239,16 @@ directory; with neither, the portal's own filename in the current directory.
 Old spellings stay as hidden aliases for one major version (`bills download`,
 `statements`, `bill --save`).
 
+Two invariants, mechanized in the crate's `verify` module: fetched bytes go
+through `verify_download(bytes, declared_filetype)` **before** anything is
+written or a byte count reported (`%PDF` magic for PDFs; for text filetypes,
+rejection of the shapes an expired pre-signed link actually serves — an HTML
+login page, an XML error, a JSON error object); and **every**
+provider-controlled component of a filename — the portal's `file`, a type, a
+filetype, a date, an id — goes through `fs_safe` before it joins a path, so a
+crafted response can neither traverse out of the output directory nor fake
+success with an error page.
+
 DTOs: `Document` (`document/v1` — `id`, `name`, optional `date`/`category`/
 `file`; **no** financial fields — a statement's amount belongs to `utility/v1`,
 not the file), `SavedDocument` (`document-download/v1`), `DownloadBatch`
