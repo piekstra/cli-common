@@ -22,30 +22,32 @@ use pk_cli_core::CliError;
 
 /// Verify a downloaded body against the filetype its listing declared.
 ///
+/// The contract, in full:
+///
+/// - The declared filetype is compared **case-insensitively** throughout —
+///   a provider that says `"PDF"` gets the PDF rule.
+/// - An **empty body fails** for every declared type; nothing is a document.
 /// - `None` or `"pdf"` → the strict [`verify_pdf`] magic check — the right
 ///   default for a document tool when the provider doesn't say.
-/// - `"html"` → text check only: a real HTML statement and an HTML error
-///   page are indistinguishable by shape, so the honest bar is "text, and
-///   not a JSON error or XML error".
-/// - any other declared type (`"csv"`, …) → text check *including* HTML
-///   rejection: HTML where a non-HTML type was promised is a failure page.
-///
-/// Text bodies must also be valid UTF-8 in the inspected head — a binary
-/// blob under a text filetype is some other lie — except that a multi-byte
-/// character cut by the inspection window is tolerated as a truncation
-/// artifact. (`from_utf8_lossy` alone would wave genuinely binary bodies
-/// through as replacement characters.)
+/// - Any other declared type (`"csv"`, `"html"`, …) → the text check: the
+///   inspected head must be valid UTF-8 (a binary blob under a text filetype
+///   is some other lie; a multi-byte character cut by the inspection window
+///   is tolerated as a truncation artifact — `from_utf8_lossy` alone would
+///   wave genuinely binary bodies through), and the failure shapes an
+///   expired pre-signed link actually serves — a JSON error object, an XML
+///   error, an HTML page — are rejected **unless the declared type is that
+///   shape** (`json`/`xml`/`html`), since for those a real document and an
+///   error body are indistinguishable by shape.
 pub fn verify_download(bytes: &[u8], filetype: Option<&str>) -> Result<(), CliError> {
     // A zero-byte body is never a document, whatever type was declared —
     // and it would otherwise sail through every text check below.
     if bytes.is_empty() {
         return Err(not_the_document(bytes, filetype.unwrap_or("a document")));
     }
-    match filetype {
-        None => verify_pdf(bytes),
-        // Case-insensitive, matching every other label comparison here — a
-        // provider that says "PDF" must not fall into the text path.
-        Some(ft) if ft.eq_ignore_ascii_case("pdf") => verify_pdf(bytes),
+    // Normalize once at the boundary; every comparison below is exact.
+    let label = filetype.map(str::to_ascii_lowercase);
+    match label.as_deref() {
+        None | Some("pdf") => verify_pdf(bytes),
         Some(other) => verify_text(bytes, other),
     }
 }
@@ -84,10 +86,10 @@ fn verify_text(bytes: &[u8], label: &str) -> Result<(), CliError> {
     let looks_like_json = head.starts_with('{') && head.contains('"');
     let looks_like_xml = head.starts_with("<?xml");
     let looks_like_html = head.starts_with("<!doctype") || head.starts_with("<html");
-    let json_ok = label.eq_ignore_ascii_case("json");
-    let xml_ok = label.eq_ignore_ascii_case("xml");
-    let html_ok = label.eq_ignore_ascii_case("html");
-    if (looks_like_json && !json_ok) || (looks_like_xml && !xml_ok) || (looks_like_html && !html_ok)
+    // The label was lowercased at the dispatch boundary; exact compares here.
+    if (looks_like_json && label != "json")
+        || (looks_like_xml && label != "xml")
+        || (looks_like_html && label != "html")
     {
         return Err(not_the_document(bytes, label));
     }

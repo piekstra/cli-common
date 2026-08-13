@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.0 — 2026-08-13
 
 Download verification and filename hygiene move to their correct home.
 Additive: no existing API changes.
