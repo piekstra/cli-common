@@ -67,6 +67,17 @@ Verify with `codesign -dv $(which <bin>)`: you want the stable
 invalidates the previous grant, so expect exactly one more prompt after
 adopting this.
 
+## Review agents
+
+`.codereview/agents/cli-family/contract` reviews changes against the rules
+above — frozen exit codes, `/v1` schema edits, secret ingestion, and behavior
+that belongs here rather than in a downstream CLI. It deliberately does not
+review Rust quality; the shared `rust:implementation` lane in
+`cr-reviewer-catalog` does that, for every Rust repo rather than only this one.
+
+Agent directories are not auto-discovered. A `cr` profile must list this path
+in `agent_sources`, alongside the catalog, or neither reviewer runs.
+
 ## Workflow
 
 - `cargo test --workspace && cargo clippy --workspace --all-targets` must be
