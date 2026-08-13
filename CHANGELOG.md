@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+Download verification and filename hygiene move to their correct home.
+Additive: no existing API changes.
+
+- **`pk_cli_documents::verify`** — mechanism extracted from `robinhood-cli`,
+  where both pieces were paid for with live findings:
+  - `verify_download(bytes, filetype)` / `verify_pdf(bytes)` — a download is
+    not a document until it matches its **declared filetype**. `%PDF` magic
+    for PDFs; for text types (`csv`, `html`, …), rejection of the failure
+    shapes an expired pre-signed link actually serves (HTML login page, S3
+    XML error, any JSON error object) plus a UTF-8 head check that tolerates a
+    multi-byte character cut by the inspection window. Genesis: a brokerage's
+    consolidated-1099 season ships a PDF *and* a CSV export, and an
+    unconditional `%PDF` rule refused the CSV — correctly, which is what
+    surfaced the provider's `filetype` field.
+  - `fs_safe(s)` — reduce any provider-controlled string that reaches a
+    filename (type, filetype, date, id) to path-inert characters. Three
+    separate unsanitized sinks were found in one file during review; the rule
+    is now "every component, one function".
+
 ## v0.5.0 — 2026-08-12
 
 The `documents/v1` domain profile (SPEC §1.8), and the list primitives it

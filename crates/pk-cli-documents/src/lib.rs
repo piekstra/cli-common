@@ -33,7 +33,10 @@ use pk_cli_core::output;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod verify;
+
 pub use pk_cli_core::{Paged, RangeArgs};
+pub use verify::{fs_safe, verify_download, verify_pdf};
 
 /// Profile identifier for `cli-info/v1` `profiles`.
 pub const PROFILE: &str = "documents/v1";
@@ -56,7 +59,9 @@ pub fn emit<T: Serialize>(dto: &T, json_mode: bool) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     /// Stable identifier used by `documents download <ID>`. A string so GUID
-    /// and numeric providers share one shape.
+    /// and numeric providers share one shape. Provider-controlled — like
+    /// [`Document::file`], pass through [`verify::fs_safe`] if it ever
+    /// becomes part of a path (e.g. an undated-document filename fallback).
     pub id: String,
     /// Issue/posting date, ISO `YYYY-MM-DD`, when the provider states one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,7 +73,10 @@ pub struct Document {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
     /// The portal's own filename, used to name the saved file when the caller
-    /// gives no explicit path.
+    /// gives no explicit path. **Provider-controlled** — pass it (or each
+    /// component it is built from) through [`verify::fs_safe`] before it
+    /// becomes a path, or a crafted response can traverse out of the output
+    /// directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 }
