@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.7.0 — 2026-08-18
+
+Partial-failure reporting for `documents download --all`. Additive and
+back-compatible: existing callers and JSON consumers are unchanged.
+
+- **`pk_cli_documents::DownloadBatch` now carries `skipped`** — a
+  `Vec<SkippedDocument>` (`{id, reason}`) of listed documents that a `--all`
+  run couldn't produce a file for (e.g. the provider's archive has no PDF on
+  record). `document-download-batch/v1` previously had **no** place to report
+  this, so a partial batch reported only `count`/`bytes_total` and an adopter
+  could silently under-report — "3 of 5 downloaded" was indistinguishable from
+  "3 exist". Surfaced while adopting the profile in `loxahatchee-cli`, whose
+  sibling `bills download --all` already reported skips; the profile now lets
+  every adopter (including `tojfl`, which had the same gap) do the same.
+  - New `SkippedDocument { id, reason }` + `SkippedDocument::new`.
+  - New `DownloadBatch::with_skipped(dir, items, skipped)`; `DownloadBatch::new`
+    is unchanged (constructs an empty `skipped`).
+  - `skipped` is `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so
+    a fully-successful batch serializes to the exact same shape as before and
+    older payloads still deserialize.
+
 ## v0.6.0 — 2026-08-13
 
 Download verification and filename hygiene move to their correct home.

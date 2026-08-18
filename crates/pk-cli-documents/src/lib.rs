@@ -129,8 +129,28 @@ impl SavedDocument {
     }
 }
 
+/// A listed document that a `--all` download couldn't produce a file for
+/// (e.g. the provider's archive has no PDF on record for it). Reported in
+/// [`DownloadBatch::skipped`] so a partial batch doesn't silently under-report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkippedDocument {
+    /// The document id (from `documents list`) that was skipped.
+    pub id: String,
+    /// Why it was skipped, in human-readable form.
+    pub reason: String,
+}
+
+impl SkippedDocument {
+    pub fn new(id: impl Into<String>, reason: impl Into<String>) -> Self {
+        SkippedDocument {
+            id: id.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
 /// The result of a `--all` download (`document-download-batch/v1`): every file
-/// written, plus the totals.
+/// written, plus the totals — and any listed documents that were skipped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadBatch {
     pub schema: String,
@@ -139,17 +159,33 @@ pub struct DownloadBatch {
     /// Directory the batch was written to (`.` when the current dir).
     pub dir: String,
     pub items: Vec<SavedDocument>,
+    /// Documents that couldn't be downloaded (e.g. no PDF on file). Omitted
+    /// from JSON when empty, so a fully-successful batch is unchanged and older
+    /// consumers see the same shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedDocument>,
 }
 
 impl DownloadBatch {
-    /// Total the written documents into the batch envelope.
+    /// Total the written documents into the batch envelope (no skips).
     pub fn new(dir: impl Into<String>, items: Vec<SavedDocument>) -> Self {
+        DownloadBatch::with_skipped(dir, items, Vec::new())
+    }
+
+    /// Total the written documents into the batch envelope, recording any
+    /// listed documents that couldn't be produced.
+    pub fn with_skipped(
+        dir: impl Into<String>,
+        items: Vec<SavedDocument>,
+        skipped: Vec<SkippedDocument>,
+    ) -> Self {
         DownloadBatch {
             schema: "document-download-batch/v1".into(),
             count: items.len() as u64,
             bytes_total: items.iter().map(|d| d.bytes).sum(),
             dir: dir.into(),
             items,
+            skipped,
         }
     }
 }
@@ -235,6 +271,29 @@ mod tests {
         assert_eq!(v["count"], 2);
         assert_eq!(v["bytes_total"], 350);
         assert_eq!(v["dir"], "/out");
+        // A fully-successful batch omits `skipped` entirely (back-compat).
+        assert!(v.get("skipped").is_none());
+    }
+
+    #[test]
+    fn batch_records_skipped() {
+        let items = vec![SavedDocument::from_document(&sample(), "/out/a.pdf", 100)];
+        let skipped = vec![SkippedDocument::new("2025-02-01", "no PDF on file")];
+        let batch = DownloadBatch::with_skipped("/out", items, skipped);
+        let v = serde_json::to_value(&batch).unwrap();
+        // `count`/`bytes_total` still reflect only what was written…
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["bytes_total"], 100);
+        // …and skips are surfaced so a partial batch isn't silently short.
+        assert_eq!(v["skipped"][0]["id"], "2025-02-01");
+        assert_eq!(v["skipped"][0]["reason"], "no PDF on file");
+        // Round-trips (Deserialize) and tolerates the field's absence.
+        let back: DownloadBatch = serde_json::from_value(v).unwrap();
+        assert_eq!(back.skipped.len(), 1);
+        let none: DownloadBatch =
+            serde_json::from_str(r#"{"schema":"document-download-batch/v1","count":0,"bytes_total":0,"dir":".","items":[]}"#)
+                .unwrap();
+        assert!(none.skipped.is_empty());
     }
 
     #[test]
