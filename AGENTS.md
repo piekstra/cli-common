@@ -8,6 +8,15 @@ Shared surface spec + library crates for the piekstra CLI family. Read
 
 - **Every public DTO shape is a contract.** Fields carry a `"schema": "<name>/v1"`
   tag; changing a shape means a new `/v2` schema, not an edit to `/v1`.
+  - *Additive carve-out:* a shape may gain a field within its existing version
+    **iff** the field is optional, defaulted on deserialize, and omitted from
+    serialization when empty (`#[serde(default, skip_serializing_if = "…")]`),
+    so both older payloads and older consumers are unaffected on the wire.
+    Anything else — removing, renaming, retyping, or changing the meaning of a
+    field — requires `/v2`. (Note the Rust-API caveat: adding a field to an
+    all-public struct without `#[non_exhaustive]` still breaks downstream
+    struct-literal construction, so provide/keep a constructor and prefer
+    `with_*` builder steps for optional fields.)
 - **Exit codes 0–6 are frozen** (see `pk-cli-core::CliError`). Never renumber.
 - **Secrets never on argv, never in logs.** All ingestion goes through
   `pk-cli-secrets` (`--stdin` / `--from-env` / no-echo prompt).

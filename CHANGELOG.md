@@ -2,24 +2,33 @@
 
 ## v0.7.0 — 2026-08-18
 
-Partial-failure reporting for `documents download --all`. Additive and
-back-compatible: existing callers and JSON consumers are unchanged.
+Partial-failure reporting for `documents download --all`. Additive on the wire:
+`DownloadBatch::new` callers and JSON consumers are unchanged. (Rust-API caveat:
+`DownloadBatch` gains a field, so any code that built it by struct literal must
+add `skipped` or move to the constructor — none in-tree does.)
 
 - **`pk_cli_documents::DownloadBatch` now carries `skipped`** — a
-  `Vec<SkippedDocument>` (`{id, reason}`) of listed documents that a `--all`
-  run couldn't produce a file for (e.g. the provider's archive has no PDF on
-  record). `document-download-batch/v1` previously had **no** place to report
-  this, so a partial batch reported only `count`/`bytes_total` and an adopter
-  could silently under-report — "3 of 5 downloaded" was indistinguishable from
+  `Vec<SkippedDocument>` of listed documents that a `--all` run couldn't produce
+  a file for (e.g. the provider's archive has no PDF on record).
+  `document-download-batch/v1` previously had **no** place to report this, so a
+  partial batch reported only `count`/`bytes_total` and an adopter could
+  silently under-report — "3 of 5 downloaded" was indistinguishable from
   "3 exist". Surfaced while adopting the profile in `loxahatchee-cli`, whose
   sibling `bills download --all` already reported skips; the profile now lets
   every adopter (including `tojfl`, which had the same gap) do the same.
-  - New `SkippedDocument { id, reason }` + `SkippedDocument::new`.
-  - New `DownloadBatch::with_skipped(dir, items, skipped)`; `DownloadBatch::new`
-    is unchanged (constructs an empty `skipped`).
-  - `skipped` is `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so
-    a fully-successful batch serializes to the exact same shape as before and
-    older payloads still deserialize.
+  - New **`SkippedDocument`** — `id`, a human `reason`, and an optional
+    machine-branchable **`code`** slug (`no_file` / `verify_failed` / `upstream`,
+    omitted when unclassified) so a consumer can distinguish a benign permanent
+    skip from a retryable one without matching on prose (mirrors
+    `CliError`'s `code()`/message split, SPEC §1.4). `SkippedDocument::new(id,
+    reason)` + a `with_code(code)` builder step.
+  - **`DownloadBatch::new(dir, items).with_skipped(skips)`** — `with_skipped` is
+    a consuming builder step (house `with_*` idiom), so `new` is unchanged and
+    the next optional field won't force another constructor.
+  - Both new fields are `#[serde(default, skip_serializing_if = …)]`, so a
+    fully-successful batch serializes to the exact same shape as before and
+    older payloads still deserialize. This additive-within-`/v1` change is now
+    codified as a carve-out in `AGENTS.md`.
 
 ## v0.6.0 — 2026-08-13
 
