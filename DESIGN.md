@@ -253,7 +253,13 @@ DTOs: `Document` (`document/v1` — `id`, `name`, optional `date`/`category`/
 `file`; **no** financial fields — a statement's amount belongs to `utility/v1`,
 not the file), `SavedDocument` (`document-download/v1`), `DownloadBatch`
 (`document-download-batch/v1`), `OpenedDocument` (`document-open/v1`), all over
-`Paged<T>`.
+`Paged<T>`. `DownloadBatch` also carries an optional `skipped:
+[SkippedDocument]` (`{id, reason, optional code}`) so a `--all` run that can't
+produce a file for a listed document reports it instead of silently coming up
+short; `code` is a machine-branchable slug from an open set whose canonical
+members are the `SKIP_NO_FILE` / `SKIP_VERIFY_FAILED` / `SKIP_UPSTREAM`
+constants. Both `skipped` and `code` are additive within `/v1` (optional,
+defaulted, omitted-when-empty — see the AGENTS.md carve-out).
 
 The profile exists to collapse the `organize-scans` archiver's per-CLI
 download-command table (`pmac documents download --all`, `fpl bills download

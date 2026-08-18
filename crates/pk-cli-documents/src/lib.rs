@@ -41,6 +41,18 @@ pub use verify::{fs_safe, verify_download, verify_pdf};
 /// Profile identifier for `cli-info/v1` `profiles`.
 pub const PROFILE: &str = "documents/v1";
 
+/// Canonical [`SkippedDocument::code`] slugs. The set is **open** (a producer
+/// may emit its own), but these three are the cross-CLI vocabulary a consumer
+/// can branch on — pinned as constants so producer and consumer share one
+/// compile-time anchor rather than re-typing the string.
+///
+/// Nothing on record for this document — a permanent, benign skip.
+pub const SKIP_NO_FILE: &str = "no_file";
+/// Bytes were fetched but failed [`verify`] — retryable / worth alerting.
+pub const SKIP_VERIFY_FAILED: &str = "verify_failed";
+/// Provider or transport error while fetching — retryable.
+pub const SKIP_UPSTREAM: &str = "upstream";
+
 /// Emit any DTO per the output contract: pretty JSON in json mode, the
 /// standard key/value block otherwise. (Lists use [`Paged::emit`] instead.)
 pub fn emit<T: Serialize>(dto: &T, json_mode: bool) {
@@ -129,8 +141,45 @@ impl SavedDocument {
     }
 }
 
+/// A listed document that a `--all` download couldn't produce a file for
+/// (e.g. the provider's archive has no PDF on record for it). Reported in
+/// [`DownloadBatch::skipped`] so a partial batch doesn't silently under-report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkippedDocument {
+    /// The document id (from `documents list`) that was skipped.
+    pub id: String,
+    /// A stable, machine-branchable slug for the skip category, so a consumer
+    /// can tell a benign permanent skip from a retryable one without matching
+    /// on prose. Mirrors the `code()` / message split of `pk_cli_core::CliError`
+    /// (SPEC §1.4). The canonical vocabulary is the [`SKIP_NO_FILE`],
+    /// [`SKIP_VERIFY_FAILED`], and [`SKIP_UPSTREAM`] constants (open set).
+    /// Omitted when the producer doesn't classify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// Why it was skipped, in human-readable form. Display only — branch on
+    /// `code`, not on this string.
+    pub reason: String,
+}
+
+impl SkippedDocument {
+    /// A skip with a human reason and no machine code.
+    pub fn new(id: impl Into<String>, reason: impl Into<String>) -> Self {
+        SkippedDocument {
+            id: id.into(),
+            code: None,
+            reason: reason.into(),
+        }
+    }
+
+    /// Attach a machine-branchable category slug (see [`SkippedDocument::code`]).
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+}
+
 /// The result of a `--all` download (`document-download-batch/v1`): every file
-/// written, plus the totals.
+/// written, plus the totals — and any listed documents that were skipped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadBatch {
     pub schema: String,
@@ -139,10 +188,16 @@ pub struct DownloadBatch {
     /// Directory the batch was written to (`.` when the current dir).
     pub dir: String,
     pub items: Vec<SavedDocument>,
+    /// Documents that couldn't be downloaded (e.g. no PDF on file). Omitted
+    /// from JSON when empty, so a fully-successful batch is unchanged and older
+    /// consumers see the same shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedDocument>,
 }
 
 impl DownloadBatch {
-    /// Total the written documents into the batch envelope.
+    /// Total the written documents into the batch envelope. Chain
+    /// [`DownloadBatch::with_skipped`] to record any that couldn't be produced.
     pub fn new(dir: impl Into<String>, items: Vec<SavedDocument>) -> Self {
         DownloadBatch {
             schema: "document-download-batch/v1".into(),
@@ -150,7 +205,16 @@ impl DownloadBatch {
             bytes_total: items.iter().map(|d| d.bytes).sum(),
             dir: dir.into(),
             items,
+            skipped: Vec::new(),
         }
+    }
+
+    /// Record the documents a `--all` run couldn't produce a file for, so a
+    /// partial batch reports what's missing instead of silently coming up short.
+    /// `new` leaves `count`/`bytes_total` reflecting only what was written.
+    pub fn with_skipped(mut self, skipped: Vec<SkippedDocument>) -> Self {
+        self.skipped = skipped;
+        self
     }
 }
 
@@ -235,6 +299,40 @@ mod tests {
         assert_eq!(v["count"], 2);
         assert_eq!(v["bytes_total"], 350);
         assert_eq!(v["dir"], "/out");
+        // A fully-successful batch omits `skipped` entirely (back-compat).
+        assert!(v.get("skipped").is_none());
+    }
+
+    #[test]
+    fn batch_records_skipped() {
+        let items = vec![SavedDocument::from_document(&sample(), "/out/a.pdf", 100)];
+        let skipped =
+            vec![SkippedDocument::new("2025-02-01", "no PDF on file").with_code(SKIP_NO_FILE)];
+        let batch = DownloadBatch::new("/out", items).with_skipped(skipped);
+        let v = serde_json::to_value(&batch).unwrap();
+        // `count`/`bytes_total` still reflect only what was written…
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["bytes_total"], 100);
+        // …and skips are surfaced so a partial batch isn't silently short,
+        // with a machine-branchable `code` beside the prose reason.
+        assert_eq!(v["skipped"][0]["id"], "2025-02-01");
+        assert_eq!(v["skipped"][0]["code"], "no_file");
+        assert_eq!(SKIP_NO_FILE, "no_file"); // slug pinned for cross-CLI consumers
+        assert_eq!(v["skipped"][0]["reason"], "no PDF on file");
+        // Round-trips (Deserialize) and tolerates the field's absence.
+        let back: DownloadBatch = serde_json::from_value(v).unwrap();
+        assert_eq!(back.skipped.len(), 1);
+        let none: DownloadBatch =
+            serde_json::from_str(r#"{"schema":"document-download-batch/v1","count":0,"bytes_total":0,"dir":".","items":[]}"#)
+                .unwrap();
+        assert!(none.skipped.is_empty());
+    }
+
+    #[test]
+    fn skipped_code_is_omitted_when_unclassified() {
+        let v = serde_json::to_value(SkippedDocument::new("2025-02-01", "no PDF on file")).unwrap();
+        assert!(v.get("code").is_none());
+        assert_eq!(v["reason"], "no PDF on file");
     }
 
     #[test]
