@@ -36,8 +36,8 @@ Drift notes are from the 2026-07-19 family audit.
 | ghome (google-home-cli) | conforms (v0.4.x, cli-common v0.7.0) — the reference for the confirmation gate, the resolve ladder, `emit_list`, the one-item keychain session (legacy two-item layout migrated on first read) and the read-back rail; consumer of `device-rooms/v1` |
 | target-cli | planned — the credential-free template case (`auth status` with `required: false`) |
 | babylist-cli | planned |
-| govee-cli | migrating — spec-v1 PR open (against cli-common v0.7.0): output default flipped to text + `--json`, exit codes, keychain service → `piekstra.govee`; producer of `device-rooms/v1` |
-| tplink-cloud-cli (`tplc`) | migrating — spec-v1 PR open (against cli-common v0.7.0): output default, exit codes, eight keychain items → one `session` item, service → `piekstra.tplc`; producer of `device-rooms/v1` |
+| govee-cli (`govee`) | conforms (v0.2.0, cli-common v0.8.0) — text default + `--json`, family exit codes, `auth`/`config`/`self-update`/`info`/`api`, keychain `piekstra.govee` (migrated from `govee-cli`); `rooms devices` emits `device-rooms/v1` |
+| tplink-cloud-cli (`tplc`) | conforms (v0.2.0, cli-common v0.8.0) — as above, keychain `piekstra.tplc`; `api` is a cloud-RPC passthrough by method name (documented); `groups devices`/`rooms devices` emit `device-rooms/v1` |
 | slack-rs (`slck`) | pre-spec — **security: token accepted on argv**; fix ingestion before adoption |
 | alpaca-rs (`alpaca`) | pre-spec — env-only auth (acceptable; report `method: "env"`), JSON-always, no `--version` |
 | pup, twapp | pre-spec — adopt selectively (exit codes, `info`, self-update); surfaces stay their own |
