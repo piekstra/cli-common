@@ -2,14 +2,16 @@
 //! wires every pk-cli-* crate into the standard surface — `auth`, `config`,
 //! `self-update`, `completions`, `info` — plus two domain profiles: utility/v1
 //! (`summary`, `balance`, `bills list`) and documents/v1 (`documents list`),
-//! to show the shared DTOs in use.
+//! to show the shared DTOs in use, and a plain `devices` noun showing the
+//! generic list/get/mutate mechanisms (`emit_list`, `resolve::pick`, the
+//! `confirm` gate).
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use pk_cli_auth::{AuthStatus, LoginArgs, LogoutArgs, SetCredentialArgs};
 use pk_cli_config::ConfigStore;
 use pk_cli_core::info::{AuthInfo, CliInfo};
-use pk_cli_core::{output, CliError, CommonArgs};
+use pk_cli_core::{confirm, output, resolve, CliError, CommonArgs};
 use pk_cli_documents::Document;
 use pk_cli_secrets::CredentialStore;
 use pk_cli_selfupdate::{SelfUpdateArgs, Updater};
@@ -48,6 +50,9 @@ enum Command {
     /// Published documents (documents/v1 profile).
     #[command(subcommand)]
     Documents(DocumentsCmd),
+    /// Devices — a plain (non-profile) noun: list, resolve a reference, mutate.
+    #[command(subcommand)]
+    Devices(DevicesCmd),
     /// Update to the latest release from GitHub.
     SelfUpdate(SelfUpdateArgs),
     /// Print a shell completion script.
@@ -85,6 +90,23 @@ enum DocumentsCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum DevicesCmd {
+    /// List devices (device-list/v1 — a plain list, no paging).
+    #[command(visible_alias = "ls")]
+    List,
+    /// Show one device by name, id, or a unique part of its name (device/v1).
+    Get { device: String },
+    /// Rename a device. Asks first unless --force; exit 6 when it cannot ask.
+    Rename {
+        device: String,
+        name: String,
+        /// Skip the confirmation prompt (required when non-interactive).
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum ConfigCmd {
     /// Print the resolved config file path.
     Path,
@@ -94,6 +116,35 @@ enum ConfigCmd {
     Set { key: String, value: String },
     /// Remove a config key.
     Unset { key: String },
+}
+
+/// A demo record for the `devices` noun. A real CLI reads these from its
+/// provider; the mechanisms below do not care where they came from.
+#[derive(Debug, Clone, Serialize)]
+struct Device {
+    id: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    room: Option<String>,
+}
+
+fn demo_devices() -> Vec<Device> {
+    let dev = |id: &str, name: &str, room: Option<&str>| Device {
+        id: id.into(),
+        name: name.into(),
+        room: room.map(str::to_string),
+    };
+    vec![
+        dev("H6076_AA11BB22", "Office Lamp", Some("Office")),
+        dev("KP115_CC33DD44", "Desk Plug", Some("Office")),
+        dev("H6159_EE55FF66", "Kitchen Strip", None),
+    ]
+}
+
+/// `<REF>` may be a name, an id (any case), or a unique part of a name;
+/// a tie is exit 4 naming the candidates, never a silent first pick.
+fn find_device<'a>(devices: &'a [Device], q: &str) -> Result<&'a Device, CliError> {
+    resolve::pick(devices, q, |d| vec![d.id.clone()], |d| &d.name, "device")
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -161,6 +212,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             Paged::new("document", docs.into_iter().take(n).collect()).emit(cli.common.json);
             Ok(())
         }
+        Command::Devices(cmd) => devices(cli, cmd),
         Command::SelfUpdate(args) => Updater {
             repo: REPO.into(),
             binary: BIN.into(),
@@ -182,7 +234,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     method: "password".into(),
                     login_hint: Some(format!("{BIN} auth login")),
                 },
-                &["summary", "balance", "bills", "documents"],
+                &["summary", "balance", "bills", "documents", "devices"],
             )
             .with_profiles(&[pk_cli_utility::PROFILE, pk_cli_documents::PROFILE]);
             output::json(&serde_json::to_value(&info).unwrap());
@@ -243,6 +295,41 @@ fn auth(
             let secret = args.source.read(None)?;
             creds.set(&user, &secret)?;
             eprintln!("credential stored");
+            Ok(())
+        }
+    }
+}
+
+fn devices(cli: &Cli, cmd: &DevicesCmd) -> Result<(), CliError> {
+    let json = cli.common.json;
+    let value = |d: &Device| serde_json::to_value(d).unwrap_or_default();
+    match cmd {
+        DevicesCmd::List => {
+            let rows = demo_devices().iter().map(value).collect();
+            output::emit_list(json, "device", rows, &["id", "name", "room"]);
+            Ok(())
+        }
+        DevicesCmd::Get { device } => {
+            let all = demo_devices();
+            output::emit_one(json, "device", value(find_device(&all, device)?));
+            Ok(())
+        }
+        DevicesCmd::Rename {
+            device,
+            name,
+            force,
+        } => {
+            // Gate first: a driver that forgot --force gets exit 6 before any
+            // keychain or network work (SPEC §1.3).
+            confirm::require_confirmable(*force, cli.common.interactive(), "renaming a device")?;
+            let all = demo_devices(); // a real CLI: session, then the provider read
+            let d = find_device(&all, device)?;
+            confirm::confirm(*force, &format!("Rename \"{}\" to \"{name}\"?", d.name))?;
+            // A real CLI sends the write here, then reads the device back and
+            // emits what it read — never the write's status code.
+            let mut renamed = d.clone();
+            renamed.name = name.clone();
+            output::emit_one(json, "device", value(&renamed));
             Ok(())
         }
     }
