@@ -1,5 +1,77 @@
 # Changelog
 
+## v0.8.0 — 2026-09-10
+
+Mechanisms proven this week in `google-home-cli` (and re-implemented by hand
+in `govee-cli`, `tplink-cloud-cli` and `lofty-cli` before being lifted here),
+plus the first documented-only domain profile. Additive: no existing API or
+`/v1` shape changes.
+
+- **`pk-cli-core::confirm`** — SPEC §1.3's mutation gate as functions.
+  `require_confirmable(force, interactive, what)` is exit 6 when a mutation
+  can neither prompt nor was forced; `confirm(force, prompt)` is the stderr
+  `[y/N]` (a refusal is the same `ConfirmationRequired`); `gate(&CommonArgs,
+  force, prompt)` is both in one call. The split exists for an ordering rule
+  the module documents: decide *whether a prompt is possible* **before** any
+  keychain or network work, and prompt with the resolved names after the
+  cheap reads that produce them — so a driver that forgot `--force` gets its
+  exit 6 without a macOS keychain prompt, a session mint, or a request.
+- **`pk-cli-core::resolve::pick`** — the one reference ladder for
+  `get <REF>` / `move <REF>`: exact name, exact id (case-insensitive),
+  case-insensitive name, unique partial name, in that order. More than one
+  hit at any tier — ids included — is `NotFound` naming the candidates; a
+  silent first pick never happens (the copies this replaces disagreed
+  exactly there, one of them the argument of a write). An empty query is a
+  usage error rather than a substring that matches everything.
+- **`pk-cli-core::output::{emit_list, emit_one, tagged}`** — `emit_list`
+  emits the same `<record>-list/v1` envelope `Paged` does, for the many
+  lists that are *not* a profile's and carry no paging (`devices list`,
+  `rooms list`); text mode is a `columns`-projected pipe table with a stderr
+  `(no <record>s)` when empty. `emit_one` is the single-resource counterpart
+  (key/value block in text). `tagged(schema, payload)` is the value `emit`
+  prints, exposed so the envelope is a value a CLI can write elsewhere.
+- **`pk-cli-secrets`: one keychain item per credential set.**
+  `CredentialStore::get_json<T>` / `set_json<T>` read and write a typed JSON
+  item; an item that is present but unparseable is an **error naming the
+  account**, never silently "absent" — one blob now carries the whole
+  session, so a swallowed parse failure would read as an unexplained logout
+  and the next `auth login` would overwrite whatever it held.
+  `CredentialStore::migrate_from(&legacy, &[(old, new)])` moves items
+  between services for the family-wide `piekstra.<bin>` rename: per pair,
+  read old → write new → delete old (a failure midway leaves the legacy item
+  for the next run), an existing destination wins and the legacy copy is
+  still retired so the migration converges and is safe to call on every
+  start; returns how many were copied. The hygiene fact behind the rule: on
+  macOS every keychain item a freshly built binary reads is a permission
+  prompt, so an eight-item session is eight prompts per rebuild. The item
+  logic is written against a private seam and tested in memory; no test
+  reads the OS keychain.
+- **`smart-home/v1` profile, documented — `device-rooms/v1`** (DESIGN.md
+  §1.8, PROFILES.md, conformance.md). The vendor CLIs' "every device with
+  the room our app files it under" shape — `id`, `name`, `room`, `source`,
+  optional `cloud` (false = the vendor cannot expose the device to an
+  assistant) and `connectivity` — produced by `govee rooms devices` and
+  `tplc groups devices`, consumed by `ghome audit --expect -` joining on `id`
+  (punctuation/case-insensitive) then `name`. Meets the PROFILES.md bar
+  (two producers, a real consumer, stable shape) but ships **without a
+  crate**: the DTO only crosses a process boundary as JSON, so a Rust type
+  would have no `use` sites — the "DTOs nobody consumes" failure. PROFILES.md
+  gains a "Documented-only profiles" rule for exactly this case.
+- **Spec and checklist additions** — SPEC §1.3: the confirmation decision
+  comes before any keychain/network work, and a mutation's success comes
+  from a **read-back**, never the write's status code (provider write
+  responses are routinely empty or ahead of their read side). SPEC §1.7:
+  one keychain item per credential set. Both are conformance.md checklist
+  lines and AGENTS.md rules. conformance.md also gains `ghome` (conforms,
+  v0.4.x / cli-common v0.7.0), moves govee-cli and tplink-cloud-cli to
+  "migrating — spec-v1 PR open", and documents the family CI gate
+  (ubuntu-latest fmt/clippy/test/smoke + targeted macOS smoke + a
+  cargo-audit/gitleaks security job, matching google-home-cli).
+- **`example-cli`** — a plain `devices` noun (`list`, `get <REF>`,
+  `rename <REF> <NAME> [--force]`) demonstrating `emit_list`/`emit_one`,
+  `resolve::pick`, and the two-step `confirm` gate in the order the spec
+  requires.
+
 ## v0.7.0 — 2026-08-18
 
 Partial-failure reporting for `documents download --all`. Additive on the wire:
