@@ -13,6 +13,8 @@ authors.workspace = true
 pk-cli-core = { workspace = true }
 clap = { workspace = true }
 rpassword = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 zeroize = { workspace = true }
 
 # Platform-native secret stores (macOS Keychain, Windows Credential Manager,

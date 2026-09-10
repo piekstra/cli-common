@@ -1365,6 +1365,8 @@ dependencies = [
  "keyring",
  "pk-cli-core",
  "rpassword",
+ "serde",
+ "serde_json",
  "zeroize",
 ]
 
