@@ -1,16 +1,19 @@
 //! Core surface for the piekstra CLI family (SPEC v1).
 //!
 //! Provides the shared error/exit-code contract, the text/JSON output
-//! renderer, common global flags, and small date/money helpers. See the
-//! repository's `DESIGN.md` for the full specification.
+//! renderer, common global flags, small date/money helpers, the §1.3
+//! confirmation gate, and reference resolution. See the repository's
+//! `DESIGN.md` for the full specification.
 
 pub mod args;
+pub mod confirm;
 pub mod dates;
 pub mod error;
 pub mod info;
 pub mod list;
 pub mod money;
 pub mod output;
+pub mod resolve;
 
 pub use args::CommonArgs;
 pub use error::CliError;
