@@ -35,13 +35,28 @@ per-CLI glue today, and which shapes would delete that glue?"
 | Domain | CLIs | Bar check | Verdict |
 |---|---|---|---|
 | utility portals | fpl, tojfl, lrfl, xfin | 4 CLIs, utiman pays the variance, shapes stable | **`utility/v1` — shipped** |
-| smart home | govee, tplc | 2 CLIs share devices/power/light/scenes; **no consumer** drives both yet | watch — bar fails on (2). Revisit if a home dashboard or agent flow spans both |
+| smart home | govee, tplc (+ ghome as consumer) | 2 CLIs share devices/rooms; `ghome audit --expect -` now consumes what `govee rooms devices` and `tplc groups devices` emit — the glue it replaced was a hand-kept device→room table | **`smart-home/v1` — first shape `device-rooms/v1` documented** (DESIGN.md §1.8); crate deferred, see "Documented-only profiles" |
 | messaging | discord, slck | 2 CLIs share send/read/channels; no cross-CLI consumer; slck pre-spec | watch — bring slck to SPEC v1 first |
 | commerce/registry | bl, tgt | item add/list vs product search — shapes overlap thinly | no — (1) is weak: the shared concept is ~one DTO (product/item) |
 | trading | alpaca (+ private tooling) | one public CLI | no — (1) fails outright |
 
 When a "watch" row later meets the bar, the audit that shows it (who is the
 consumer, which glue exists) belongs in the PR that adds the profile.
+
+## Documented-only profiles
+
+Meeting the bar earns a *profile* — a documented id, spellings and shapes —
+not automatically a crate. The crate is worth its maintenance when Rust code
+on both sides imports the type: a producer building the DTO and a consumer
+deserializing it. When the shape only ever crosses a process boundary as JSON
+(one CLI's `--json` piped into another's `--expect -`), a struct in
+`pk-cli-<domain>` would have zero `use` sites — the "DTOs nobody consumes"
+failure above, with a crate's worth of release overhead attached. Such a
+profile lives in DESIGN.md §1.8 with its shape spelled out field by field
+(required/optional, the join rule a consumer applies), declares itself in
+`info.profiles` like any other, and tracks adopters in `conformance.md`. It
+graduates to a crate when a second shape lands or a Rust consumer needs the
+type. `smart-home/v1` (`device-rooms/v1`) is the first.
 
 ## Design rules for a new profile
 
@@ -74,7 +89,9 @@ consumer, which glue exists) belongs in the PR that adds the profile.
 
 1. Show the bar is met (the three conditions, with the consumer named).
 2. Write the profile section in DESIGN.md §1.8: command table + DTO list.
-3. Add the `pk-cli-<domain>` crate: DTOs + shape tests (schema tag, omit-none).
+3. Add the `pk-cli-<domain>` crate: DTOs + shape tests (schema tag, omit-none)
+   — when Rust code will import the type; otherwise spell the shape out in
+   DESIGN.md field by field ("Documented-only profiles" above).
 4. Wire a demonstration into `example-cli` if it's the family's first profile
    of its kind, or into the closest real CLI otherwise.
 5. Add a profile column/row to `conformance.md`; migrating CLIs track there.
