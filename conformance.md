@@ -14,8 +14,10 @@ status here.
 - [ ] `completions <shell>`
 - [ ] `info` emitting cli-info/v1
 - [ ] Secrets only via keychain (`piekstra.<bin>`), stdin, env — never argv
+- [ ] One keychain item per credential set (a JSON blob via `get_json`/`set_json`; a legacy per-field layout is migrated on first read, then deleted)
 - [ ] ISO `YYYY-MM-DD` accepted on all date flags; `--limit N` on lists
-- [ ] Mutations prompt unless `--force`; exit 6 when non-interactive
+- [ ] Mutations prompt unless `--force`; exit 6 when non-interactive — decided **before** any keychain or network work (`pk_cli_core::confirm`)
+- [ ] Mutations report success from a read-back (or the write's echo only when it carries the values), never from the write's status code
 
 ## Family status
 
@@ -31,9 +33,11 @@ Drift notes are from the 2026-07-19 family audit.
 | lrfl | conforms (v0.6.0 pending — profile PR open) — shared `self-update` (fixes the `--check`-only probe break). Remaining: `config set-account` spelling; hidden legacy `login`/`logout`/`whoami` |
 | tojfl | conforms (v0.3.0, cli-common v0.2.0). Remaining: SDK keychain service name unchanged; skips pk-cli-secrets/pk-cli-config; no `auth set-credential`; no `api` |
 | gpm2op | conforms (v0.2.0) — no keychain (delegates to `op`); no `config`/`auth` commands (nothing to store) |
+| ghome (google-home-cli) | conforms (v0.4.x, cli-common v0.7.0) — the reference for the confirmation gate, the resolve ladder, `emit_list`, the one-item keychain session (legacy two-item layout migrated on first read) and the read-back rail; consumer of `device-rooms/v1` |
 | target-cli | planned — the credential-free template case (`auth status` with `required: false`) |
 | babylist-cli | planned |
-| govee-cli, tplink-cloud-cli | pre-spec — inverted output default (JSON + `--table`), shifted exit codes, unprefixed keychain services |
+| govee-cli | migrating — spec-v1 PR open (against cli-common v0.7.0): output default flipped to text + `--json`, exit codes, keychain service → `piekstra.govee`; producer of `device-rooms/v1` |
+| tplink-cloud-cli (`tplc`) | migrating — spec-v1 PR open (against cli-common v0.7.0): output default, exit codes, eight keychain items → one `session` item, service → `piekstra.tplc`; producer of `device-rooms/v1` |
 | slack-rs (`slck`) | pre-spec — **security: token accepted on argv**; fix ingestion before adoption |
 | alpaca-rs (`alpaca`) | pre-spec — env-only auth (acceptable; report `method: "env"`), JSON-always, no `--version` |
 | pup, twapp | pre-spec — adopt selectively (exit codes, `info`, self-update); surfaces stay their own |
@@ -65,3 +69,25 @@ adapter table. The migration is **deferred to the v0.5.0 release window, not
 skipped** (PROFILES.md step 7): the CLIs pin `cli-common` by tag and adopt the
 crate only after v0.5.0 tags, and `organize-scans` migrates after the CLIs
 expose `documents`. Sequencing and status tracked in issue #8.
+
+| CLI | smart-home/v1 (`device-rooms/v1`, documented — no crate) |
+|---|---|
+| ghome | **consumer** — `audit --expect -` joins on `id` (punctuation/case-insensitive) then `name` |
+| govee | **producer** — `rooms devices` (ids are `<SKU>_<MAC>`; `cloud: false` for Bluetooth-only devices) |
+| tplc | **producer** — `groups devices` |
+
+Consumer: `ghome audit` — the vendor's own room placement checked against
+Google Home's, replacing a hand-kept device→room table. Producers declare
+`smart-home/v1` in `info.profiles` once their spec-v1 PRs land.
+
+## CI
+
+The family gate (matching `google-home-cli`'s workflows, the template for
+the rest; this repo's own workflow adopts it in #15): `fmt` / `clippy -D warnings` / `test` / an offline smoke
+(`--version`, `--help`, `info`) on **ubuntu-latest**, plus a **targeted macOS
+smoke** — build and run the same three commands — rather than a full macOS
+matrix, because the only platform-specific sliver is the apple-native keyring
+backend and macOS minutes bill at roughly ten times Linux. A separate
+**security** job runs `cargo-audit` (rustsec/audit-check) and `gitleaks`.
+Tests are offline and never read the OS keychain (an ad-hoc-signed test
+binary would prompt once per item per run).

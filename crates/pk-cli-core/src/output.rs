@@ -20,6 +20,14 @@ pub fn emit(json_mode: bool, schema: &str, payload: Value, text: impl FnOnce(&Va
         text(&payload);
         return;
     }
+    json(&tagged(schema, payload));
+}
+
+/// The value [`emit`] prints in JSON mode: `payload` with `"schema":
+/// "<schema>/v1"` as its first key. Exposed so a CLI that needs the DTO as a
+/// value — to write it to a file, to hand to another process — builds exactly
+/// what `--json` would have printed.
+pub fn tagged(schema: &str, payload: Value) -> Value {
     let mut tagged = serde_json::Map::new();
     tagged.insert("schema".into(), Value::String(format!("{schema}/v1")));
     match payload {
@@ -28,7 +36,45 @@ pub fn emit(json_mode: bool, schema: &str, payload: Value, text: impl FnOnce(&Va
             tagged.insert("data".into(), other);
         }
     }
-    json(&Value::Object(tagged));
+    Value::Object(tagged)
+}
+
+/// Emit a plain list: `{"schema": "<record>-list/v1", "items": [...]}` in
+/// JSON mode, a pipe table of `columns` in text mode (with a stderr
+/// `(no <record>s)` note instead of an empty table).
+///
+/// This is the list shape for the many lists that are *not* a domain
+/// profile's — `devices list`, `rooms list`, `agents list` — and so carry no
+/// paging. It emits the same envelope [`Paged`] does (records under `items`,
+/// `<record>-list/v1`), so a consumer reads both the same way; the difference
+/// is only what the producer has in hand. Use [`Paged`] when the list is a
+/// profile command taking [`RangeArgs`] or the provider pages (`next_cursor`,
+/// `total`); use this when there is just a `Vec` of rows to show. `columns`
+/// picks and orders the text-mode table so the JSON can carry more fields
+/// than the table has room for.
+///
+/// [`Paged`]: crate::Paged
+/// [`RangeArgs`]: crate::RangeArgs
+/// Text mode renders exactly what [`Paged::emit`](crate::Paged::emit) does:
+/// the items as a pipe table, and nothing at all for an empty list (a
+/// script reading stdout sees no rows either way; `--json` is the machine
+/// path).
+pub fn emit_list(json_mode: bool, record: &str, items: Vec<Value>, columns: &[&str]) {
+    let payload = Value::Object(serde_json::Map::from_iter([(
+        "items".to_string(),
+        Value::Array(items),
+    )]));
+    emit(json_mode, &format!("{record}-list"), payload, |v| {
+        table(&table_view(&rows_of(v, "items"), columns));
+    });
+}
+
+/// Emit a single resource: the `schema`-tagged DTO in JSON mode, [`render`]
+/// in text mode (a key/value block for an object, a table for an array, the
+/// bare value for a scalar — the same shapes the JSON branch accepts). The
+/// `get <REF>` counterpart of [`emit_list`].
+pub fn emit_one(json_mode: bool, schema: &str, value: Value) {
+    emit(json_mode, schema, value, render);
 }
 
 /// Project selected columns out of an array of objects, for [`table`].
@@ -269,5 +315,33 @@ mod tests {
         let mut called = false;
         emit(true, "x", json!({ "a": 1 }), |_| called = true);
         assert!(!called, "text renderer must not run in --json mode");
+    }
+
+    #[test]
+    fn tagged_leads_with_the_schema_and_flattens_objects() {
+        let v = tagged("payment-list", json!({ "payments": [1] }));
+        let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["schema", "payments"]);
+        assert_eq!(v["schema"], "payment-list/v1");
+        assert_eq!(v["payments"], json!([1]));
+    }
+
+    #[test]
+    fn tagged_nests_non_objects_under_data() {
+        let v = tagged("thing", json!([1, 2]));
+        assert_eq!(v["schema"], "thing/v1");
+        assert_eq!(v["data"], json!([1, 2]));
+    }
+
+    /// `emit_list` prints, so the envelope it prints is asserted through the
+    /// same `tagged` call it makes; the schema spelling is the contract.
+    #[test]
+    fn list_envelope_matches_paged() {
+        let items = vec![json!({"id": "d1", "name": "Lamp"})];
+        let v = tagged("device-list", json!({ "items": items.clone() }));
+        assert_eq!(v["schema"], "device-list/v1");
+        assert_eq!(v["items"], json!(items));
+        let paged = crate::Paged::new("device", items);
+        assert_eq!(serde_json::to_value(&paged).unwrap()["schema"], v["schema"]);
     }
 }

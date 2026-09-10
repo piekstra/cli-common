@@ -19,8 +19,8 @@ self-update.
 
 | Crate | What it gives a CLI |
 |---|---|
-| `pk-cli-core` | error type + stable exit codes (0–6), `--json`/text output renderer, common global flags, date & `Money` helpers, `cli-info/v1` DTO, shared list primitives (`Paged` envelope + `--limit/--since/--until` range flags) |
-| `pk-cli-secrets` | redacting `Secret` type, OS-keychain `CredentialStore` (`piekstra.<bin>`), `--stdin`/`--from-env` ingestion (secrets never on argv) |
+| `pk-cli-core` | error type + stable exit codes (0–6), `--json`/text output renderer (incl. `emit_list`/`emit_one`), common global flags, date & `Money` helpers, `cli-info/v1` DTO, shared list primitives (`Paged` envelope + `--limit/--since/--until` range flags), the §1.3 confirmation gate (`confirm`), and reference resolution (`resolve::pick`) |
+| `pk-cli-secrets` | redacting `Secret` type, OS-keychain `CredentialStore` (`piekstra.<bin>`) with one-item JSON credentials (`get_json`/`set_json`) and legacy-service `migrate_from`, `--stdin`/`--from-env` ingestion (secrets never on argv) |
 | `pk-cli-config` | non-secret JSON config at `~/.config/<bin>/config.json` |
 | `pk-cli-selfupdate` | `self-update [--check] [-y]` from GitHub Releases, `self-update/v1` DTO |
 | `pk-cli-auth` | `auth login/status/logout/set-credential` arg structs, the canonical `auth-status/v1` DTO, `token` (bearer-token claim reads: expiry, `expires_at`), and `reauth::with_reauth` (retry a read once after re-authenticating, with the retry-once/no-login-storm rails) |
@@ -51,8 +51,8 @@ Exit codes: `0` ok · `1` other · `2` usage · `3` auth · `4` not found ·
 `--json` on any command → the DTO alone on stdout; on failure,
 `{"error": {"code", "message"}}` plus the matching exit code. Canonical DTOs
 carry a `"schema"` tag: `auth-status/v1`, `self-update/v1`, `cli-info/v1`,
-plus per-profile shapes (e.g. `utility-summary/v1`). A CLI declares its
-domain profiles in `info` (`"profiles": ["utility/v1"]`).
+plus per-profile shapes (e.g. `utility-summary/v1`, `device-rooms/v1`). A CLI
+declares its domain profiles in `info` (`"profiles": ["utility/v1"]`).
 
 ```console
 $ example-cli --json auth status
