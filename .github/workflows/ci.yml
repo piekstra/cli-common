@@ -31,18 +31,20 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
-  # The only platform-specific sliver is the apple-native keyring backend in
-  # pk-cli-secrets, so macOS gets a build of the workspace and that crate's
-  # tests — not a second copy of the whole gate (macOS minutes bill at ~10x).
+  # The platform-specific slivers are the apple-native keyring backend in
+  # pk-cli-secrets and the codesign re-sign step in pk-cli-selfupdate
+  # (`#[cfg(target_os = "macos")]`), so macOS builds the workspace and runs
+  # those two crates' tests — not a second copy of the whole gate (macOS
+  # minutes bill at ~10x). Add a crate here when it grows a macOS-only path.
   macos-smoke:
-    name: macos smoke (apple-native keyring)
+    name: macos smoke (apple-native keyring, codesign)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
-      - run: cargo test -p pk-cli-secrets
+      - run: cargo test -p pk-cli-secrets -p pk-cli-selfupdate
 
   security:
     runs-on: ubuntu-latest
