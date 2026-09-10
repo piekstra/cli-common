@@ -20,6 +20,12 @@ Shared surface spec + library crates for the piekstra CLI family. Read
 - **Exit codes 0–6 are frozen** (see `pk-cli-core::CliError`). Never renumber.
 - **Secrets never on argv, never in logs.** All ingestion goes through
   `pk-cli-secrets` (`--stdin` / `--from-env` / no-echo prompt).
+- **One keychain item per credential set** (DESIGN.md §1.7): use
+  `CredentialStore::get_json`/`set_json`, migrate legacy layouts on first
+  read. Every extra item is a macOS prompt.
+- **Mutations gate first, read back after** (DESIGN.md §1.3):
+  `pk_cli_core::confirm` before any keychain/network work; success only from
+  a read-back, never from the write's status code.
 - This repo is public: no employer-internal names, no real account numbers,
   addresses, or personal data in code, fixtures, docs, or git history.
 - Keep crates dependency-light; provider-specific logic belongs in the CLIs,
@@ -78,8 +84,8 @@ adopting this.
 
 ## Workflow
 
-- `cargo test --workspace && cargo clippy --workspace --all-targets` must be
-  clean before committing.
+- `cargo test --workspace && cargo clippy --workspace --all-targets -- -D
+  warnings && cargo fmt --all --check` must be clean before committing.
 - `example-cli` must keep compiling and demonstrating the full surface — it is
   the template new CLIs copy.
 - Releases: bump `workspace.package.version`, update `CHANGELOG.md`, tag

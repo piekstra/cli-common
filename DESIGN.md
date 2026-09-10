@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -78,7 +78,14 @@ outages list                          # provider-specific extras are fine
 Rules:
 - Mutations (`payments create`, anything with side effects) prompt for
   confirmation unless `--force`; in `--json`/non-tty mode they **fail** with
-  exit 6 instead of prompting.
+  exit 6 instead of prompting. Whether a prompt is even possible is decided
+  **before** any keychain or network work, so a driver that forgot `--force`
+  never triggers a credential prompt or a request on its way to exit 6
+  (`pk_cli_core::confirm`).
+- A mutation reports success from a **read-back**, never from the write's
+  status code: re-read the resource (or use the write's echo only when it
+  carries the resulting values) before emitting the success DTO. Provider
+  write responses are routinely empty, or ahead of their own read side.
 - Dates accepted as ISO `YYYY-MM-DD` everywhere (provider formats are an
   internal concern). `--limit N` is the universal pagination knob.
 
@@ -161,7 +168,13 @@ conventions alone; TOML manifests stay as the escape hatch for non-conforming CL
 
 - Secrets enter only via prompt, `--stdin`, or `--from-env` — never argv.
 - Secrets live only in the OS keychain, service name `piekstra.<bin>` (existing
-  entries migrated on first run).
+  entries migrated on first run — `CredentialStore::migrate_from`).
+- **One keychain item per credential set.** A token, its refresh token and
+  their metadata are one JSON item, not one item each: on macOS every item a
+  freshly built binary reads is a permission prompt, so a four-item layout
+  asks four times after every rebuild and reads as "flaky"
+  (`pk_cli_secrets::CredentialStore::{get_json, set_json}`; a legacy
+  per-field layout is migrated on first read, then deleted).
 - `--verbose` never logs secrets, cookies, or full account numbers.
 - Public repos: no internal-employer names, no real account numbers/addresses in
   fixtures, docs, or git history.
@@ -269,6 +282,46 @@ shape — `<cli> documents list --json` then `<cli> documents download <id> -o
 release window (the CLIs pin `cli-common` by tag, so they adopt after the
 version tags), tracked in issue #8; `conformance.md` marks each CLI's status.
 
+#### The `smart-home/v1` profile (documented; no crate yet)
+
+For the vendor CLIs that front a smart-home cloud (`govee`, `tplc`, …) and the
+assistant-side CLI that places their devices in rooms (`ghome`). The first —
+so far only — shape is the one a cross-vendor consumer already pays for:
+
+**`device-rooms/v1`** — every device a vendor knows, with the room the
+vendor's own app files it under.
+
+```json
+{
+  "schema": "device-rooms/v1",
+  "items": [
+    { "id": "H6076_AA11BB22", "name": "Office Lamp", "room": "Office",
+      "source": "govee", "cloud": true, "connectivity": "wifi" }
+  ]
+}
+```
+
+| Field | | |
+|---|---|---|
+| `id` | required | the vendor's own device id — the join key against the assistant's partner device id |
+| `name` | required | display name — the fallback join key |
+| `room` | required | room/group name in the vendor's app |
+| `source` | required | which vendor produced the row (`govee`, `tplink`, …); free text |
+| `cloud` | optional | `false` when the vendor cannot expose the device to a cloud/assistant (Bluetooth-only), so a consumer expects no match instead of reporting one missing |
+| `connectivity` | optional | `wifi` \| `bluetooth` |
+
+Join rule for consumers: on `id` first, compared stripped of punctuation and
+case (vendors render the same MAC as `AA:BB` in one place and `aabb` in
+another), then on `name`. Producers: `govee rooms devices`, `tplc groups
+devices`. Consumer: `ghome audit --expect -`.
+
+The profile is documented here rather than shipped as a crate: the shape is
+one DTO that only ever crosses a process boundary as JSON, so no Rust type is
+imported anywhere and a `pk-cli-smart-home` crate would be the
+"DTOs nobody consumes" failure PROFILES.md guards against. It earns the crate
+when a second shape lands or a Rust consumer needs the type (PROFILES.md,
+"Documented-only profiles"). Adopters track in `conformance.md`.
+
 ---
 
 ## Part 2 — The `cli-common` workspace
@@ -280,8 +333,8 @@ AGENTS.md, same house style as the CLIs.
 
 | Crate | Contents | Replaces (today) |
 |---|---|---|
-| `pk-cli-core` | `GlobalArgs` clap flatten struct; `ExitCode` enum per 1.5; error type with `code` slugs; output renderer (key/value blocks, pipe tables, JSON emit incl. error shape); date/money types (`Money`, ISO parsing helpers) | fpl/xfin `output.rs`+`dates.rs`+`error.rs`, lrfl `formatter.rs`, tojfl `output.rs` |
-| `pk-cli-secrets` | keychain read/write/delete under `piekstra.<bin>`; secret ingestion (`--stdin`/`--from-env` args + logic); `auth set-credential` command impl | fpl/xfin `secrets.rs`, lrfl `auth/secrets.rs` |
+| `pk-cli-core` | `GlobalArgs` clap flatten struct; `ExitCode` enum per 1.5; error type with `code` slugs; output renderer (key/value blocks, pipe tables, JSON emit incl. error shape, `emit_list`/`emit_one` for plain lists and single resources); date/money types (`Money`, ISO parsing helpers); the §1.3 confirmation gate (`confirm`); reference resolution (`resolve::pick` — exact name, exact id, case-insensitive name, unique partial; ties are exit 4 naming the candidates) | fpl/xfin `output.rs`+`dates.rs`+`error.rs`, lrfl `formatter.rs`, tojfl `output.rs`; ghome/govee/lofty `confirm`, ghome/govee resolve ladders |
+| `pk-cli-secrets` | keychain read/write/delete under `piekstra.<bin>`; typed one-item JSON credentials (`get_json`/`set_json`) and legacy-service migration (`migrate_from`); secret ingestion (`--stdin`/`--from-env` args + logic); `auth set-credential` command impl | fpl/xfin `secrets.rs`, lrfl `auth/secrets.rs`; ghome `session.rs`/tplc `keychain.rs` item consolidation |
 | `pk-cli-config` | `~/.config/<bin>/config.toml` load/save, typed get/set, `config` subcommand impl, `--config` override | four `config.rs` variants |
 | `pk-cli-selfupdate` | GitHub-release check + in-place replace, `--check`/`-y`/`--json`, `self-update/v1` DTO, release-asset naming convention | ~580 duplicated lines across 4 repos |
 | `pk-cli-auth` | `AuthCmd` clap enum + driver trait: CLI supplies `verify()`/`login()`, crate supplies status DTO (`auth-status/v1`), logout, prompting rules | four auth command modules |
