@@ -305,15 +305,16 @@ vendor's own app files it under.
 |---|---|---|
 | `id` | required | the vendor's own device id — the join key against the assistant's partner device id |
 | `name` | required | display name — the fallback join key |
-| `room` | required | room/group name in the vendor's app |
+| `room` | optional | room/group name in the vendor's app; **omitted** (never null) when the app files the device in no room, so a consumer reports the vendor side as unfiled instead of never hearing of the device |
 | `source` | required | which vendor produced the row (`govee`, `tplink`, …); free text |
 | `cloud` | optional | `false` when the vendor cannot expose the device to a cloud/assistant (Bluetooth-only), so a consumer expects no match instead of reporting one missing |
 | `connectivity` | optional | `wifi` \| `bluetooth` |
 
 Join rule for consumers: on `id` first, compared stripped of punctuation and
 case (vendors render the same MAC as `AA:BB` in one place and `aabb` in
-another), then on `name`. Producers: `govee rooms devices`, `tplc groups
-devices`. Consumer: `ghome audit --expect -`.
+another), then on `name`. Producers: `govee rooms devices`, `tplc rooms
+devices` (Tapo), `tplc groups devices` (Kasa). Consumer: `ghome audit --expect -`,
+which reports a row without `room` as `unfiled`.
 
 The profile is documented here rather than shipped as a crate: the shape is
 one DTO that only ever crosses a process boundary as JSON, so no Rust type is
