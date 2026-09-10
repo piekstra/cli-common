@@ -20,16 +20,12 @@ Shared surface spec + library crates for the piekstra CLI family. Read
 - **Exit codes 0–6 are frozen** (see `pk-cli-core::CliError`). Never renumber.
 - **Secrets never on argv, never in logs.** All ingestion goes through
   `pk-cli-secrets` (`--stdin` / `--from-env` / no-echo prompt).
-- **One keychain item per credential set.** On macOS every item a freshly
-  built binary reads is a permission prompt, so a session is one JSON item
-  (`CredentialStore::get_json`/`set_json`), never one item per field; a
-  legacy layout is migrated on first read and then deleted.
-- **Never report a mutation's success from its status code.** Read the
-  resource back (or use the write's echo only when it carries the values)
-  before emitting the success DTO. Provider write responses are routinely
-  empty or ahead of their read side. And gate the mutation
-  (`pk_cli_core::confirm::require_confirmable`) **before** any keychain or
-  network work, so a missing `--force` is exit 6 without a prompt or request.
+- **One keychain item per credential set** (DESIGN.md §1.7): use
+  `CredentialStore::get_json`/`set_json`, migrate legacy layouts on first
+  read. Every extra item is a macOS prompt.
+- **Mutations gate first, read back after** (DESIGN.md §1.3):
+  `pk_cli_core::confirm` before any keychain/network work; success only from
+  a read-back, never from the write's status code.
 - This repo is public: no employer-internal names, no real account numbers,
   addresses, or personal data in code, fixtures, docs, or git history.
 - Keep crates dependency-light; provider-specific logic belongs in the CLIs,

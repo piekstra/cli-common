@@ -237,7 +237,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                 &["summary", "balance", "bills", "documents", "devices"],
             )
             .with_profiles(&[pk_cli_utility::PROFILE, pk_cli_documents::PROFILE]);
-            output::json(&serde_json::to_value(&info).unwrap());
+            output::json(&serde_json::to_value(&info).expect("CliInfo serializes to JSON"));
             Ok(())
         }
     }
@@ -302,16 +302,21 @@ fn auth(
 
 fn devices(cli: &Cli, cmd: &DevicesCmd) -> Result<(), CliError> {
     let json = cli.common.json;
-    let value = |d: &Device| serde_json::to_value(d).unwrap_or_default();
+    let value = |d: &Device| {
+        serde_json::to_value(d).map_err(|e| CliError::Other(format!("serializing device: {e}")))
+    };
     match cmd {
         DevicesCmd::List => {
-            let rows = demo_devices().iter().map(value).collect();
+            let rows = demo_devices()
+                .iter()
+                .map(value)
+                .collect::<Result<Vec<_>, _>>()?;
             output::emit_list(json, "device", rows, &["id", "name", "room"]);
             Ok(())
         }
         DevicesCmd::Get { device } => {
             let all = demo_devices();
-            output::emit_one(json, "device", value(find_device(&all, device)?));
+            output::emit_one(json, "device", value(find_device(&all, device)?)?);
             Ok(())
         }
         DevicesCmd::Rename {
@@ -329,7 +334,7 @@ fn devices(cli: &Cli, cmd: &DevicesCmd) -> Result<(), CliError> {
             // emits what it read — never the write's status code.
             let mut renamed = d.clone();
             renamed.name = name.clone();
-            output::emit_one(json, "device", value(&renamed));
+            output::emit_one(json, "device", value(&renamed)?);
             Ok(())
         }
     }

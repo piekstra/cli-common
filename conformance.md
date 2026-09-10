@@ -83,7 +83,7 @@ Google Home's, replacing a hand-kept device→room table. Producers declare
 ## CI
 
 The family gate (matching `google-home-cli`'s workflows, the template for
-the rest): `fmt` / `clippy -D warnings` / `test` / an offline smoke
+the rest; this repo's own workflow adopts it in #15): `fmt` / `clippy -D warnings` / `test` / an offline smoke
 (`--version`, `--help`, `info`) on **ubuntu-latest**, plus a **targeted macOS
 smoke** — build and run the same three commands — rather than a full macOS
 matrix, because the only platform-specific sliver is the apple-native keyring

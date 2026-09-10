@@ -55,25 +55,26 @@ pub fn tagged(schema: &str, payload: Value) -> Value {
 ///
 /// [`Paged`]: crate::Paged
 /// [`RangeArgs`]: crate::RangeArgs
+/// Text mode renders exactly what [`Paged::emit`](crate::Paged::emit) does:
+/// the items as a pipe table, and nothing at all for an empty list (a
+/// script reading stdout sees no rows either way; `--json` is the machine
+/// path).
 pub fn emit_list(json_mode: bool, record: &str, items: Vec<Value>, columns: &[&str]) {
     let payload = Value::Object(serde_json::Map::from_iter([(
         "items".to_string(),
         Value::Array(items),
     )]));
     emit(json_mode, &format!("{record}-list"), payload, |v| {
-        let rows = rows_of(v, "items");
-        if rows.is_empty() {
-            eprintln!("(no {record}s)");
-        } else {
-            table(&table_view(&rows, columns));
-        }
+        table(&table_view(&rows_of(v, "items"), columns));
     });
 }
 
-/// Emit a single resource: the `schema`-tagged DTO in JSON mode, a key/value
-/// block in text mode. The `get <REF>` counterpart of [`emit_list`].
+/// Emit a single resource: the `schema`-tagged DTO in JSON mode, [`render`]
+/// in text mode (a key/value block for an object, a table for an array, the
+/// bare value for a scalar — the same shapes the JSON branch accepts). The
+/// `get <REF>` counterpart of [`emit_list`].
 pub fn emit_one(json_mode: bool, schema: &str, value: Value) {
-    emit(json_mode, schema, value, |v| kv(v, 0));
+    emit(json_mode, schema, value, render);
 }
 
 /// Project selected columns out of an array of objects, for [`table`].
