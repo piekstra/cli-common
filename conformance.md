@@ -33,11 +33,11 @@ Drift notes are from the 2026-07-19 family audit.
 | lrfl | conforms (v0.6.0 pending — profile PR open) — shared `self-update` (fixes the `--check`-only probe break). Remaining: `config set-account` spelling; hidden legacy `login`/`logout`/`whoami` |
 | tojfl | conforms (v0.3.0, cli-common v0.2.0). Remaining: SDK keychain service name unchanged; skips pk-cli-secrets/pk-cli-config; no `auth set-credential`; no `api` |
 | gpm2op | conforms (v0.2.0) — no keychain (delegates to `op`); no `config`/`auth` commands (nothing to store) |
-| ghome (google-home-cli) | conforms (v0.4.x, cli-common v0.7.0) — the reference for the confirmation gate, the resolve ladder, `emit_list`, the one-item keychain session (legacy two-item layout migrated on first read) and the read-back rail; consumer of `device-rooms/v1` |
+| ghome (google-home-cli) | conforms (v0.4.x, cli-common v0.7.0) — the reference for the confirmation gate, the resolve ladder, `emit_list`, the one-item keychain session (legacy two-item layout migrated on first read) and the read-back rail; consumer of `device-rooms/v1`; reports a row without `room` as `unfiled` (0.5.0) |
 | target-cli | planned — the credential-free template case (`auth status` with `required: false`) |
 | babylist-cli | planned |
-| govee-cli (`govee`) | conforms (v0.2.0, cli-common v0.8.0) — text default + `--json`, family exit codes, `auth`/`config`/`self-update`/`info`/`api`, keychain `piekstra.govee` (migrated from `govee-cli`); `rooms devices` emits `device-rooms/v1` |
-| tplink-cloud-cli (`tplc`) | conforms (v0.2.0, cli-common v0.8.0) — as above, keychain `piekstra.tplc`; `api` is a cloud-RPC passthrough by method name (documented); `groups devices`/`rooms devices` emit `device-rooms/v1` |
+| govee-cli (`govee`) | conforms (v0.2.0, cli-common v0.8.0) — text default + `--json`, family exit codes, `auth`/`config`/`self-update`/`info`/`api`, keychain `piekstra.govee` (migrated from `govee-cli`); `rooms devices` emits `device-rooms/v1` (0.2.1, govee-cli #21: a device the app files in no room keeps its row with `room` omitted) |
+| tplink-cloud-cli (`tplc`) | conforms (v0.2.0, cli-common v0.8.0) — as above, keychain `piekstra.tplc`; `api` is a cloud-RPC passthrough by method name (documented); `groups devices`/`rooms devices` emit `device-rooms/v1` (0.2.1, tplink-cloud-cli #4: a Tapo device's `id` is the MAC without separators, what Google's `partner_device_id` shows, so rows join; one of Tapo's own devices in no room keeps its row with `room` omitted) |
 | slack-rs (`slck`) | pre-spec — **security: token accepted on argv**; fix ingestion before adoption |
 | alpaca-rs (`alpaca`) | pre-spec — env-only auth (acceptable; report `method: "env"`), JSON-always, no `--version` |
 | pup, twapp | pre-spec — adopt selectively (exit codes, `info`, self-update); surfaces stay their own |
@@ -72,9 +72,9 @@ expose `documents`. Sequencing and status tracked in issue #8.
 
 | CLI | smart-home/v1 (`device-rooms/v1`, documented — no crate) |
 |---|---|
-| ghome | **consumer** — `audit --expect -` joins on `id` (punctuation/case-insensitive) then `name` |
-| govee | **producer** — `rooms devices` (ids are `<SKU>_<MAC>`; `cloud: false` for Bluetooth-only devices) |
-| tplc | **producer** — `groups devices` |
+| ghome | **consumer** — `audit --expect -` joins on `id` (punctuation/case-insensitive) then `name`; reports a row without `room` as `unfiled` (0.5.0) |
+| govee | **producer** — `rooms devices` (ids are `<SKU>_<MAC>`; `cloud: false` for Bluetooth-only devices; `room` omitted for a device in no room, 0.2.1) |
+| tplc | **producer** — `groups devices` (Kasa groups), `rooms devices` (Tapo rooms: ids are the MAC without separators, `room` omitted for one of Tapo's own devices in no room; 0.2.1) |
 
 Consumer: `ghome audit` — the vendor's own room placement checked against
 Google Home's, replacing a hand-kept device→room table. Producers declare
