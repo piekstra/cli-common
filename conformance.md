@@ -38,6 +38,7 @@ Drift notes are from the 2026-07-19 family audit.
 | babylist-cli | planned |
 | govee-cli (`govee`) | conforms (v0.2.0, cli-common v0.8.0) — text default + `--json`, family exit codes, `auth`/`config`/`self-update`/`info`/`api`, keychain `piekstra.govee` (migrated from `govee-cli`); `rooms devices` emits `device-rooms/v1` (0.2.1, govee-cli #21: a device the app files in no room keeps its row with `room` omitted) |
 | tplink-cloud-cli (`tplc`) | conforms (v0.2.0, cli-common v0.8.0) — as above, keychain `piekstra.tplc`; `api` is a cloud-RPC passthrough by method name (documented); `groups devices`/`rooms devices` emit `device-rooms/v1` (0.2.1, tplink-cloud-cli #4: a Tapo device's `id` is the MAC without separators, what Google's `partner_device_id` shows, so rows join; one of Tapo's own devices in no room keeps its row with `room` omitted) |
+| insperity-cli (`insp`) | conforms (v0.1.0, cli-common v0.8.0; one-item keychain landed in [insperity-cli #7](https://github.com/piekstra/insperity-cli/pull/7)) — read-only (`api` refuses PUT/PATCH/DELETE with exit 6, so the confirmation lines are vacuous by design); `documents/v1` producer; keychain `piekstra.insp` / `credentials` holds password, session jar, device-signal blob and the parked MFA login as one JSON item (the legacy four-item layout is folded on first read, then deleted); `paystubs list` / `documents list` refuse (exit 5) rather than dress the single current paycheck as a list the portal never publishes |
 | slack-rs (`slck`) | pre-spec — **security: token accepted on argv**; fix ingestion before adoption |
 | alpaca-rs (`alpaca`) | pre-spec — env-only auth (acceptable; report `method: "env"`), JSON-always, no `--version` |
 | pup, twapp | pre-spec — adopt selectively (exit codes, `info`, self-update); surfaces stay their own |
@@ -62,6 +63,7 @@ manifest field config (fast path + label-field chains, utiman #22/#26).
 | wabhoa | planned — has `statements list` (metadata); gains `documents list` + `download` once a live capture confirms the PDF endpoint |
 | fpl, tojfl, lrfl | planned — fold `bills download`/`bill --save` into `documents download` (old spellings kept as aliases) |
 | rpmfl | planned — `documents`/`forms` → profile shapes |
+| insp | ships — `documents download` (alias `get`) serves the paystub PDF for a pay date as `document-download/v1`; `documents list` refuses (exit 5) because the portal publishes no document index, so no list shape is dressed over a single-document read |
 
 Consumer: the `organize-scans` archiver — one `documents list --json` +
 `documents download <id> -o` per CLI replaces its per-CLI download-command
