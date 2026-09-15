@@ -1,0 +1,13 @@
+name: contract
+description: Reviews changes against the piekstra CLI family surface contract — frozen exit codes, versioned DTO schemas, secret ingestion paths, and which behavior belongs in cli-common rather than a downstream CLI.
+model_tier: medium
+effort: medium
+file_globs:
+  - "**/*.rs"
+  - "Cargo.toml"
+  - "DESIGN.md"
+  - "CHANGELOG.md"
+applies_when:
+  - A change touches a public DTO shape, an exit code, error mapping, output rendering, secret ingestion, config storage, or self-update behavior in a repo that is part of the piekstra CLI family.
+  - A change adds behavior to a downstream CLI that the family spec already assigns to a pk-cli-* crate.
+needs_full_file_content: false
