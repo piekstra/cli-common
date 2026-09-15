@@ -63,6 +63,7 @@ manifest field config (fast path + label-field chains, utiman #22/#26).
 | wabhoa | planned — has `statements list` (metadata); gains `documents list` + `download` once a live capture confirms the PDF endpoint |
 | fpl, tojfl, lrfl | planned — fold `bills download`/`bill --save` into `documents download` (old spellings kept as aliases) |
 | rpmfl | planned — `documents`/`forms` → profile shapes |
+| insp | ships — `documents download` (alias `get`) serves the paystub PDF for a pay date as `document-download/v1`; `documents list` refuses (exit 5) because the portal publishes no document index, so no list shape is dressed over a single-document read |
 
 Consumer: the `organize-scans` archiver — one `documents list --json` +
 `documents download <id> -o` per CLI replaces its per-CLI download-command
