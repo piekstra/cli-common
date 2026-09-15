@@ -52,6 +52,7 @@ jobs:
       contents: read
       pull-requests: write
       security-events: write
+      checks: write # rustsec/audit-check publishes a check run; without this it dies with "Resource not accessible by integration"
     steps:
       - uses: actions/checkout@v4
         with:
