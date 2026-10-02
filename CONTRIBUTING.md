@@ -14,6 +14,9 @@ same behavior, it belongs here, not copied into each repo.
 
 ## Local checks (must pass)
 
+`make verify` runs CI's `check` job locally: format check, clippy, tests.
+The same steps by hand:
+
 ```sh
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings

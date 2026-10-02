@@ -15,6 +15,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
 
+# `dates::local_utc_offset` reads the zone through `localtime_r`. Bindings only,
+# no build script; already in the workspace's lockfile through the HTTP and
+# keyring crates.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 # `From<reqwest::Error> for CliError` (orphan rule keeps this out of consumer crates).
 reqwest = ["dep:reqwest"]

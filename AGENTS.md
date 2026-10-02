@@ -84,8 +84,9 @@ adopting this.
 
 ## Workflow
 
-- `cargo test --workspace && cargo clippy --workspace --all-targets -- -D
-  warnings && cargo fmt --all --check` must be clean before committing.
+- `make verify` (`cargo fmt --all --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace`) must be clean
+  before committing.
 - `example-cli` must keep compiling and demonstrating the full surface — it is
   the template new CLIs copy.
 - Releases: bump `workspace.package.version`, update `CHANGELOG.md`, tag
