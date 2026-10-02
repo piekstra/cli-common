@@ -13,7 +13,7 @@ status here.
 - [ ] `self-update [--check] [-y]` with self-update/v1 DTO
 - [ ] `completions <shell>`
 - [ ] `info` emitting cli-info/v1
-- [ ] Secrets only via keychain (`piekstra.<bin>`), stdin, env — never argv
+- [ ] Secrets only via keychain (`piekstra.<bin>`), stdin, env, or 1Password through `op` (`--op <REF>`) — never argv
 - [ ] One keychain item per credential set (a JSON blob via `get_json`/`set_json`; a legacy per-field layout is migrated on first read, then deleted)
 - [ ] ISO `YYYY-MM-DD` accepted on all date flags; `--limit N` on lists
 - [ ] Mutations prompt unless `--force`; exit 6 when non-interactive — decided **before** any keychain or network work (`pk_cli_core::confirm`)

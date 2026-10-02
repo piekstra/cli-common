@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -166,9 +166,13 @@ conventions alone; TOML manifests stay as the escape hatch for non-conforming CL
 
 ### 1.7 Security & privacy invariants
 
-- Secrets enter only via prompt, `--stdin`, or `--from-env` — never argv.
+- Secrets enter only via prompt, `--stdin`, `--from-env`, or `--op <REF>` —
+  never argv. `--op` carries a 1Password secret reference
+  (`op://vault/item/field`), which names where the secret is, not the secret.
 - Secrets live only in the OS keychain, service name `piekstra.<bin>` (existing
-  entries migrated on first run — `CredentialStore::migrate_from`).
+  entries migrated on first run — `CredentialStore::migrate_from`), or in
+  1Password, read through the `op` CLI. Neither path writes a secret to a
+  file.
 - **One keychain item per credential set.** A token, its refresh token and
   their metadata are one JSON item, not one item each: on macOS every item a
   freshly built binary reads is a permission prompt, so a four-item layout
@@ -176,6 +180,55 @@ conventions alone; TOML manifests stay as the escape hatch for non-conforming CL
   (`pk_cli_secrets::CredentialStore::{get_json, set_json}`; a legacy
   per-field layout is migrated on first read, then deleted).
 - `--verbose` never logs secrets, cookies, or full account numbers.
+
+#### 1Password as a credential source
+
+A CLI may declare a 1Password secret reference per secret, as a flag
+(`auth login --op op://Example/Login/password`, `pk_cli_secrets::OpArgs`) or
+as config (an `OpRef` field, e.g. `op_ref`). `pk_cli_secrets::OnePassword`
+resolves it with `op read --no-newline [--account <A>] <REF>`:
+
+- the value comes back on `op`'s stdout through a pipe into a `Secret`;
+  nothing is written to disk, and errors quote `op`'s stderr, never its
+  stdout;
+- `op`'s stdin is closed, so it cannot wait on a terminal prompt;
+- one call per read, killed at a timeout (60 s default), never retried and
+  never polled. `op` can raise a Touch ID or app approval; a retry would
+  raise another, and a loop would raise one per pass;
+- a one-time password field resolves to its current code with
+  `?attribute=otp` on the reference.
+
+| `op` outcome | Exit |
+|---|---|
+| not signed in, session expired, approval dismissed, no answer within the timeout | 3, naming `op signin` |
+| vault, item or field missing, or an empty value | 4, naming the reference |
+| any other `op` failure | 5 |
+| `op` not installed | 1 |
+
+**Precedence.** At runtime a CLI resolves a secret through
+`pk_cli_secrets::SecretResolver`, which walks the sources in a
+`SourceOrder`. The default is **env, then keychain, then 1Password**:
+
+1. **env** (`<PREFIX>_PASSWORD` or whatever the CLI declares) is set per
+   invocation, by `op run --` or CI, so it is the most explicit choice. This
+   matches the spec-wide flag > env > config order.
+2. **keychain** is a local read that, once granted, never prompts.
+3. **1Password** fills in when the keychain is empty. It is last because
+   `op` can raise an approval on every session and depends on the app or a
+   sign-in.
+
+The walk skips a source the secret does not declare (no env var name, no
+reference) and falls through a source that is empty. It **stops at a source
+that fails**: a dismissed approval or a signed-out `op` is exit 3, never a
+silent fallback to a keychain copy the user did not pick or to a second
+prompt. When every source is empty, the CLI prompts or exits 3 naming
+`<bin> auth login`.
+
+The order is configurable per CLI through a `secret_sources` config key
+holding the text form (`op,keychain`, `env,op`; a source left out is never
+read), parsed by `SourceOrder`. Usual precedence applies to the key itself:
+`<PREFIX>_SECRET_SOURCES` overrides config. A user who keeps 1Password as
+the source of truth sets `op,keychain` or `op`.
 - Public repos: no internal-employer names, no real account numbers/addresses in
   fixtures, docs, or git history.
 
@@ -335,7 +388,7 @@ AGENTS.md, same house style as the CLIs.
 | Crate | Contents | Replaces (today) |
 |---|---|---|
 | `pk-cli-core` | `GlobalArgs` clap flatten struct; `ExitCode` enum per 1.5; error type with `code` slugs; output renderer (key/value blocks, pipe tables, JSON emit incl. error shape, `emit_list`/`emit_one` for plain lists and single resources); date/money types (`Money` and its grouped `$1,234.56` text display, ISO parsing helpers, UTC and local-timezone `today`); the §1.3 confirmation gate (`confirm`); reference resolution (`resolve::pick` — exact name, exact id, case-insensitive name, unique partial; ties are exit 4 naming the candidates) | fpl/xfin `output.rs`+`dates.rs`+`error.rs`, lrfl `formatter.rs`, tojfl `output.rs`; ghome/govee/lofty `confirm`, ghome/govee resolve ladders |
-| `pk-cli-secrets` | keychain read/write/delete under `piekstra.<bin>`; typed one-item JSON credentials (`get_json`/`set_json`) and legacy-service migration (`migrate_from`); secret ingestion (`--stdin`/`--from-env` args + logic); `auth set-credential` command impl | fpl/xfin `secrets.rs`, lrfl `auth/secrets.rs`; ghome `session.rs`/tplc `keychain.rs` item consolidation |
+| `pk-cli-secrets` | keychain read/write/delete under `piekstra.<bin>`; typed one-item JSON credentials (`get_json`/`set_json`) and legacy-service migration (`migrate_from`); secret ingestion (`--stdin`/`--from-env`/`--op` args + logic); 1Password reads through `op` (`OpRef`, `OnePassword`); runtime source precedence (`SecretResolver`, `SourceOrder`); `auth set-credential` command impl | fpl/xfin `secrets.rs`, lrfl `auth/secrets.rs`; ghome `session.rs`/tplc `keychain.rs` item consolidation |
 | `pk-cli-config` | `~/.config/<bin>/config.toml` load/save, typed get/set, `config` subcommand impl, `--config` override | four `config.rs` variants |
 | `pk-cli-selfupdate` | GitHub-release check + in-place replace, `--check`/`-y`/`--json`, `self-update/v1` DTO, release-asset naming convention | ~580 duplicated lines across 4 repos |
 | `pk-cli-auth` | `AuthCmd` clap enum + driver trait: CLI supplies `verify()`/`login()`, crate supplies status DTO (`auth-status/v1`), logout, prompting rules; `otp`, the one-time-code login (request, park for `--code`, mailbox read or prompt) | four auth command modules; the per-CLI park-and-resume code loops |

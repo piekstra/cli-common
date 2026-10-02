@@ -19,6 +19,19 @@
 //! with [`CredentialStore::set_json`]. A CLI that started with the per-field
 //! layout moves off it with [`CredentialStore::migrate_from`] (for a service
 //! rename) or its own first-read migration (for a re-shaping).
+//!
+//! # 1Password
+//!
+//! [`op`] reads a secret from 1Password through the `op` CLI, given an
+//! `op://vault/item/field` reference: at login with `--op` ([`OpArgs`]), or
+//! at runtime through a [`SecretResolver`], which walks env, keychain and
+//! 1Password in a configurable [`SourceOrder`] ([`resolve`]).
+
+pub mod op;
+pub mod resolve;
+
+pub use op::{OnePassword, OpArgs, OpRef};
+pub use resolve::{Resolved, SecretResolver, SecretSpec, SourceKind, SourceOrder};
 
 use std::fmt;
 use std::io::Read;
@@ -65,6 +78,25 @@ impl SecretSourceArgs {
                     "provide the secret via --stdin or --from-env <VAR>".into(),
                 )),
             },
+        }
+    }
+
+    /// [`read`](Self::read) with a `--op <REFERENCE>` flag beside it: exactly
+    /// one of `--stdin`, `--from-env` and `--op`; with none, the prompt
+    /// fallback as in `read`. `--op` resolves through `op` with one bounded
+    /// call (see [`op`] for the exit codes).
+    pub fn read_with_op(
+        &self,
+        op_args: &OpArgs,
+        op: &OnePassword,
+        prompt_label: Option<&str>,
+    ) -> Result<Secret, CliError> {
+        match &op_args.op {
+            None => self.read(prompt_label),
+            Some(_) if self.stdin || self.from_env.is_some() => Err(CliError::Usage(
+                "pass exactly one of --stdin, --from-env or --op".into(),
+            )),
+            Some(reference) => op.read(reference),
         }
     }
 }
@@ -320,7 +352,7 @@ fn migrate(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde::Deserialize;
     use std::cell::{Cell, RefCell};
@@ -328,21 +360,21 @@ mod tests {
 
     /// In-memory stand-in for the OS keychain. `fail_set` simulates a write
     /// that errors, for the migration-ordering rail.
-    struct MemStore {
+    pub(crate) struct MemStore {
         service: String,
         items: RefCell<HashMap<String, String>>,
         fail_set: Cell<bool>,
     }
 
     impl MemStore {
-        fn new(service: &str) -> Self {
+        pub(crate) fn new(service: &str) -> Self {
             MemStore {
                 service: service.into(),
                 items: RefCell::new(HashMap::new()),
                 fail_set: Cell::new(false),
             }
         }
-        fn with(self, account: &str, value: &str) -> Self {
+        pub(crate) fn with(self, account: &str, value: &str) -> Self {
             self.items.borrow_mut().insert(account.into(), value.into());
             self
         }
@@ -411,6 +443,52 @@ mod tests {
             "hunter2"
         );
         assert!(read_from_env("PK_CLI_TEST_UNSET_VAR").is_err());
+    }
+
+    #[test]
+    fn op_is_exclusive_with_the_other_sources() {
+        let op_args = OpArgs {
+            op: Some("op://Example/Login/password".parse().unwrap()),
+        };
+        let never = OnePassword::new().program("pk-cli-secrets-no-such-op");
+        for source in [
+            SecretSourceArgs {
+                stdin: true,
+                from_env: None,
+            },
+            SecretSourceArgs {
+                stdin: false,
+                from_env: Some("PK_CLI_TEST_SECRET_OP".into()),
+            },
+        ] {
+            let err = source.read_with_op(&op_args, &never, None).unwrap_err();
+            assert_eq!(err.exit_code(), 2);
+            assert!(err.to_string().contains("--op"), "{err}");
+        }
+        // No --op: the existing rules, unchanged.
+        std::env::set_var("PK_CLI_TEST_SECRET_OP", "hunter2");
+        let source = SecretSourceArgs {
+            stdin: false,
+            from_env: Some("PK_CLI_TEST_SECRET_OP".into()),
+        };
+        let got = source
+            .read_with_op(&OpArgs::default(), &never, None)
+            .unwrap();
+        assert_eq!(got.expose(), "hunter2");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn op_alone_reads_through_op() {
+        let fake = crate::op::fake::FakeOp::answering("from-op");
+        let op_args = OpArgs {
+            op: Some("op://Example/Login/password".parse().unwrap()),
+        };
+        let op = OnePassword::new().program(fake.program());
+        let got = SecretSourceArgs::default()
+            .read_with_op(&op_args, &op, None)
+            .unwrap();
+        assert_eq!(got.expose(), "from-op");
     }
 
     #[test]

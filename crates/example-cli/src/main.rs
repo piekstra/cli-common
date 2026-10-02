@@ -4,7 +4,10 @@
 //! (`summary`, `balance`, `bills list`) and documents/v1 (`documents list`),
 //! to show the shared DTOs in use, and a plain `devices` noun showing the
 //! generic list/get/mutate mechanisms (`emit_list`, `resolve::pick`, the
-//! `confirm` gate).
+//! `confirm` gate). Credentials show both 1Password paths: `auth login --op`
+//! (or a configured `op_ref`) at login, and a `SecretResolver` walking env,
+//! keychain and 1Password in the configured `secret_sources` order when
+//! `summary` needs the credential.
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -13,13 +16,16 @@ use pk_cli_config::ConfigStore;
 use pk_cli_core::info::{AuthInfo, CliInfo};
 use pk_cli_core::{confirm, output, resolve, CliError, CommonArgs};
 use pk_cli_documents::Document;
-use pk_cli_secrets::CredentialStore;
+use pk_cli_secrets::{
+    CredentialStore, OnePassword, OpArgs, OpRef, SecretResolver, SecretSpec, SourceOrder,
+};
 use pk_cli_selfupdate::{SelfUpdateArgs, Updater};
 use pk_cli_utility::{Paged, RangeArgs, Statement, UtilitySummary};
 use serde::{Deserialize, Serialize};
 
 const BIN: &str = "example-cli";
 const REPO: &str = "piekstra/cli-common";
+const CONFIG_KEYS: &str = "username, account, op_ref, secret_sources";
 
 /// Example member of the piekstra CLI family (conforms to piekstra-cli/1).
 #[derive(Parser, Debug)]
@@ -64,13 +70,24 @@ enum Command {
 #[derive(Subcommand, Debug)]
 enum AuthCmd {
     /// Store the demo credential in the OS keychain.
-    Login(LoginArgs),
+    Login(LoginCmd),
     /// Report credential/session state (auth-status/v1).
     Status,
     /// Clear the session; --forget also removes the stored credential.
     Logout(LogoutArgs),
     /// Raw keychain write for rotation / headless setup.
     SetCredential(SetCredentialArgs),
+}
+
+/// The standard login flags plus `--op`. `OpArgs` is flattened beside
+/// `LoginArgs` rather than inside it, so CLIs that build `LoginArgs` by hand
+/// keep compiling.
+#[derive(clap::Args, Debug)]
+struct LoginCmd {
+    #[command(flatten)]
+    login: LoginArgs,
+    #[command(flatten)]
+    op: OpArgs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -153,6 +170,13 @@ struct Config {
     username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<String>,
+    /// Where 1Password keeps the password (`op://vault/item/field`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    op_ref: Option<OpRef>,
+    /// Source order for runtime reads, e.g. `op,keychain` (default
+    /// `env,keychain,op`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_sources: Option<SourceOrder>,
 }
 
 fn main() {
@@ -170,6 +194,21 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         Command::Auth(cmd) => auth(cli, cmd, &store, &creds),
         Command::Config(cmd) => config(cli, cmd, &store),
         Command::Summary | Command::Balance => {
+            // A real CLI resolves its credential before the provider call.
+            let cfg: Config = store.load()?;
+            let user = cfg.username.clone().unwrap_or_else(|| "demo".into());
+            let spec = SecretSpec::new(&user)
+                .env("EXAMPLE_CLI_PASSWORD")
+                .op(cfg.op_ref.clone());
+            let resolved = SecretResolver::new(&creds)
+                .order(cfg.secret_sources.clone().unwrap_or_default())
+                .resolve(&spec)?
+                .ok_or_else(|| {
+                    CliError::Auth(format!("no credential stored; run `{BIN} auth login`"))
+                })?;
+            if cli.common.verbose {
+                eprintln!("credential from {}", resolved.source);
+            }
             let mut dto = UtilitySummary::new(pk_cli_core::Money::usd("42.00"));
             dto.due_date = Some("2026-08-01".into());
             pk_cli_utility::emit(&dto, cli.common.json);
@@ -252,7 +291,7 @@ fn auth(
     let cfg: Config = store.load()?;
     let user = cfg.username.clone().unwrap_or_else(|| "demo".into());
     match cmd {
-        AuthCmd::Login(args) => {
+        AuthCmd::Login(LoginCmd { login: args, op }) => {
             if creds.get(&user)?.is_some() && !args.overwrite {
                 return Err(CliError::Usage(
                     "a credential is already stored; pass --overwrite to replace it".into(),
@@ -263,7 +302,16 @@ fn auth(
             } else {
                 Some("Password")
             };
-            let secret = args.source.read(prompt)?;
+            // No explicit source: a configured 1Password reference comes
+            // before the prompt.
+            let explicit = args.source.stdin || args.source.from_env.is_some();
+            let op = match (&op.op, &cfg.op_ref) {
+                (None, Some(r)) if !explicit => OpArgs {
+                    op: Some(r.clone()),
+                },
+                _ => op.clone(),
+            };
+            let secret = args.source.read_with_op(&op, &OnePassword::new(), prompt)?;
             creds.set(&user, &secret)?;
             eprintln!("credential stored in the OS keychain");
             Ok(())
@@ -361,9 +409,13 @@ fn config(cli: &Cli, cmd: &ConfigCmd, store: &ConfigStore) -> Result<(), CliErro
             match key.as_str() {
                 "username" => cfg.username = Some(value.clone()),
                 "account" => cfg.account = Some(value.clone()),
+                "op_ref" => cfg.op_ref = Some(value.parse().map_err(CliError::Usage)?),
+                "secret_sources" => {
+                    cfg.secret_sources = Some(value.parse().map_err(CliError::Usage)?)
+                }
                 other => {
                     return Err(CliError::Usage(format!(
-                        "unknown config key `{other}` (known: username, account)"
+                        "unknown config key `{other}` (known: {CONFIG_KEYS})"
                     )))
                 }
             }
@@ -374,9 +426,11 @@ fn config(cli: &Cli, cmd: &ConfigCmd, store: &ConfigStore) -> Result<(), CliErro
             match key.as_str() {
                 "username" => cfg.username = None,
                 "account" => cfg.account = None,
+                "op_ref" => cfg.op_ref = None,
+                "secret_sources" => cfg.secret_sources = None,
                 other => {
                     return Err(CliError::Usage(format!(
-                        "unknown config key `{other}` (known: username, account)"
+                        "unknown config key `{other}` (known: {CONFIG_KEYS})"
                     )))
                 }
             }
