@@ -223,8 +223,9 @@ cmd_launch() {
   started="$(start_time "$pid")"
   # A command that cannot start (not found, bad flags) dies within moments.
   sleep 0.2
-  [ -n "$started" ] && [ "$(start_time "$pid")" = "$started" ] \
-    || env_fail "'$*' exited immediately; see $log"
+  if [ -z "$started" ] || [ "$(start_time "$pid")" != "$started" ]; then
+    env_fail "'$*' exited immediately; see $log"
+  fi
   printf '%s\n%s\n%s\n' "$pid" "$started" "$*" >"$pidfile"
   echo "$pid"
 }
