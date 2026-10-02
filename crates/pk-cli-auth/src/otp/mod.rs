@@ -1,7 +1,7 @@
 //! Logging in with a one-time code, sent by email or text message.
 //!
-//! `insp` logs in with a code sent by email, and `rpmfl`, `pmac`, `sofi`,
-//! `robinhood` and `m1f` with a code sent by text message. Each carries its
+//! `insp` logs in with a code sent by email, and `rpmfl`, `pmac`, `sfi`,
+//! `rhd` and `m1f` with a code sent by text message. Each carries its
 //! own copy of the same loop: ask the provider for a code, park the in-flight
 //! session so a later `--code` can finish it, and either prompt for the code
 //! or tell the caller how to resume. [`OtpLogin`] is that loop once, plus one

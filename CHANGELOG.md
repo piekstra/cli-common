@@ -24,7 +24,7 @@ Additive: no existing function, default or `/v1` shape changes.
   Adds `libc` (Unix only; bindings, already in the workspace lockfile).
 - **`pk-cli-auth::otp`** — the park-and-resume one-time-code login
   every code-login CLI carries its own copy of (`insp` by email; `rpmfl`,
-  `pmac`, `sofi`, `robinhood`, `m1f` by text message), as one flow.
+  `pmac`, `sfi`, `rhd`, `m1f` by text message), as one flow.
   `OtpLogin::login` requests a code through the CLI's `OtpTransport`, parks
   the in-flight session in a `ParkingSlot` *before* waiting on anything
   (`KeychainSlot` is one JSON item; a one-item-bundle CLI implements the
