@@ -5,10 +5,10 @@ use std::fmt;
 
 use pk_cli_core::CliError;
 
-/// Shortest and longest code [`OtpCode::parse`] accepts. Wide on purpose
-/// (4–12): providers send codes of 4 to 10 characters, and the provider is the authority
-/// on whether one is right. This only rejects input that cannot be a code at
-/// all, so a typo never costs a redeem attempt.
+/// Shortest and longest code [`OtpCode::parse`] accepts: 4 to 12 characters.
+/// The provider is the authority on whether a code is right, so this only
+/// rejects input that cannot be a code at all, sparing the redeem attempt it
+/// would cost.
 const MIN_LEN: usize = 4;
 const MAX_LEN: usize = 12;
 

@@ -190,7 +190,7 @@ impl Default for Poll {
 static SYSTEM_CLOCK: SystemClock = SystemClock;
 static TTY_PROMPT: TtyPrompt = TtyPrompt;
 
-/// The email-OTP login. Build one per `auth login`; see the module docs.
+/// The one-time-code login. Build one per `auth login`; see the module docs.
 pub struct OtpLogin<'a, T: OtpTransport> {
     bin: &'a str,
     transport: &'a T,
