@@ -516,14 +516,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_write_stages_an_owner_only_temp_file_and_removes_it() {
-        // The stub copies the staged file aside so the test can inspect it.
-        let stub = Stub::new("cp \"$2\" \"$(dirname \"$0\")/staged\"");
+        // The stub copies the staged file aside and records its path itself:
+        // the joined argv log cannot be split back when TMPDIR holds a space.
+        let stub = Stub::new(
+            "cp \"$2\" \"$(dirname \"$0\")/staged\"; printf '%s' \"$2\" > \"$(dirname \"$0\")/staged-path\"",
+        );
         let r = stub.remote().temp_prefix("pk-drive-test");
         r.write("notes.md", "hello").unwrap();
         let staged = stub.dir.path().join("staged");
         assert_eq!(fs::read_to_string(&staged).unwrap(), "hello");
         let call = &stub.calls()[0];
-        let tmp = call.split(' ').nth(1).unwrap();
+        let tmp = fs::read_to_string(stub.dir.path().join("staged-path")).unwrap();
+        let tmp = tmp.as_str();
         assert!(
             Path::new(tmp)
                 .file_name()
