@@ -1,0 +1,16 @@
+ID: 19a0c0ffee000002
+From: Example Portal <no-reply@example.com>
+To: user@example.com
+Subject: Your verification code
+Date: Fri, 02 Oct 2026 09:20:44 -0400
+Labels: INBOX, UNREAD
+
+--- Body ---
+
+Hello,
+
+Use the code below to finish signing in.
+
+    305116
+
+This code expires in 10 minutes. Reference 0042.

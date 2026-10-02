@@ -1,0 +1,8 @@
+ID: 19a0c0ffee000002
+ThreadID: 19a0c0ffee000002
+From: Example Portal <no-reply@example.com>
+Subject: Your verification code
+Date: Fri, 02 Oct 2026 09:20:44 -0400
+Labels: INBOX, UNREAD
+Snippet: Hello, use the code below to finish signing in.
+---

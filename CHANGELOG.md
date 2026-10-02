@@ -22,6 +22,26 @@ Additive: no existing function, default or `/v1` shape changes.
   that comes from data. Non-Unix targets have no offset source and fall
   back to UTC. `today()` is unchanged and now documents when to use which.
   Adds `libc` (Unix only; bindings, already in the workspace lockfile).
+- **`pk-cli-auth::email_otp`** — the park-and-resume one-time-code login
+  every code-login CLI carries its own copy of (`insp` by email; `rpmfl`,
+  `pmac`, `sofi`, `robinhood`, `m1f` by text message), as one flow.
+  `EmailOtp::login` requests a code through the CLI's `OtpTransport`, parks
+  the in-flight session in a `ParkingSlot` *before* waiting on anything
+  (`KeychainSlot` is one JSON item; a one-item-bundle CLI implements the
+  trait over its bundle), then reads the code from the mailbox, prompts on a
+  TTY, or ends with exit 3 naming `<bin> auth login --code <CODE>`. The resume
+  redeems against the parked session, never a new one; a parked login older
+  than 20 minutes is exit 3 blaming the wait, not the code. A refused code
+  keeps the login parked for a retype, up to 3 refusals, then discards it; a
+  provider outage neither counts nor discards. `CodeArgs` (`--code <CODE>`,
+  `--code -` for stdin) validates before any keychain read (exit 2).
+  `GroMailbox` reads the code through `gro` with nothing secret on its argv,
+  only mail received after the request (`after:<unix>`), a bounded poll
+  (9 looks, 10 s apart), a 30 s limit per call, and no second call after a
+  failure, since `gro`'s keychain read can raise a macOS dialog per call. The
+  stored `ParkedLogin` keeps `insp`'s field names (`rejected` is new and
+  defaulted), so adopting it reads the item `insp` already parks. Adopting
+  CLIs that exit 0 on "code sent" today (`insp`) change to exit 3.
 - **`make verify`**: the format check, clippy and tests as one local
   command. CI's `check` job now runs the same `Makefile` targets, so the gate
   has one definition.
