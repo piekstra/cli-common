@@ -1,7 +1,8 @@
 //! Secret handling for the piekstra CLI family (SPEC v1 §1.7).
 //!
-//! Runtime secrets live only in the OS keychain, under the service name
-//! `piekstra.<binary>`. Getting a secret *into* the keychain is a setup-time
+//! The OS keychain, under the service name `piekstra.<binary>`, is the
+//! default runtime store; [`resolve`] adds env and 1Password in a
+//! configurable order. Getting a secret *into* the keychain is a setup-time
 //! concern (`auth login` / `auth set-credential`), which ingest via stdin or
 //! a named env var — never a `--value` flag (that leaks into `ps`, shell
 //! history, and pasted transcripts).
@@ -31,7 +32,7 @@ pub mod op;
 pub mod resolve;
 
 pub use op::{OnePassword, OpArgs, OpRef};
-pub use resolve::{Resolved, SecretResolver, SecretSpec, SourceKind, SourceOrder};
+pub use resolve::{KeychainRead, Resolved, SecretResolver, SecretSpec, SourceKind, SourceOrder};
 
 use std::fmt;
 use std::io::Read;
@@ -117,10 +118,19 @@ pub fn read_stdin() -> Result<Secret, CliError> {
 /// Read one secret from a named environment variable (`--from-env APP_PASSWORD`).
 /// Bounded-scope ingress for `op run --`-style invocations.
 pub fn read_from_env(var: &str) -> Result<Secret, CliError> {
+    env_secret(var)?.ok_or_else(|| CliError::Usage(format!("${var} is not set")))
+}
+
+/// The one env-var reader: `None` only when the variable is unset; set but
+/// empty, or not UTF-8, is a usage error naming it.
+pub(crate) fn env_secret(var: &str) -> Result<Option<Secret>, CliError> {
     match std::env::var(var) {
-        Ok(v) if !v.is_empty() => Ok(Secret::new(v)),
+        Ok(v) if !v.is_empty() => Ok(Some(Secret::new(v))),
         Ok(_) => Err(CliError::Usage(format!("${var} is set but empty"))),
-        Err(_) => Err(CliError::Usage(format!("${var} is not set"))),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(CliError::Usage(format!("${var} is not valid UTF-8")))
+        }
     }
 }
 
@@ -173,7 +183,8 @@ impl Drop for Secret {
     }
 }
 
-/// OS-keychain-backed credential store. The only runtime source of secrets.
+/// OS-keychain-backed credential store: the default runtime store (see
+/// [`resolve`] for env and 1Password precedence).
 /// `for_binary("fpl")` yields the family service name `piekstra.fpl`.
 pub struct CredentialStore {
     service: String,
@@ -447,9 +458,7 @@ pub(crate) mod tests {
 
     #[test]
     fn op_is_exclusive_with_the_other_sources() {
-        let op_args = OpArgs {
-            op: Some("op://Example/Login/password".parse().unwrap()),
-        };
+        let op_args = OpArgs::reference("op://Example/Login/password".parse().unwrap());
         let never = OnePassword::new().program("pk-cli-secrets-no-such-op");
         for source in [
             SecretSourceArgs {
@@ -481,9 +490,7 @@ pub(crate) mod tests {
     #[test]
     fn op_alone_reads_through_op() {
         let fake = crate::op::fake::FakeOp::answering("from-op");
-        let op_args = OpArgs {
-            op: Some("op://Example/Login/password".parse().unwrap()),
-        };
+        let op_args = OpArgs::reference("op://Example/Login/password".parse().unwrap());
         let op = OnePassword::new().program(fake.program());
         let got = SecretSourceArgs::default()
             .read_with_op(&op_args, &op, None)

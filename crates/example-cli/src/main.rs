@@ -306,9 +306,7 @@ fn auth(
             // before the prompt.
             let explicit = args.source.stdin || args.source.from_env.is_some();
             let op = match (&op.op, &cfg.op_ref) {
-                (None, Some(r)) if !explicit => OpArgs {
-                    op: Some(r.clone()),
-                },
+                (None, Some(r)) if !explicit => OpArgs::reference(r.clone()),
                 _ => op.clone(),
             };
             let secret = args.source.read_with_op(&op, &OnePassword::new(), prompt)?;

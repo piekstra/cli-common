@@ -120,11 +120,22 @@ impl fmt::Display for OpRef {
 /// on `auth login` / `auth set-credential`. Read both with
 /// [`crate::SecretSourceArgs::read_with_op`].
 #[derive(clap::Args, Debug, Default, Clone)]
+#[non_exhaustive]
 pub struct OpArgs {
     /// Read the secret from 1Password with `op read` (a secret reference,
     /// e.g. op://Example/Login/password). Not the secret itself.
     #[arg(long = "op", value_name = "op://VAULT/ITEM/FIELD", value_parser = OpRefParser)]
     pub op: Option<OpRef>,
+}
+
+impl OpArgs {
+    /// The flag as if given `--op <reference>`: for a CLI that falls back
+    /// to a reference from its config.
+    pub fn reference(reference: OpRef) -> Self {
+        OpArgs {
+            op: Some(reference),
+        }
+    }
 }
 
 /// Parses `--op` without echoing a rejected value. clap's own message for a
@@ -309,8 +320,12 @@ fn run_bounded(program: &str, args: &[String], timeout: Duration) -> Result<Outc
             Err(e) => return Err(CliError::Other(format!("waiting on `{program}`: {e}"))),
         }
     };
-    let mut stdout = out_reader.join().unwrap_or_default();
-    let stderr = err_reader.join().unwrap_or_default();
+    // A panicked drain thread is reported as such, never read as an empty
+    // value (which would surface as a misleading "nothing at" exit 4).
+    let drain_failed =
+        |which: &str| CliError::Other(format!("draining `{program}`'s {which} failed"));
+    let mut stdout = out_reader.join().map_err(|_| drain_failed("stdout"))?;
+    let stderr = err_reader.join().map_err(|_| drain_failed("stderr"))?;
     let secret = match String::from_utf8(std::mem::take(&mut *stdout)) {
         Ok(s) => Secret::new(s),
         Err(e) => {

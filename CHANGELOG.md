@@ -61,8 +61,14 @@ Additive: no existing function, default or `/v1` shape changes.
   keep compiling. `SecretResolver` resolves a `SecretSpec` (keychain
   account, optional env var, optional reference) across env, keychain and
   1Password in a `SourceOrder`: default `env,keychain,op`, configurable from
-  a `secret_sources` string; an empty source falls through, a failing one
-  stops the walk. `example-cli` shows `auth login --op`, `config set op_ref`
+  a `secret_sources` string; a missing source falls through, a failing one
+  stops the walk, and an empty value from any source is an error (an empty
+  keychain item is exit 3 naming it). The keychain side is the public
+  `KeychainRead` trait (implemented for `CredentialStore`), so a CLI's tests
+  can run its resolver over an in-memory store. `SourceKind`, `Resolved` and
+  `OpArgs` are `#[non_exhaustive]`; build `OpArgs` with
+  `OpArgs::reference`. `read_from_env` now reports a non-UTF-8 variable as
+  such instead of "not set". `example-cli` shows `auth login --op`, `config set op_ref`
   / `secret_sources`, and a resolver read in `summary`. Tests use a fake
   `op` script; nothing calls a real `op`.
 - **`make verify`**: the format check, clippy and tests as one local

@@ -30,10 +30,12 @@ use pk_cli_core::CliError;
 use serde::{Deserialize, Serialize};
 
 use crate::op::{OnePassword, OpRef};
-use crate::{CredentialStore, ItemStore, Secret};
+use crate::{env_secret, CredentialStore, Secret};
 
-/// One place a secret can come from.
+/// One place a secret can come from. Non-exhaustive: a later source (a
+/// different vault CLI) is an addition, not a break.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SourceKind {
     /// A named environment variable (`op run --` and CI inject these).
     Env,
@@ -175,21 +177,42 @@ impl SecretSpec {
 
 /// A resolved secret and the source that answered.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Resolved {
     pub secret: Secret,
     pub source: SourceKind,
 }
 
+/// The keychain side of the resolver: a read by account. Implemented for
+/// [`CredentialStore`]; a CLI's tests implement it over an in-memory map so
+/// they exercise its credential path without reading the real keychain
+/// (every read from an ad-hoc-signed test binary is a macOS prompt).
+pub trait KeychainRead {
+    /// The service name, for messages.
+    fn service(&self) -> &str;
+    /// `None` when no item exists.
+    fn get(&self, account: &str) -> Result<Option<Secret>, CliError>;
+}
+
+impl KeychainRead for CredentialStore {
+    fn service(&self) -> &str {
+        CredentialStore::service(self)
+    }
+    fn get(&self, account: &str) -> Result<Option<Secret>, CliError> {
+        CredentialStore::get(self, account)
+    }
+}
+
 /// Resolves [`SecretSpec`]s against the env, a keychain store and 1Password.
-pub struct SecretResolver<'a> {
-    store: &'a CredentialStore,
+pub struct SecretResolver<'a, K: KeychainRead + ?Sized = CredentialStore> {
+    store: &'a K,
     op: OnePassword,
     order: SourceOrder,
 }
 
-impl<'a> SecretResolver<'a> {
+impl<'a, K: KeychainRead + ?Sized> SecretResolver<'a, K> {
     /// The default order, `op` from `PATH`.
-    pub fn new(store: &'a CredentialStore) -> Self {
+    pub fn new(store: &'a K) -> Self {
         SecretResolver {
             store,
             op: OnePassword::new(),
@@ -214,8 +237,8 @@ impl<'a> SecretResolver<'a> {
     }
 }
 
-fn resolve_in(
-    store: &impl ItemStore,
+fn resolve_in<K: KeychainRead + ?Sized>(
+    store: &K,
     op: &OnePassword,
     order: &SourceOrder,
     spec: &SecretSpec,
@@ -224,18 +247,21 @@ fn resolve_in(
         let found = match source {
             SourceKind::Env => match &spec.env {
                 None => None,
-                Some(var) => match std::env::var(var) {
-                    Ok(v) if v.is_empty() => {
-                        return Err(CliError::Usage(format!("${var} is set but empty")))
-                    }
-                    Ok(v) => Some(Secret::new(v)),
-                    Err(std::env::VarError::NotPresent) => None,
-                    Err(std::env::VarError::NotUnicode(_)) => {
-                        return Err(CliError::Usage(format!("${var} is not valid UTF-8")))
-                    }
-                },
+                Some(var) => env_secret(var)?,
             },
-            SourceKind::Keychain => store.get(&spec.account)?,
+            SourceKind::Keychain => match store.get(&spec.account)? {
+                // Every source refuses an empty value rather than handing
+                // "" to the provider as a password.
+                Some(s) if s.is_empty() => {
+                    return Err(CliError::Auth(format!(
+                        "the stored credential `{}` under `{}` is empty; store it again \
+                         with `auth login --overwrite`",
+                        spec.account,
+                        store.service()
+                    )))
+                }
+                found => found,
+            },
             SourceKind::Op => match &spec.op {
                 None => None,
                 Some(reference) => Some(op.read(reference)?),
@@ -252,6 +278,45 @@ fn resolve_in(
 mod tests {
     use super::*;
     use crate::tests::MemStore;
+    use crate::ItemStore;
+
+    impl KeychainRead for MemStore {
+        fn service(&self) -> &str {
+            ItemStore::service(self)
+        }
+        fn get(&self, account: &str) -> Result<Option<Secret>, CliError> {
+            ItemStore::get(self, account)
+        }
+    }
+
+    #[test]
+    fn an_empty_keychain_item_is_exit_3_naming_it() {
+        let store = MemStore::new("piekstra.x").with("password", "");
+        let err = resolve_in(
+            &store,
+            &OnePassword::new(),
+            &SourceOrder::default(),
+            &SecretSpec::new("password"),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 3);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("`password`") && msg.contains("`piekstra.x`"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn the_public_resolver_takes_any_keychain_reader() {
+        let store = MemStore::new("piekstra.x").with("password", "from-keychain");
+        let got = SecretResolver::new(&store)
+            .resolve(&SecretSpec::new("password"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.source, SourceKind::Keychain);
+        assert_eq!(got.secret.expose(), "from-keychain");
+    }
 
     #[test]
     fn the_order_parses_validates_and_prints() {

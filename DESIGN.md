@@ -218,8 +218,9 @@ resolves it with `op read --no-newline [--account <A>] <REF>`:
    sign-in.
 
 The walk skips a source the secret does not declare (no env var name, no
-reference) and falls through a source that is empty. It **stops at a source
-that fails**: a dismissed approval or a signed-out `op` is exit 3, never a
+reference) and falls through a source that holds nothing (env var unset,
+no keychain item). It **stops at a source that fails**, and an empty value
+from any source counts as a failure: a dismissed approval or a signed-out `op` is exit 3, never a
 silent fallback to a keychain copy the user did not pick or to a second
 prompt. When every source is empty, the CLI prompts or exits 3 naming
 `<bin> auth login`.
