@@ -71,6 +71,30 @@ Additive: no existing function, default or `/v1` shape changes.
   such instead of "not set". `example-cli` shows `auth login --op`, `config set op_ref`
   / `secret_sources`, and a resolver read in `summary`. Tests use a fake
   `op` script; nothing calls a real `op`.
+- **`pk-cli-drive`** (new crate; DESIGN.md §2.1) — state in the owner's
+  Drive, extracted from tax-cli. `Backend` is one interface over a mounted
+  folder (`Mount`), rclone straight through (`Remote`) or rclone behind the
+  read cache (`Cached`): read/write small UTF-8 files, copy binary files in
+  and out, move (with a no-clobber variant that refuses an occupied
+  destination, exit 2), list recursively with sizes and modification times.
+  `Remote` maps rclone's exit codes 3/4 to "missing" and everything else to
+  exit 5, falls back to a sizes-only listing on an rclone older than 1.63,
+  stages uploads in an exclusive owner-only temp file, and can be bounded
+  (`with_budget`), pointed at another program (`program`) and given the
+  CLI's temp-name prefix (`temp_prefix`). `CachedRemote` is the
+  stale-while-revalidate read cache: write-through, fresh/stale/expired tiers
+  (900 s / 24 h defaults), a generation counter so a refresh never undoes a
+  write, a refusal (exit 1) when a write would derive from a stale copy that
+  has since changed, fail-open on cache or remote errors, and a bounded
+  detached background refresh (`SpawnRevalidator`, `run_revalidation`)
+  deduplicated by a per-entry marker. Knobs are `<BIN>_NO_CACHE` and
+  `<BIN>_CACHE_{TTL,MAX_STALE,REVALIDATE_TIMEOUT,NO_REVALIDATE}`; the cache
+  lives under `$XDG_CACHE_HOME/<bin>/`. `private_file::write` is the
+  owner-only (0600) writer, exclusive or atomic-replace. The crate needs Rust
+  1.89 (`File::lock`). Tests use an in-memory remote and a stub `rclone`
+  script; nothing calls a real rclone. `example-cli` gains `state
+  get|put|list|sync` and the `data_root` / `remote` config keys, and with
+  them a 1.89 floor.
 - **`make verify`**: the format check, clippy and tests as one local
   command. CI's `check` job now runs the same `Makefile` targets, so the gate
   has one definition.
