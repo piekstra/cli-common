@@ -31,31 +31,61 @@
 #   stop   --pidfile F
 #       Terminate the launched process tree and remove F.
 #
-# Exit codes: 0 ok, 1 refused or failed, 2 usage.
+# Exit codes (the family's table, DESIGN.md §1.5):
+#   0 ok
+#   1 refused for safety: another app's window or listener is involved, the
+#     URL is not loopback, or the pidfile already tracks a running launch
+#   2 usage
+#   3 permission missing: Screen Recording (shot) or Accessibility (drive)
+#   4 nothing to act on: no pidfile, the launched process exited or its PID
+#     was recycled, no window tied to it, nothing listening
+#   5 environment: screen locked, a Swift helper or the browser failed, a
+#     needed tool is missing, the command exited at launch
 #
 # macOS only for shot/bounds/drive (CGWindowList, screencapture, CGEvent):
-# shot needs the Screen Recording permission and drive needs Accessibility
-# for the terminal or agent process. launch/pids/stop/web are portable.
+# shot needs Screen Recording and drive needs Accessibility, granted to the
+# terminal or agent process. launch/pids/stop/web are portable.
 #
-# SELF_VIEW_WINDOW_LIST overrides the window source with a command that
-# prints lines in lib/self-view-windows.swift's format. It exists for the
-# tests; the PID filter still applies to whatever it prints.
+# Test seams. Each replaces one platform effect with a command, run by bash;
+# selection and every safety check still apply to what it returns:
+#   SELF_VIEW_WINDOW_LIST  prints lines in lib/self-view-windows.swift's format
+#   SELF_VIEW_LOCK_STATE   prints "locked" or "open" (lib/self-view-locked.swift)
+#   SELF_VIEW_RAISE        gets the owner PID (lib/self-view-raise.swift)
+#   SELF_VIEW_POST_EVENT   gets "move|click X Y" (lib/self-view-post.swift)
 set -euo pipefail
 
 prog="self-view"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '/^# Commands:/,/^# Exit codes/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '/^# Commands:/,/^#   5 environment/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit "${1:-2}"
 }
-refuse() { echo "$prog: $*" >&2; exit 1; }
-bad_usage() { echo "$prog: $*" >&2; exit 2; }
+fail() { local code="$1"; shift; echo "$prog: $*" >&2; exit "$code"; }
+refuse() { fail 1 "$@"; }
+bad_usage() { fail 2 "$@"; }
+no_permission() { fail 3 "$@"; }
+missing() { fail 4 "$@"; }
+env_fail() { fail 5 "$@"; }
 
 is_uint() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
 
 # Empty (and status 0, so `set -e` callers can test it) when $1 is not running.
 start_time() { { ps -o lstart= -p "$1" 2>/dev/null || true; } | sed 's/^ *//; s/ *$//'; }
+
+# helper SEAM_VALUE SWIFT_FILE ARG... — run a platform effect: the seam's
+# command when set, else the Swift helper. Keeps the helper's exit status.
+helper() {
+  local seam="$1" file="$2"
+  shift 2
+  if [ -n "$seam" ]; then
+    bash -c "$seam" "$prog" "$@"
+  else
+    [ "$(uname)" = Darwin ] || { echo "needs macOS; for a web frontend use '$prog web'" >&2; return 5; }
+    command -v swift >/dev/null 2>&1 || { echo "swift not found; install the Xcode command line tools" >&2; return 5; }
+    swift "$here/lib/$file" "$@"
+  fi
+}
 
 # ── pidfile ─────────────────────────────────────────────────────────────────
 # Line 1: PID. Line 2: the process start time as `ps -o lstart=` reports it,
@@ -66,15 +96,15 @@ ROOT=""
 load_pidfile() {
   local f="$1" pid started cmd now
   [ -n "$f" ] || bad_usage "--pidfile is required; windows are only ever chosen by the PID this script launched, never by name"
-  [ -f "$f" ] || refuse "no pidfile at $f. Start the app with '$prog launch --pidfile $f -- <cmd>' first. This script never captures a window it did not launch."
+  [ -f "$f" ] || missing "no pidfile at $f. Start the app with '$prog launch --pidfile $f -- <cmd>' first. This script never captures a window it did not launch."
   { read -r pid; read -r started; read -r cmd; } <"$f" || true
-  is_uint "$pid" || refuse "$f does not hold a PID; relaunch with '$prog launch'."
+  is_uint "$pid" || missing "$f does not hold a PID; relaunch with '$prog launch'."
   now="$(start_time "$pid")"
   if [ -z "$now" ]; then
-    refuse "the launched process $pid (${cmd:-?}) has exited. If the app hands off to an already-running copy, that copy is not ours and will not be captured. Run '$prog stop --pidfile $f', then launch again."
+    missing "the launched process $pid (${cmd:-?}) has exited. If the app hands off to an already-running copy, that copy is not ours and will not be captured. Run '$prog stop --pidfile $f', then launch again."
   fi
   if [ "$now" != "$started" ]; then
-    refuse "PID $pid is now a different process (started $now, the launch recorded $started). Run '$prog stop --pidfile $f', then launch again."
+    missing "PID $pid is now a different process (started $now, the launch recorded $started). Run '$prog stop --pidfile $f', then launch again."
   fi
   ROOT="$pid"
 }
@@ -95,19 +125,20 @@ tree_pids() {
     }'
 }
 
-list_windows() {
-  if [ -n "${SELF_VIEW_WINDOW_LIST:-}" ]; then
-    bash -c "$SELF_VIEW_WINDOW_LIST"
-  else
-    [ "$(uname)" = Darwin ] || refuse "window capture needs macOS (CGWindowList). For a web frontend use '$prog web'."
-    swift "$here/lib/self-view-windows.swift" 2>/dev/null
+# Set WINDOWS to the on-screen window list; a failing source ends the run
+# with its own error rather than reading as "no window".
+ERRF=""
+read_windows() {
+  [ -n "$ERRF" ] || { ERRF="$(mktemp "${TMPDIR:-/tmp}/self-view-err.XXXXXX")"; trap 'rm -f "$ERRF"' EXIT; }
+  if ! WINDOWS="$(helper "${SELF_VIEW_WINDOW_LIST:-}" self-view-windows.swift 2>"$ERRF")"; then
+    env_fail "listing windows failed: $(tr '\n' ' ' <"$ERRF")"
   fi
 }
 
-# Set WIN_ID/WIN_X/WIN_Y/WIN_W/WIN_H to the largest normal (layer 0) window
-# owned by the launched tree, polling up to $1 seconds while the app starts.
-# Runs in the caller's shell, not a command substitution, so a refusal exits
-# the script and WINDOWS stays available to drive's occlusion check.
+# Set WIN_PID/WIN_ID/WIN_X/WIN_Y/WIN_W/WIN_H to the largest normal (layer 0)
+# window owned by the launched tree, polling up to $1 seconds while the app
+# starts. Runs in the caller's shell, not a command substitution, so a
+# refusal exits the script and WINDOWS stays available to drive.
 WINDOWS=""
 WIN_PID="" WIN_ID="" WIN_X="" WIN_Y="" WIN_W="" WIN_H=""
 find_window() {
@@ -115,7 +146,7 @@ find_window() {
   deadline=$(( $(date +%s) + wait ))
   while :; do
     pids="$(tree_pids "$ROOT" | tr '\n' ' ')"
-    WINDOWS="$(list_windows || true)"
+    read_windows
     win="$(awk -v pids="$pids" '
       BEGIN { n = split(pids, a, " "); for (i = 1; i <= n; i++) ours[a[i]] = 1 }
       ($1 in ours) && $3 == 0 {
@@ -127,17 +158,36 @@ find_window() {
       read -r WIN_PID WIN_ID WIN_X WIN_Y WIN_W WIN_H <<<"$win"
       return 0
     fi
-    [ -n "$(start_time "$ROOT")" ] || refuse "the launched process $ROOT exited before it opened a window; nothing captured."
+    [ -n "$(start_time "$ROOT")" ] || missing "the launched process $ROOT exited before it opened a window; nothing captured."
     [ "$(date +%s)" -lt "$deadline" ] || break
     sleep 1
   done
-  refuse "no on-screen window is owned by the launched process $ROOT or its $(( $(wc -w <<<"$pids") - 1 )) descendants after ${wait}s. Refusing to fall back to any other window. Check that the app finished starting and is not minimized, or raise --wait."
+  missing "no on-screen window is owned by the launched process $ROOT or its $(( $(wc -w <<<"$pids") - 1 )) descendants after ${wait}s. Refusing to fall back to any other window. Check that the app finished starting and is not minimized, or raise --wait."
+}
+
+# Refuse while the session is locked: windows still list, but no pixels can
+# be read and no window can be raised. Anything but a clear "open" refuses.
+refuse_if_locked() {
+  local state
+  state="$(helper "${SELF_VIEW_LOCK_STATE:-}" self-view-locked.swift 2>&1)" \
+    || env_fail "$1: could not read the screen-lock state: $state"
+  case "$state" in
+    open) ;;
+    locked) env_fail "$1: the screen is locked; unlock it and retry. Nothing was captured or sent." ;;
+    *) env_fail "$1: unexpected screen-lock state '$state'; nothing was captured or sent." ;;
+  esac
+}
+
+# The id of the frontmost normal window containing screen point ($1, $2).
+front_window_at() {
+  awk -v px="$1" -v py="$2" '
+    $3 == 0 && px >= $4 && px < $4 + $6 && py >= $5 && py < $5 + $7 { print $2; exit }' <<<"$WINDOWS"
 }
 
 # ── commands ────────────────────────────────────────────────────────────────
 
 cmd_launch() {
-  local pidfile="" log="" pid started
+  local pidfile="" log="" pid started old
   while [ $# -gt 0 ]; do
     case "$1" in
       --pidfile) pidfile="${2:-}"; shift 2 ;;
@@ -149,7 +199,6 @@ cmd_launch() {
   [ -n "$pidfile" ] || bad_usage "launch: --pidfile is required"
   [ $# -gt 0 ] || bad_usage "launch: no command given after --"
   if [ -f "$pidfile" ]; then
-    local old
     old="$(head -n1 "$pidfile")"
     if is_uint "$old" && [ -n "$(start_time "$old")" ] \
       && [ "$(start_time "$old")" = "$(sed -n 2p "$pidfile")" ]; then
@@ -164,7 +213,7 @@ cmd_launch() {
   # A command that cannot start (not found, bad flags) dies within moments.
   sleep 0.2
   [ -n "$started" ] && [ "$(start_time "$pid")" = "$started" ] \
-    || refuse "'$*' exited immediately; see $log"
+    || env_fail "'$*' exited immediately; see $log"
   printf '%s\n%s\n%s\n' "$pid" "$started" "$*" >"$pidfile"
   echo "$pid"
 }
@@ -225,11 +274,12 @@ cmd_shot() {
   load_pidfile "$pidfile"
   find_window "$wait"
   refuse_if_locked shot
+  command -v screencapture >/dev/null 2>&1 || env_fail "shot: screencapture not found (macOS only)."
   out="${out:-${TMPDIR:-/tmp}/self-view-$ROOT.png}"
   rm -f "$out"
   # -l<id>: this one window's pixels only, never the full screen.
   screencapture -o -x -l"$WIN_ID" "$out" || true
-  [ -s "$out" ] || refuse "screencapture could not read window $WIN_ID. Grant Screen Recording to the terminal or agent process (System Settings > Privacy & Security), then retry."
+  [ -s "$out" ] || no_permission "screencapture could not read window $WIN_ID. Grant Screen Recording to the terminal or agent process (System Settings > Privacy & Security), then retry."
   echo "$out"
 }
 
@@ -248,40 +298,8 @@ cmd_bounds() {
   echo "$WIN_X $WIN_Y $WIN_W $WIN_H"
 }
 
-# Refuse while the session is locked: windows still list, but no pixels can
-# be read and no window can be raised, so every failure would be misleading.
-refuse_if_locked() {
-  [ -z "${SELF_VIEW_WINDOW_LIST:-}" ] || return 0
-  local locked
-  locked="$(swift - 2>/dev/null <<'SWIFT' || true
-import CoreGraphics
-let d = CGSessionCopyCurrentDictionary() as? [String: Any] ?? [:]
-print((d["CGSSessionScreenIsLocked"] as? Bool) == true ? "locked" : "open")
-SWIFT
-)"
-  [ "$locked" != locked ] || refuse "$1: the screen is locked; unlock it and retry. Nothing was captured or sent."
-}
-
-# The id of the frontmost normal window containing screen point ($1, $2).
-front_window_at() {
-  awk -v px="$1" -v py="$2" '
-    $3 == 0 && px >= $4 && px < $4 + $6 && py >= $5 && py < $5 + $7 { print $2; exit }' <<<"$WINDOWS"
-}
-
-# Activate the app that owns PID $1 (one of ours: find_window chose it).
-raise_pid() {
-  swift - "$1" >/dev/null 2>&1 <<'SWIFT' || true
-import AppKit
-if let pid = Int32(CommandLine.arguments[1]),
-   let app = NSRunningApplication(processIdentifier: pid) {
-  app.activate(options: [.activateAllWindows])
-  usleep(400_000)
-}
-SWIFT
-}
-
 cmd_drive() {
-  local pidfile="" wait=30 action="" px="" py="" sx sy front=""
+  local pidfile="" wait=30 action="" px="" py="" sx sy front="" rc
   while [ $# -gt 0 ]; do
     case "$1" in
       --pidfile) pidfile="${2:-}"; shift 2 ;;
@@ -305,30 +323,22 @@ cmd_drive() {
   # frontmost normal window there must be ours. If it is not, bring our app
   # forward once and look again.
   front="$(front_window_at "$sx" "$sy")"
-  if [ "$front" != "$WIN_ID" ] && [ -z "${SELF_VIEW_WINDOW_LIST:-}" ]; then
-    raise_pid "$WIN_PID"
+  if [ "$front" != "$WIN_ID" ]; then
+    helper "${SELF_VIEW_RAISE:-}" self-view-raise.swift "$WIN_PID" >/dev/null 2>&1 || true
     find_window 0
+    sx="$(awk -v a="$WIN_X" -v b="$px" 'BEGIN { print a + b }')"
+    sy="$(awk -v a="$WIN_Y" -v b="$py" 'BEGIN { print a + b }')"
     front="$(front_window_at "$sx" "$sy")"
   fi
   [ "$front" = "$WIN_ID" ] \
-    || refuse "drive: another window (id ${front:-none}) is in front of the launched app at ($px, $py) and the app could not be raised. Bring its window to the front and retry; no event was sent."
-  swift - "$action" "$sx" "$sy" <<'SWIFT'
-import CoreGraphics
-import Foundation
-
-let args = CommandLine.arguments
-let pt = CGPoint(x: Double(args[2]) ?? 0, y: Double(args[3]) ?? 0)
-func post(_ type: CGEventType) {
-  guard let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: pt, mouseButton: .left) else { return }
-  e.post(tap: .cghidEventTap)
-  usleep(60_000)
-}
-post(.mouseMoved)
-if args[1] == "click" {
-  post(.leftMouseDown)
-  post(.leftMouseUp)
-}
-SWIFT
+    || refuse "drive: another window (id ${front:-none}) is in front of the launched app at ($px, $py) and raising the app did not clear it. Bring its window to the front and retry; no event was sent."
+  rc=0
+  helper "${SELF_VIEW_POST_EVENT:-}" self-view-post.swift "$action" "$sx" "$sy" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) no_permission "drive: this process may not post input events. Grant Accessibility to the terminal or agent process (System Settings > Privacy & Security), then retry; nothing was sent." ;;
+    *) env_fail "drive: the $action at ($px, $py) could not be confirmed (helper exit $rc); the pointer is not at the target." ;;
+  esac
 }
 
 find_browser() {
@@ -355,7 +365,7 @@ find_browser() {
 }
 
 cmd_web() {
-  local pidfile="" serve="" url="" out="" size="1280x800" wait=30 host port rest
+  local pidfile="" serve="" url="" out="" size="1280x800" wait=30 port
   local browser bpid profile deadline listeners outside served=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -377,14 +387,11 @@ cmd_web() {
   fi
   [[ "$url" =~ ^https?://(localhost|127\.0\.0\.1|\[::1\])(:([0-9]+))?(/.*)?$ ]] \
     || refuse "web: $url is not a loopback http(s) URL; only a local dev server the builder launched is rendered."
-  host="${BASH_REMATCH[1]}"
   port="${BASH_REMATCH[3]}"
-  rest="${BASH_REMATCH[4]}"
-  : "$host" "$rest"
   if [ -z "$port" ]; then
     case "$url" in https:*) port=443 ;; *) port=80 ;; esac
   fi
-  command -v lsof >/dev/null 2>&1 || refuse "web: lsof is needed to tie port $port to the launched process; install it."
+  command -v lsof >/dev/null 2>&1 || env_fail "web: lsof is needed to tie port $port to the launched process; install it."
 
   if [ -n "$serve" ]; then
     pidfile="$(mktemp -d "${TMPDIR:-/tmp}/self-view-web.XXXXXX")/server.pid"
@@ -400,22 +407,21 @@ cmd_web() {
   while :; do
     listeners="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
     [ -n "$listeners" ] && break
-    [ -n "$(start_time "$ROOT")" ] || refuse "web: the launched server $ROOT exited before listening on port $port${served:+; see ${served%.pid}.log}"
-    [ "$(date +%s)" -lt "$deadline" ] || refuse "web: nothing listens on port $port after ${wait}s."
+    [ -n "$(start_time "$ROOT")" ] || missing "web: the launched server $ROOT exited before listening on port $port${served:+; see ${served%.pid}.log}"
+    [ "$(date +%s)" -lt "$deadline" ] || missing "web: nothing listens on port $port after ${wait}s."
     sleep 1
   done
   outside="$(comm -23 <(echo "$listeners") <(tree_pids "$ROOT" | sort -u))"
   [ -z "$outside" ] \
     || refuse "web: port $port is served by PID(s) $(echo "$outside" | tr '\n' ' ')outside the launched process $ROOT. Refusing to render a server this script did not launch."
 
-  browser="$(find_browser)" || refuse "web: no Chrome/Chromium found; set SELF_VIEW_BROWSER to a Chromium-family binary."
+  browser="$(find_browser)" || env_fail "web: no Chrome/Chromium found; set SELF_VIEW_BROWSER to a Chromium-family binary."
   out="${out:-${TMPDIR:-/tmp}/self-view-web-$ROOT.png}"
   rm -f "$out"
   # A throwaway profile: no cookies, logins or extensions from the owner's
-  # browser can reach the render.
-  # The mock keychain and basic password store keep a full Chrome from asking
-  # the macOS keychain for its storage key, a prompt that hangs a session
-  # nobody is watching.
+  # browser can reach the render. The mock keychain and basic password store
+  # keep a full Chrome from asking the macOS keychain for its storage key, a
+  # prompt that hangs a session nobody is watching.
   profile="$(mktemp -d "${TMPDIR:-/tmp}/self-view-profile.XXXXXX")"
   "$browser" --headless --disable-gpu --hide-scrollbars --no-first-run \
     --no-default-browser-check --use-mock-keychain --password-store=basic \
@@ -429,10 +435,10 @@ cmd_web() {
     # shellcheck disable=SC2046 # one PID per word
     kill -KILL $(tree_pids "$bpid") 2>/dev/null || true
     rm -rf "$profile"
-    refuse "web: the headless browser ($browser) did not finish within $(( wait + 30 ))s; killed it."
+    env_fail "web: the headless browser ($browser) did not finish within $(( wait + 30 ))s; killed it."
   fi
   rm -rf "$profile"
-  [ -s "$out" ] || refuse "web: the headless browser produced no screenshot of $url."
+  [ -s "$out" ] || env_fail "web: the headless browser produced no screenshot of $url."
   echo "$out"
 }
 

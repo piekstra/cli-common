@@ -39,6 +39,9 @@ jobs:
   # (`#[cfg(target_os = "macos")]`), so macOS builds the workspace and runs
   # those two crates' tests — not a second copy of the whole gate (macOS
   # minutes bill at ~10x). Add a crate here when it grows a macOS-only path.
+  # The self-view Swift helpers are the scripts' macOS sliver: the Linux
+  # tests stub them, so this job type-checks each one and holds the window
+  # lister to the line format the stub imitates.
   macos-smoke:
     name: macos smoke (apple-native keyring, codesign)
     runs-on: macos-latest
@@ -48,6 +51,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       - run: cargo test -p pk-cli-secrets -p pk-cli-selfupdate
+      - name: self-view Swift helpers
+        run: |
+          for f in scripts/lib/*.swift; do swiftc -typecheck "$f"; done
+          swift scripts/lib/self-view-windows.swift | awk '
+            $0 !~ /^-?[0-9]+( -?[0-9]+){6}$/ { bad = 1; print "bad window line: " $0 }
+            END { exit bad }'
 
   security:
     runs-on: ubuntu-latest

@@ -91,9 +91,20 @@ Verify with `codesign -dv $(which <bin>)`: you want the stable
 invalidates the previous grant, so expect exactly one more prompt after
 adopting this.
 
+## Self-view (desktop apps)
+
+`scripts/self-view.sh` launches a family desktop app, then captures, measures
+or clicks only a window owned by that launched process tree, and renders web
+frontends headless. Never capture or drive a window you did not launch; the
+script refuses rather than fall back to a name match. Family apps wrap it
+with a fixed pidfile and launch command. Usage, exit codes and wiring are in
+README.md, "Self-view for family desktop apps". Its macOS effects live in
+`scripts/lib/*.swift`, and each has a test seam (`SELF_VIEW_*`).
+
 ## Workflow
 
-- `make verify` (format check, clippy `-D warnings`, tests; the `Makefile`
+- `make verify` (format check, clippy `-D warnings`, tests, and
+  `scripts-check`: shellcheck plus the self-view tests; the `Makefile`
   defines them and CI runs the same targets) must be clean before
   committing.
 - `example-cli` must keep compiling and demonstrating the full surface — it is

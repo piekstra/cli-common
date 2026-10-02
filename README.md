@@ -98,13 +98,24 @@ stopped 41234
   `cargo run`) or the bundle's executable (`Foo.app/Contents/MacOS/foo`)
   through `launch`. Do not use `open`: launchd becomes the parent, so the
   window cannot be tied to the launch, and `shot` refuses.
-- **Refusals are the feature.** `shot`, `bounds` and `drive` exit 1 with a
-  message, and capture or send nothing, when the pidfile is missing, the PID
-  now belongs to another process, the launched process exited (an app that
-  hands off to an already-running copy lands here), no on-screen window is
-  owned by the launched tree, or the screen is locked. `drive` also refuses
-  when another app's window covers the target point after one attempt to
-  raise the launched app.
+- **Refusals are the feature.** `shot`, `bounds` and `drive` capture or send
+  nothing, and exit with a message, when the pidfile is missing, the PID now
+  belongs to another process, the launched process exited (an app that hands
+  off to an already-running copy lands here), no on-screen window is owned
+  by the launched tree, or the screen is locked. `drive` also refuses when
+  another app's window covers the target point after one attempt to raise
+  the launched app, and succeeds only once the pointer reads back at the
+  target.
+- **Exit codes** follow the family table, so a caller can branch without
+  parsing messages:
+
+  | Code | Meaning | What to do |
+  | --- | --- | --- |
+  | 1 | Refused for safety: another app's window or listener is involved, a non-loopback URL, or a launch is already tracked | stop or bring the app forward |
+  | 2 | Usage | fix the call |
+  | 3 | Permission missing: Screen Recording (`shot`) or Accessibility (`drive`) | owner grants it |
+  | 4 | Nothing to act on: no pidfile, process exited or PID recycled, no window, nothing listening | launch again |
+  | 5 | Environment: screen locked, a Swift helper or the browser failed, a tool is missing | retry later or fix the machine |
 - **Window pixels only.** `shot` captures the one window with
   `screencapture -l<id>`, never the full screen.
 - **Web frontends** that are verified in a browser use
