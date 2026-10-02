@@ -52,7 +52,8 @@ which reads as a flaky keychain rather than a signing problem.
 Signing only `install` and `dev` is not enough: the binary most often run
 during development is `./target/release/<bin>`, produced by the CLI's
 `release` target and by its own `verify` through `smoke` (a family CLI's
-`verify` builds and runs the binary; this repo's runs no binary). Miss it and the prompts do not stop, they just move.
+`verify` builds and runs the binary; this repo's runs no binary). Miss it
+and the prompts do not stop, they just move.
 Wire the same step into `build`, `release`, `install`, and `dev`:
 
 ```make
