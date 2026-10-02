@@ -73,6 +73,69 @@ self-signed `pk-cli-codesign` identity; then re-sign dev builds with
 `scripts/dev-sign.sh target/debug/<bin>` (each family CLI wires this up as
 `make dev`). One final "Always Allow" per CLI and the prompts stop.
 
+## Self-view for family desktop apps
+
+`scripts/self-view.sh` lets a builder, often an agent, look at and click
+through the desktop app it is building. It acts only on a window owned by the
+process it launched, or a descendant of that process. It never matches a
+window by app name, title or executable path: the owner's own copy of the app
+may be running with real data, and it has the same name.
+
+```console
+$ S=~/Dev/cli-common/scripts/self-view.sh
+$ $S launch --pidfile .self-view/app.pid -- npm run tauri dev
+41234
+$ $S shot   --pidfile .self-view/app.pid --out /tmp/app.png   # waits up to 30 s for the window
+/tmp/app.png
+$ $S drive  --pidfile .self-view/app.pid click 120 64          # window-relative points
+$ $S bounds --pidfile .self-view/app.pid
+212 95 1100 720
+$ $S stop   --pidfile .self-view/app.pid
+stopped 41234
+```
+
+- **Launch the app as a child.** Start the dev loop (`npm run tauri dev`,
+  `cargo run`) or the bundle's executable (`Foo.app/Contents/MacOS/foo`)
+  through `launch`. Do not use `open`: launchd becomes the parent, so the
+  window cannot be tied to the launch, and `shot` refuses.
+- **Refusals are the feature.** `shot`, `bounds` and `drive` capture or send
+  nothing, and exit with a message, when the pidfile is missing, the PID now
+  belongs to another process, the launched process exited (an app that hands
+  off to an already-running copy lands here), no on-screen window is owned
+  by the launched tree, or the screen is locked. `drive` also refuses when
+  another app's window covers the target point after one attempt to raise
+  the launched app, and succeeds only once the pointer reads back at the
+  target.
+- **Exit codes** follow the family table, so a caller can branch without
+  parsing messages:
+
+  | Code | Meaning | What to do |
+  | --- | --- | --- |
+  | 1 | The table's generic code: a safety refusal (another app's window or listener is involved, a non-loopback URL, a launch already tracked) or an unexpected failure; the message says which | read the message |
+  | 2 | Usage | fix the call |
+  | 3 | Permission missing: Screen Recording (`shot`) or Accessibility (`drive`) | owner grants it |
+  | 4 | Nothing to act on: no pidfile, process exited or PID recycled, no window, nothing listening | launch again |
+  | 5 | Environment: screen locked, a Swift helper or the browser failed, a tool is missing | retry later or fix the machine |
+- **Window pixels only.** `shot` captures the one window with
+  `screencapture -l<id>`, never the full screen.
+- **Web frontends** that are verified in a browser use
+  `web --serve CMD --url http://127.0.0.1:PORT/`. It launches CMD, waits for
+  the port, requires every listener on it to be in the launched tree, renders
+  the page in a headless Chromium with a throwaway profile (no cookies or
+  logins from the owner's browser), writes the PNG and stops CMD. A server
+  started earlier with `launch` works with `--pidfile` instead of `--serve`.
+  Loopback URLs only.
+- **Permissions (macOS):** Screen Recording for `shot`, Accessibility for
+  `drive`, both granted to the terminal or agent process.
+- **Wiring it into a family app:** keep a thin wrapper in the app repo that
+  fixes the pidfile path (gitignored, per checkout, so parallel worktrees do
+  not collide) and the launch command, and calls this script from
+  `$HOME/Dev/cli-common`. Run the launched app against throwaway data (an
+  isolated `HOME`), never the owner's.
+
+`make scripts-check` lints the scripts and runs `scripts/test/self-view.test.sh`,
+which stubs the window list and so needs no display.
+
 ## Development
 
 ```console

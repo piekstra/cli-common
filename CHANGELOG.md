@@ -76,6 +76,22 @@ Additive: no existing function, default or `/v1` shape changes.
   has one definition.
 - `Display for Money` and `output::scalar`'s money rendering now share one
   private renderer with `grouped()`. Output is byte-identical.
+- **`scripts/self-view.sh`**: lets a builder see and drive the desktop app
+  it is building, and nothing else. `launch` starts the app and records its
+  PID and start time in a pidfile. `shot`, `bounds` and `drive` act only on
+  a window owned by that process or a descendant, never one matched by name.
+  They refuse when the pidfile is missing, the PID was recycled, the process
+  exited, no window is tied to it, or the screen is locked. `drive` also
+  refuses when another app's window covers the target point, and reports
+  success only once the pointer reads back at the target. `web` renders a
+  loopback dev server in a headless browser with a throwaway profile, and
+  only when the port's listeners belong to the launched tree. `stop` ends
+  the tree. Refusals use the family exit codes (3 permission, 4 nothing to
+  act on, 5 environment; a safety refusal is the generic 1). The macOS effects are small Swift
+  helpers in `scripts/lib/`, each behind a `SELF_VIEW_*` test seam, so the
+  tests run on Linux; `make scripts-check` runs them with shellcheck, as
+  part of `make verify` and CI, and the macOS CI job type-checks the
+  helpers and holds the window lister to the line format the tests stub.
 
 ## v0.8.0 — 2026-09-10
 
