@@ -1,0 +1,2 @@
+[ERROR] 2026/10/02 09:00:00 error initializing client: connecting to desktop app: read: connection reset
+second line of detail

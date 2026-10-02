@@ -20,7 +20,7 @@ self-update.
 | Crate | What it gives a CLI |
 |---|---|
 | `pk-cli-core` | error type + stable exit codes (0–6), `--json`/text output renderer (incl. `emit_list`/`emit_one`), common global flags, date & `Money` helpers, `cli-info/v1` DTO, shared list primitives (`Paged` envelope + `--limit/--since/--until` range flags), the §1.3 confirmation gate (`confirm`), and reference resolution (`resolve::pick`) |
-| `pk-cli-secrets` | redacting `Secret` type, OS-keychain `CredentialStore` (`piekstra.<bin>`) with one-item JSON credentials (`get_json`/`set_json`) and legacy-service `migrate_from`, `--stdin`/`--from-env` ingestion (secrets never on argv) |
+| `pk-cli-secrets` | redacting `Secret` type, OS-keychain `CredentialStore` (`piekstra.<bin>`) with one-item JSON credentials (`get_json`/`set_json`) and legacy-service `migrate_from`, `--stdin`/`--from-env`/`--op` ingestion (secrets never on argv), 1Password reads through `op`, and a configurable env/keychain/1Password precedence (`SecretResolver`) |
 | `pk-cli-config` | non-secret JSON config at `~/.config/<bin>/config.json` |
 | `pk-cli-selfupdate` | `self-update [--check] [-y]` from GitHub Releases, `self-update/v1` DTO |
 | `pk-cli-auth` | `auth login/status/logout/set-credential` arg structs, the canonical `auth-status/v1` DTO, `token` (bearer-token claim reads: expiry, `expires_at`), `reauth::with_reauth` (retry a read once after re-authenticating, with the retry-once/no-login-storm rails), and `otp` (the one-time-code login: request, park for a `--code` resume, read the code from the mailbox through `gro` or prompt) |

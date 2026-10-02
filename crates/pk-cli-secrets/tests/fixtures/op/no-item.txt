@@ -1,0 +1,1 @@
+[ERROR] 2026/10/02 09:00:00 could not read secret 'op://Example/Login/password': could not get item Example/Login: "Login" isn't an item in the "Example" vault. Specify the item with its UUID, name, or domain.

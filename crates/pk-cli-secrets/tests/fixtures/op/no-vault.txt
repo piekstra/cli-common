@@ -1,0 +1,1 @@
+[ERROR] 2026/10/02 09:00:00 could not read secret 'op://Example/Login/password': "Example" isn't a vault in this account. Specify the vault with its ID or name.

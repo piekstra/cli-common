@@ -19,7 +19,9 @@ Shared surface spec + library crates for the piekstra CLI family. Read
     `with_*` builder steps for optional fields.)
 - **Exit codes 0–6 are frozen** (see `pk-cli-core::CliError`). Never renumber.
 - **Secrets never on argv, never in logs.** All ingestion goes through
-  `pk-cli-secrets` (`--stdin` / `--from-env` / no-echo prompt).
+  `pk-cli-secrets` (`--stdin` / `--from-env` / `--op <REF>` / no-echo
+  prompt). 1Password goes through `OnePassword`, one bounded `op read` per
+  secret, never retried or polled (DESIGN.md §1.7).
 - **One keychain item per credential set** (DESIGN.md §1.7): use
   `CredentialStore::get_json`/`set_json`, migrate legacy layouts on first
   read. Every extra item is a macOS prompt.

@@ -1,0 +1,1 @@
+[ERROR] 2026/10/02 09:00:00 no accounts configured for use with 1Password CLI

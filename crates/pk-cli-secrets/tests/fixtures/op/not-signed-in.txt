@@ -1,0 +1,1 @@
+[ERROR] 2026/10/02 09:00:00 You are not currently signed in. Please run `op signin --help` for instructions
