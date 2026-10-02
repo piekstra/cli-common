@@ -96,7 +96,9 @@ impl Remote {
     }
 
     /// The first line of `rclone version` from this remote's program, for a
-    /// health check. Exit 2 when the program is missing.
+    /// health check. Exit 2 when the program is missing. A program that runs
+    /// but exits nonzero is not an error here (see the private `version`);
+    /// follow with a real call, which is.
     pub fn version(&self) -> Result<String, CliError> {
         version(&self.program)
     }
@@ -392,6 +394,12 @@ fn run_until(program: &str, args: &[&str], deadline: Instant) -> Result<Output, 
 /// The first line of `<program> version`, for a health check. A missing
 /// program is exit 2 with a short message of its own, since a health check
 /// reports it beside its other findings.
+///
+/// The exit status is deliberately not checked: a program that runs and
+/// fails reports its first stdout line, or `rclone (version unknown)`. That
+/// is tax-cli's `doctor` behaviour, kept for a byte-identical adoption; a
+/// health check learns whether rclone works from its next call, which maps
+/// failures to exit 5. Checking the status is tracked in cli-common #26.
 fn version(program: &str) -> Result<String, CliError> {
     let out = Command::new(program)
         .args(["version", "--log-level=ERROR"])
@@ -581,5 +589,11 @@ mod tests {
         let stub = Stub::new("printf 'rclone v1.70.0\\n- os/version: test\\n'");
         assert_eq!(stub.remote().version().unwrap(), "rclone v1.70.0");
         assert_eq!(stub.calls(), vec!["version --log-level=ERROR"]);
+        // The status is not checked (tax-cli parity, cli-common #26).
+        let broken = Stub::new("echo 'config not found' >&2\nexit 1");
+        assert_eq!(
+            broken.remote().version().unwrap(),
+            "rclone (version unknown)"
+        );
     }
 }
