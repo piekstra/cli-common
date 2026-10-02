@@ -3,9 +3,9 @@
 
 CARGO ?= cargo
 
-.PHONY: verify fmt fmt-check lint test
+.PHONY: verify fmt fmt-check lint test scripts-check
 
-verify: fmt-check lint test
+verify: fmt-check lint test scripts-check
 
 fmt:
 	$(CARGO) fmt --all
@@ -18,3 +18,12 @@ lint:
 
 test:
 	$(CARGO) test --workspace
+
+# The shell scripts: shellcheck (skipped with a note where it is not
+# installed) and the self-view tests, which stub the window list and so run
+# without a display.
+scripts-check:
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck scripts/*.sh scripts/test/*.sh; \
+	else echo "shellcheck not installed; skipping the lint half of scripts-check"; fi
+	bash scripts/test/self-view.test.sh
