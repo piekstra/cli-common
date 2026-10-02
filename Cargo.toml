@@ -49,6 +49,7 @@ flate2 = "1"
 tar = "0.4"
 self-replace = "1"
 keyring = "3"
+libc = "0.2"
 
 [profile.release]
 strip = true

@@ -215,13 +215,11 @@ fn as_money(v: &Value) -> Option<String> {
     if map.len() != 2 {
         return None;
     }
-    let amount = map.get("amount")?.as_str()?;
-    let currency = map.get("currency")?.as_str()?;
-    Some(if currency == "USD" {
-        format!("${amount}")
-    } else {
-        format!("{amount} {currency}")
-    })
+    let money = crate::Money {
+        amount: map.get("amount")?.as_str()?.to_string(),
+        currency: map.get("currency")?.as_str()?.to_string(),
+    };
+    Some(money.to_string())
 }
 
 /// Terminal error path: in `--json` mode emit the error DTO on stdout, always

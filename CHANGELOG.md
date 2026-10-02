@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+Additive: no existing function, default or `/v1` shape changes.
+
+- **`Money::grouped()`**: text display with thousands separators and the
+  sign ahead of the symbol, `$1,234.56`, `-$1,234.56`, `1,234.56 EUR`.
+  `Display` keeps its ungrouped `$1234.56` (and its `$-5.00` for
+  negatives), so existing output and snapshots are unchanged; JSON is
+  untouched (the wire amount stays a plain decimal string, SPEC §1.4).
+  **`money::group_thousands(&str)`** groups a bare decimal string for
+  amounts that are not a `Money`; anything that is not a plain decimal
+  (`n/a`, `1e6`, an already-grouped `1,234`) comes back unchanged.
+- **Local-date helpers in `pk-cli-core::dates`.** `today()` is UTC, so a
+  CLI that stamps a record with it writes tomorrow's date every evening
+  west of Greenwich. `today_local()` and `yesterday_local()` give the wall
+  calendar's date; `civil_from_unix_local(secs)` converts a timestamp;
+  `local_utc_offset(secs)` is the zone's offset at that instant (DST-aware,
+  read through `localtime_r`, so it honors `TZ` and the system zone);
+  `civil_from_unix_at_offset(secs, offset)` is the pure form for an offset
+  that comes from data. Non-Unix targets have no offset source and fall
+  back to UTC. `today()` is unchanged and now documents when to use which.
+  Adds `libc` (Unix only; bindings, already in the workspace lockfile).
+- **`make verify`**: the format check, clippy and tests as one local
+  command. CI's `check` job now runs the same `Makefile` targets, so the gate
+  has one definition.
+- `Display for Money` and `output::scalar`'s money rendering now share one
+  private renderer with `grouped()`. Output is byte-identical.
+
 ## v0.8.0 — 2026-09-10
 
 Mechanisms proven this week in `google-home-cli` (and re-implemented by hand

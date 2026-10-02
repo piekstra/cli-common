@@ -9,13 +9,25 @@ use crate::CliError;
 /// A civil `(year, month, day)` date.
 pub type Civil = (i64, u32, u32);
 
-/// Days since the Unix epoch in UTC.
-fn epoch_days() -> i64 {
-    let secs = SystemTime::now()
+/// Seconds since the Unix epoch.
+fn now_secs() -> i64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    secs.div_euclid(86_400)
+        .unwrap_or(0)
+}
+
+/// Days since the Unix epoch in UTC.
+fn epoch_days() -> i64 {
+    now_secs().div_euclid(86_400)
+}
+
+/// Days since the Unix epoch on the local wall calendar (UTC when the local
+/// offset is unknown).
+fn local_epoch_days() -> i64 {
+    let now = now_secs();
+    now.saturating_add(local_utc_offset(now).unwrap_or(0))
+        .div_euclid(86_400)
 }
 
 /// Convert days-since-epoch to a civil date.
@@ -33,13 +45,103 @@ fn civil_from_days(z: i64) -> Civil {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+/// Today's date in **UTC**.
+///
+/// Right for anything compared against a provider's UTC timestamps. For a
+/// date a person reads or records (a note's stamp, an "as of" line) use
+/// [`today_local`]: from local evening until UTC midnight the two disagree,
+/// and west of Greenwich this one already reads tomorrow.
 pub fn today() -> Civil {
     civil_from_days(epoch_days())
+}
+
+/// Today's date in the local timezone, the date on the user's wall calendar.
+/// Falls back to UTC (that is, [`today`]) when the offset is unknown. Reads
+/// the zone through the C library; see [`local_utc_offset`] on thread safety.
+pub fn today_local() -> Civil {
+    civil_from_days(local_epoch_days())
+}
+
+/// Yesterday's date in the local timezone (see [`today_local`]).
+pub fn yesterday_local() -> Civil {
+    civil_from_days(local_epoch_days() - 1)
 }
 
 /// The civil date a Unix timestamp falls on, in UTC.
 pub fn civil_from_unix(secs: i64) -> Civil {
     civil_from_days(secs.div_euclid(86_400))
+}
+
+/// The civil date a Unix timestamp falls on at a fixed offset from UTC, in
+/// seconds east of Greenwich (`-14_400` for UTC-4).
+///
+/// The pure core of the `*_local` helpers, and the one to use when the offset
+/// comes from data rather than the machine: a timestamp that carries its own
+/// `-04:00`, say.
+pub fn civil_from_unix_at_offset(secs: i64, offset_secs: i64) -> Civil {
+    civil_from_unix(secs.saturating_add(offset_secs))
+}
+
+/// The civil date a Unix timestamp falls on in the local timezone. Falls back
+/// to UTC when [`local_utc_offset`] has no answer; see it on thread safety.
+pub fn civil_from_unix_local(secs: i64) -> Civil {
+    civil_from_unix_at_offset(secs, local_utc_offset(secs).unwrap_or(0))
+}
+
+/// The local timezone's offset from UTC, in seconds east of Greenwich, in
+/// effect at the Unix timestamp `secs`.
+///
+/// Per instant rather than a constant, because daylight saving time moves it:
+/// US Eastern is `-14_400` in July and `-18_000` in January. Read from the C
+/// library (`localtime_r`), so it honors `TZ` and the system zone the same
+/// way `date` does. `None` where the platform gives no answer: non-Unix
+/// targets, or a timestamp outside `time_t`.
+///
+/// # Thread safety
+///
+/// The C library reads `TZ` with its own `getenv`, outside the lock
+/// `std::env` holds, so this call must not race `std::env::set_var` or
+/// `remove_var` on another thread (undefined behavior on glibc). The same
+/// goes for every `*_local` helper, which all call this. Set `TZ` before
+/// spawning threads, or pass a known offset to [`civil_from_unix_at_offset`].
+pub fn local_utc_offset(secs: i64) -> Option<i64> {
+    local_offset::at(secs)
+}
+
+#[cfg(unix)]
+mod local_offset {
+    // POSIX and in every Unix libc, but the `libc` crate binds it only for
+    // Windows.
+    extern "C" {
+        fn tzset();
+    }
+
+    // `time_t` and `c_long` are `i64` on 64-bit targets and `i32` on some
+    // 32-bit ones, so the conversions below are only no-ops on the former.
+    #[allow(clippy::useless_conversion)]
+    pub(super) fn at(secs: i64) -> Option<i64> {
+        let t: libc::time_t = secs.try_into().ok()?;
+        // SAFETY: `tm` is plain old data, so all-zero is a valid value, and
+        // `localtime_r` writes only into the buffer it is handed (the
+        // reentrant form, unlike `localtime`'s shared static). `tzset` loads
+        // `TZ` or the system zone, a step POSIX lets `localtime_r` skip.
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let out = unsafe {
+            tzset();
+            libc::localtime_r(&t, &mut tm)
+        };
+        if out.is_null() {
+            return None;
+        }
+        Some(i64::from(tm.tm_gmtoff))
+    }
+}
+
+#[cfg(not(unix))]
+mod local_offset {
+    pub(super) fn at(_secs: i64) -> Option<i64> {
+        None
+    }
 }
 
 /// A Unix timestamp as RFC 3339 UTC (`2026-08-07T21:04:05Z`).
@@ -178,6 +280,111 @@ mod tests {
     fn rfc3339_handles_pre_epoch() {
         assert_eq!(fmt_rfc3339(-1), "1969-12-31T23:59:59Z");
         assert_eq!(civil_from_unix(-1), (1969, 12, 31));
+    }
+
+    /// 2026-08-02T02:00:00Z: 10pm on Aug 1 in US Eastern daylight time, the
+    /// evening a UTC `today()` stamps as the 2nd.
+    const EVENING_EDT: i64 = 1_785_636_000;
+    /// 2026-01-15T12:00:00Z, inside US Eastern standard time.
+    const MIDDAY_JANUARY: i64 = 1_768_478_400;
+
+    #[test]
+    fn fixed_offset_dates() {
+        assert_eq!(fmt_rfc3339(EVENING_EDT), "2026-08-02T02:00:00Z");
+        assert_eq!(civil_from_unix_at_offset(EVENING_EDT, 0), (2026, 8, 2));
+        assert_eq!(
+            civil_from_unix_at_offset(EVENING_EDT, -4 * 3600),
+            (2026, 8, 1)
+        );
+        // East of Greenwich the same instant is already later on the 2nd.
+        assert_eq!(
+            civil_from_unix_at_offset(EVENING_EDT, 14 * 3600),
+            (2026, 8, 2)
+        );
+        // Offsets cross year boundaries both ways.
+        assert_eq!(civil_from_unix_at_offset(0, -1), (1969, 12, 31));
+        assert_eq!(civil_from_unix_at_offset(-1, 1), (1970, 1, 1));
+    }
+
+    #[test]
+    fn local_dates_stay_within_a_day_of_utc() {
+        if cfg!(unix) {
+            let offset = local_utc_offset(EVENING_EDT).expect("unix has an offset");
+            // Real zones run from UTC-12 to UTC+14.
+            assert!((-12 * 3600..=14 * 3600).contains(&offset), "{offset}");
+        }
+        let utc = epoch_days();
+        let local = local_epoch_days();
+        assert!((utc - 1..=utc + 1).contains(&local), "{local} vs {utc}");
+        // A local midnight can pass between reads, so allow the next day.
+        let (today, yesterday) = (today_local(), yesterday_local());
+        assert!(
+            [civil_from_days(local), civil_from_days(local + 1)].contains(&today),
+            "{today:?}"
+        );
+        assert!(
+            [civil_from_days(local - 1), civil_from_days(local)].contains(&yesterday),
+            "{yesterday:?}"
+        );
+    }
+
+    /// Asserts only as a child of `local_offset_honors_tz` (see there), with
+    /// `TZ` set and the expected offsets in the environment. Run any other way
+    /// (`--include-ignored`) it has nothing to check and passes.
+    #[test]
+    #[ignore = "driven by local_offset_honors_tz in a child process"]
+    fn tz_probe() {
+        if std::env::var_os("PK_TZ_PROBE").is_none() {
+            return;
+        }
+        let expect = |var: &str| -> i64 {
+            std::env::var(var)
+                .expect("set by the parent test")
+                .parse()
+                .unwrap()
+        };
+        assert_eq!(
+            local_utc_offset(EVENING_EDT),
+            Some(expect("PK_TZ_PROBE_SUMMER"))
+        );
+        assert_eq!(
+            local_utc_offset(MIDDAY_JANUARY),
+            Some(expect("PK_TZ_PROBE_WINTER"))
+        );
+        let date = std::env::var("PK_TZ_PROBE_EVENING_DATE").unwrap();
+        assert_eq!(fmt_iso(civil_from_unix_local(EVENING_EDT)), date);
+    }
+
+    /// `TZ` is process-wide, and `setenv` races every other test thread that
+    /// reads the clock, so each zone is checked in a child process of this
+    /// test binary instead. POSIX `TZ` rule strings need no zone database, so
+    /// this runs the same on a bare Linux runner as on macOS.
+    #[cfg(unix)]
+    #[test]
+    fn local_offset_honors_tz() {
+        for (tz, summer, winter, evening) in [
+            // US Eastern rules: daylight time from March to November.
+            ("EST5EDT,M3.2.0,M11.1.0", -4 * 3600, -5 * 3600, "2026-08-01"),
+            ("UTC0", 0, 0, "2026-08-02"),
+            // POSIX signs are inverted: `<+0530>-5:30` is UTC+5:30.
+            ("<+0530>-5:30", 19_800, 19_800, "2026-08-02"),
+        ] {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["dates::tests::tz_probe", "--exact", "--ignored"])
+                .env("TZ", tz)
+                .env("PK_TZ_PROBE", "1")
+                .env("PK_TZ_PROBE_SUMMER", summer.to_string())
+                .env("PK_TZ_PROBE_WINTER", winter.to_string())
+                .env("PK_TZ_PROBE_EVENING_DATE", evening)
+                .output()
+                .expect("re-run the test binary");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "TZ={tz}: {stdout}{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 
     #[test]

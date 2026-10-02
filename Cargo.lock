@@ -1329,6 +1329,7 @@ name = "pk-cli-core"
 version = "0.8.0"
 dependencies = [
  "clap",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

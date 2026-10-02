@@ -38,6 +38,13 @@ keychain ACL grants stable by signing with the `pk-cli-codesign` identity. The
 identity lives only in the owner's login keychain — never commit or distribute
 it.
 
+The targets below belong in each **family CLI's** Makefile, the repos that
+ship a keychain-reading binary. This repo's own Makefile has only the
+`verify` gate and no install, dev or release target, so it never produces a
+binary meant to run against a real keychain. `example-cli` does store
+credentials through the real `keyring` backend on `auth login`; a copy that
+ships needs these targets like any family CLI.
+
 **Sign every target that produces a binary.** `cargo build` and
 `cargo install` both ad-hoc sign, giving the binary a *new* code identity each
 time. macOS scopes keychain "Always Allow" grants to that identity, so any
@@ -45,8 +52,10 @@ unsigned rebuild silently revokes the grant and the next run prompts again —
 which reads as a flaky keychain rather than a signing problem.
 
 Signing only `install` and `dev` is not enough: the binary most often run
-during development is `./target/release/<bin>`, produced by `release` and by
-`verify` through `smoke`. Miss it and the prompts do not stop, they just move.
+during development is `./target/release/<bin>`, produced by the CLI's
+`release` target and by its own `verify` through `smoke` (a family CLI's
+`verify` builds and runs the binary; this repo's runs no binary). Miss it
+and the prompts do not stop, they just move.
 Wire the same step into `build`, `release`, `install`, and `dev`:
 
 ```make
@@ -84,8 +93,9 @@ adopting this.
 
 ## Workflow
 
-- `cargo test --workspace && cargo clippy --workspace --all-targets -- -D
-  warnings && cargo fmt --all --check` must be clean before committing.
+- `make verify` (format check, clippy `-D warnings`, tests; the `Makefile`
+  defines them and CI runs the same targets) must be clean before
+  committing.
 - `example-cli` must keep compiling and demonstrating the full surface — it is
   the template new CLIs copy.
 - Releases: bump `workspace.package.version`, update `CHANGELOG.md`, tag
