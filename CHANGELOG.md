@@ -22,13 +22,13 @@ Additive: no existing function, default or `/v1` shape changes.
   that comes from data. Non-Unix targets have no offset source and fall
   back to UTC. `today()` is unchanged and now documents when to use which.
   Adds `libc` (Unix only; bindings, already in the workspace lockfile).
-- **`pk-cli-auth::email_otp`** — the park-and-resume one-time-code login
+- **`pk-cli-auth::otp`** — the park-and-resume one-time-code login
   every code-login CLI carries its own copy of (`insp` by email; `rpmfl`,
   `pmac`, `sofi`, `robinhood`, `m1f` by text message), as one flow.
-  `EmailOtp::login` requests a code through the CLI's `OtpTransport`, parks
+  `OtpLogin::login` requests a code through the CLI's `OtpTransport`, parks
   the in-flight session in a `ParkingSlot` *before* waiting on anything
   (`KeychainSlot` is one JSON item; a one-item-bundle CLI implements the
-  trait over its bundle), then reads the code from the mailbox, prompts on a
+  trait over its bundle and checks it with `check_slot_contract`), then reads the code from the mailbox, prompts on a
   TTY, or ends with exit 3 naming `<bin> auth login --code <CODE>`. The resume
   redeems against the parked session, never a new one; a parked login older
   than 20 minutes is exit 3 blaming the wait, not the code. A refused code

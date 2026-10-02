@@ -163,7 +163,7 @@ fn the_mailbox_finishes_the_login_unattended() {
     let clock = FakeClock::at(T0);
     let mailbox = FakeMailbox::arriving("482917", 3);
     let prompt = Script::none();
-    let session = EmailOtp::new(BIN, &provider, &slot)
+    let session = OtpLogin::new(BIN, &provider, &slot)
         .mailbox(&mailbox, query())
         .clock(&clock)
         .prompt(&prompt)
@@ -186,7 +186,7 @@ fn without_a_tty_or_mailbox_the_login_parks_and_exits_3_with_the_resume() {
     let slot = MemorySlot::new();
     let clock = FakeClock::at(T0);
     let prompt = Script::none();
-    let err = EmailOtp::new(BIN, &provider, &slot)
+    let err = OtpLogin::new(BIN, &provider, &slot)
         .clock(&clock)
         .prompt(&prompt)
         .quiet(true)
@@ -208,7 +208,7 @@ fn the_resume_redeems_against_the_parked_session_not_a_new_one() {
     let provider = FakeProvider::new("482917");
     let slot = MemorySlot::new();
     let clock = FakeClock::at(T0);
-    let otp = EmailOtp::new(BIN, &provider, &slot)
+    let otp = OtpLogin::new(BIN, &provider, &slot)
         .clock(&clock)
         .quiet(true);
     otp.login(None).unwrap_err();
@@ -230,7 +230,7 @@ fn a_tty_prompt_finishes_the_login_when_the_mailbox_has_nothing() {
     let clock = FakeClock::at(T0);
     let mailbox = FakeMailbox::arriving("482917", 99);
     let prompt = Script::of(&["482 917\n"]);
-    let session = EmailOtp::new(BIN, &provider, &slot)
+    let session = OtpLogin::new(BIN, &provider, &slot)
         .mailbox(&mailbox, query())
         .poll(Poll {
             attempts: 2,
@@ -256,7 +256,7 @@ fn a_failing_mailbox_is_read_once_then_the_flow_falls_back() {
     let clock = FakeClock::at(T0);
     let mailbox = FakeMailbox::broken();
     let prompt = Script::none();
-    let err = EmailOtp::new(BIN, &provider, &slot)
+    let err = OtpLogin::new(BIN, &provider, &slot)
         .mailbox(&mailbox, query())
         .clock(&clock)
         .prompt(&prompt)
@@ -275,7 +275,7 @@ fn a_refused_mailbox_code_falls_back_to_the_prompt_on_the_same_session() {
     let clock = FakeClock::at(T0);
     let mailbox = FakeMailbox::arriving("111111", 1);
     let prompt = Script::of(&["482917"]);
-    let session = EmailOtp::new(BIN, &provider, &slot)
+    let session = OtpLogin::new(BIN, &provider, &slot)
         .mailbox(&mailbox, query())
         .interactive(true)
         .clock(&clock)
@@ -294,7 +294,7 @@ fn a_rejected_code_keeps_the_login_parked_and_counts() {
     let provider = FakeProvider::new("482917");
     let slot = MemorySlot::holding(ParkedLogin::new("sess-9", T0));
     let clock = FakeClock::at(T0 + 60);
-    let otp = EmailOtp::new(BIN, &provider, &slot)
+    let otp = OtpLogin::new(BIN, &provider, &slot)
         .clock(&clock)
         .quiet(true);
     let err = otp.resume(&code("000000")).unwrap_err();
@@ -310,7 +310,7 @@ fn the_rejection_cap_discards_the_parked_login() {
     let provider = FakeProvider::new("482917");
     let slot = MemorySlot::holding(ParkedLogin::new("sess-9", T0));
     let clock = FakeClock::at(T0);
-    let otp = EmailOtp::new(BIN, &provider, &slot)
+    let otp = OtpLogin::new(BIN, &provider, &slot)
         .clock(&clock)
         .quiet(true)
         .max_rejected(2);
@@ -331,7 +331,7 @@ fn a_provider_outage_neither_counts_nor_discards() {
     provider.outage.set(true);
     let slot = MemorySlot::holding(ParkedLogin::new("sess-9", T0));
     let clock = FakeClock::at(T0);
-    let err = EmailOtp::new(BIN, &provider, &slot)
+    let err = OtpLogin::new(BIN, &provider, &slot)
         .clock(&clock)
         .quiet(true)
         .resume(&code("482917"))
@@ -345,7 +345,7 @@ fn a_stale_parked_login_blames_the_wait_and_is_spent() {
     let provider = FakeProvider::new("482917");
     let slot = MemorySlot::holding(ParkedLogin::new("sess-9", T0));
     let clock = FakeClock::at(T0 + 25 * 60);
-    let err = EmailOtp::new(BIN, &provider, &slot)
+    let err = OtpLogin::new(BIN, &provider, &slot)
         .clock(&clock)
         .quiet(true)
         .resume(&code("482917"))
@@ -365,7 +365,7 @@ fn a_stale_parked_login_blames_the_wait_and_is_spent() {
 fn resuming_with_nothing_parked_is_exit_3() {
     let provider = FakeProvider::new("482917");
     let slot = MemorySlot::new();
-    let err = EmailOtp::new(BIN, &provider, &slot)
+    let err = OtpLogin::new(BIN, &provider, &slot)
         .quiet(true)
         .resume(&code("482917"))
         .unwrap_err();
@@ -391,7 +391,7 @@ fn a_failed_request_parks_nothing() {
     let provider = FakeProvider::new("482917");
     provider.refuse_request.set(true);
     let slot = MemorySlot::new();
-    let err = EmailOtp::new(BIN, &provider, &slot)
+    let err = OtpLogin::new(BIN, &provider, &slot)
         .quiet(true)
         .login(None)
         .unwrap_err();
@@ -405,7 +405,7 @@ fn a_mistyped_prompt_answer_is_exit_2_and_the_login_stays_parked() {
     let slot = MemorySlot::new();
     let clock = FakeClock::at(T0);
     let prompt = Script::of(&["oops!"]);
-    let err = EmailOtp::new(BIN, &provider, &slot)
+    let err = OtpLogin::new(BIN, &provider, &slot)
         .interactive(true)
         .clock(&clock)
         .prompt(&prompt)

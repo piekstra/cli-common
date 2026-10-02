@@ -99,10 +99,51 @@ impl fmt::Debug for ParkedLogin {
 /// [`KeychainSlot`] keeps it as its own keychain item. A CLI that keeps its
 /// whole credential set in one item (DESIGN.md §1.7) implements this over
 /// that item instead, so parking costs no extra keychain prompt.
+///
+/// The flow relies on these rules; [`check_slot_contract`] tests the ones
+/// that can be checked generically, for a CLI to run against its own slot.
 pub trait ParkingSlot {
+    /// The parked login, or `Ok(None)` when nothing is parked. Absence is not
+    /// an error: the flow turns `None` into "no login is waiting for a code"
+    /// (exit 3), and an `Err` here would replace that with a keychain error.
     fn load(&self) -> Result<Option<ParkedLogin>, CliError>;
+    /// Store `parked`, replacing whatever was parked. Called once when the
+    /// code is requested and again after each refused code (with the new
+    /// `rejected` count).
     fn save(&self, parked: &ParkedLogin) -> Result<(), CliError>;
+    /// Remove the parked login, and nothing else. A bundle-backed slot must
+    /// clear only its parked-login field: the flow calls this on every
+    /// successful redeem, and the stored password and device trust in the
+    /// same item must survive it. `Ok(())` when nothing is parked.
     fn clear(&self) -> Result<(), CliError>;
+}
+
+/// Exercise `slot` against the [`ParkingSlot`] rules, panicking on the first
+/// broken one. For tests: run it against an in-memory form of a CLI's own
+/// bundle-backed slot. Leaves the slot empty. Whether `clear` spares the
+/// rest of the bundle cannot be checked from here; assert that in the CLI.
+pub fn check_slot_contract(slot: &dyn ParkingSlot) {
+    slot.clear().expect("clear on an empty slot is Ok");
+    assert_eq!(
+        slot.load().expect("load on an empty slot is Ok"),
+        None,
+        "an empty slot loads as None"
+    );
+    let first = ParkedLogin::new("contract-session-1", 1_000);
+    slot.save(&first).expect("save");
+    assert_eq!(slot.load().expect("load").as_ref(), Some(&first));
+    let mut second = ParkedLogin::new("contract-session-2", 2_000);
+    second.rejected = 2;
+    second.channel = Some("email".into());
+    slot.save(&second).expect("save over a parked login");
+    assert_eq!(
+        slot.load().expect("load").as_ref(),
+        Some(&second),
+        "save replaces the parked login whole"
+    );
+    slot.clear().expect("clear");
+    assert_eq!(slot.load().expect("load"), None, "clear removes it");
+    slot.clear().expect("clear is idempotent");
 }
 
 /// A parked login as one JSON keychain item under `account`.
@@ -225,6 +266,11 @@ mod tests {
     fn debug_never_prints_the_session() {
         let p = ParkedLogin::new("sid=secret-cookie", T0);
         assert!(!format!("{p:?}").contains("secret-cookie"));
+    }
+
+    #[test]
+    fn the_memory_slot_meets_the_contract() {
+        check_slot_contract(&MemorySlot::new());
     }
 
     #[test]

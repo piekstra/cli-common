@@ -1,17 +1,17 @@
-//! Logging in with a one-time code sent by email.
+//! Logging in with a one-time code, sent by email or text message.
 //!
 //! `insp` logs in with a code sent by email, and `rpmfl`, `pmac`, `sofi`,
 //! `robinhood` and `m1f` with a code sent by text message. Each carries its
 //! own copy of the same loop: ask the provider for a code, park the in-flight
 //! session so a later `--code` can finish it, and either prompt for the code
-//! or tell the caller how to resume. [`EmailOtp`] is that loop once, plus one
+//! or tell the caller how to resume. [`OtpLogin`] is that loop once, plus one
 //! step the copies leave to an agent: reading the code out of the mailbox
 //! ([`GroMailbox`]), so an email-code login finishes unattended. Without a
 //! mailbox the flow serves a text-message code the same way.
 //!
 //! ```no_run
 //! # use pk_cli_core::CliError;
-//! # use pk_cli_auth::email_otp::*;
+//! # use pk_cli_auth::otp::*;
 //! # struct Portal;
 //! # impl OtpTransport for Portal {
 //! #     type Session = String;
@@ -24,7 +24,7 @@
 //! let store = pk_cli_secrets::CredentialStore::for_binary("demo");
 //! let slot = KeychainSlot::new(&store, "pending-login");
 //! let gro = GroMailbox::new();
-//! let session = EmailOtp::new("demo", &portal, &slot)
+//! let session = OtpLogin::new("demo", &portal, &slot)
 //!     .mailbox(&gro, MailQuery::new("from:no-reply@example.com")?)
 //!     .interactive(interactive)
 //!     .quiet(quiet)
@@ -47,7 +47,7 @@
 //! # The flow
 //!
 //! `auth login` resolves [`CodeArgs`] first, so a malformed `--code` is exit 2
-//! before any keychain read. Then [`EmailOtp::login`]:
+//! before any keychain read. Then [`OtpLogin::login`]:
 //!
 //! - **with a code**, resumes the parked login: no parked login, or one older
 //!   than the window, is exit 3; otherwise the code is redeemed against the
@@ -72,7 +72,7 @@
 //! code is exit 2. Transport and keychain errors pass through as they are.
 
 mod code;
-mod mailbox;
+pub mod mailbox;
 mod park;
 
 use std::time::Duration;
@@ -82,7 +82,8 @@ use pk_cli_core::CliError;
 pub use code::{extract_code, CodeArgs, CodeShape, OtpCode};
 pub use mailbox::{GroMailbox, MailQuery, Mailbox};
 pub use park::{
-    KeychainSlot, MemorySlot, ParkedLogin, ParkingSlot, DEFAULT_MAX_AGE_SECS, DEFAULT_MAX_REJECTED,
+    check_slot_contract, KeychainSlot, MemorySlot, ParkedLogin, ParkingSlot, DEFAULT_MAX_AGE_SECS,
+    DEFAULT_MAX_REJECTED,
 };
 
 /// What the provider said when it sent a code.
@@ -190,7 +191,7 @@ static SYSTEM_CLOCK: SystemClock = SystemClock;
 static TTY_PROMPT: TtyPrompt = TtyPrompt;
 
 /// The email-OTP login. Build one per `auth login`; see the module docs.
-pub struct EmailOtp<'a, T: OtpTransport> {
+pub struct OtpLogin<'a, T: OtpTransport> {
     bin: &'a str,
     transport: &'a T,
     slot: &'a dyn ParkingSlot,
@@ -204,15 +205,15 @@ pub struct EmailOtp<'a, T: OtpTransport> {
     prompt: &'a dyn CodePrompt,
 }
 
-impl<'a, T: OtpTransport> EmailOtp<'a, T> {
+impl<'a, T: OtpTransport> OtpLogin<'a, T> {
     /// `bin` names the CLI in resume hints (`<bin> auth login --code`).
     /// Non-interactive and chatty by default; set [`interactive`] from
     /// `CommonArgs::interactive()` and [`quiet`] from `--quiet`.
     ///
-    /// [`interactive`]: EmailOtp::interactive
-    /// [`quiet`]: EmailOtp::quiet
+    /// [`interactive`]: OtpLogin::interactive
+    /// [`quiet`]: OtpLogin::quiet
     pub fn new(bin: &'a str, transport: &'a T, slot: &'a dyn ParkingSlot) -> Self {
-        EmailOtp {
+        OtpLogin {
             bin,
             transport,
             slot,
