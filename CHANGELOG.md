@@ -80,15 +80,18 @@ Additive: no existing function, default or `/v1` shape changes.
   `Remote` maps rclone's exit codes 3/4 to "missing" and everything else to
   exit 5, falls back to a sizes-only listing on an rclone older than 1.63,
   stages uploads in an exclusive owner-only temp file, and can be bounded
-  (`with_budget`), pointed at another program (`program`) and given the
-  CLI's temp-name prefix (`temp_prefix`). `CachedRemote` is the
-  stale-while-revalidate read cache: write-through, fresh/stale/expired tiers
-  (900 s / 24 h defaults), a generation counter so a refresh never undoes a
-  write, a refusal (exit 1) when a write would derive from a stale copy that
+  (`with_budget`), pointed at another program (`program`, which `version()`
+  uses too) and given the CLI's temp-name prefix (`temp_prefix`).
+  `CachedRemote` is the stale-while-revalidate read cache: write-through,
+  fresh/stale/expired tiers (900 s / 24 h defaults), a generation counter so
+  a refresh never undoes a write, a refusal (exit 1,
+  `is_stale_write_refusal`) when a write would derive from a stale copy that
   has since changed, fail-open on cache or remote errors, and a bounded
-  detached background refresh (`SpawnRevalidator`, `run_revalidation`)
-  deduplicated by a per-entry marker. Knobs are `<BIN>_NO_CACHE` and
-  `<BIN>_CACHE_{TTL,MAX_STALE,REVALIDATE_TIMEOUT,NO_REVALIDATE}`; the cache
+  detached background refresh (`SpawnRevalidator`, `background_revalidator`,
+  `run_revalidation`) deduplicated by a per-entry marker. One `CachePolicy`
+  carries every knob to the cache, the spawner and the child;
+  `CachePolicy::from_env` reads `<BIN>_NO_CACHE` and
+  `<BIN>_CACHE_{TTL,MAX_STALE,REVALIDATE_TIMEOUT,NO_REVALIDATE}`. The cache
   lives under `$XDG_CACHE_HOME/<bin>/`. `private_file::write` is the
   owner-only (0600) writer, exclusive or atomic-replace. The crate needs Rust
   1.89 (`File::lock`). Tests use an in-memory remote and a stub `rclone`

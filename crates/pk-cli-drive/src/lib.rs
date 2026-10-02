@@ -25,33 +25,45 @@
 //!
 //! const BIN: &str = "example-cli";
 //!
-//! fn backend(remote: Option<&str>, mount: &str) -> Backend {
-//!     let Some(spec) = remote else {
+//! /// One constructor for the parent and the refresh child alike.
+//! fn remote(spec: &str) -> Remote {
+//!     Remote::new(spec).temp_prefix(BIN)
+//! }
+//!
+//! fn backend(remote_spec: Option<&str>, mount: &str, no_cache: bool) -> Backend {
+//!     let Some(spec) = remote_spec else {
 //!         return Backend::Mount(mount.into());
 //!     };
-//!     let remote = Remote::new(spec).temp_prefix(BIN);
 //!     let Some(dir) = cache::cache_dir_for(BIN, spec) else {
-//!         return Backend::Remote(remote);
+//!         return Backend::Remote(remote(spec));
 //!     };
-//!     let policy = cache::CachePolicy::from_env(BIN);
-//!     let mut cached = CachedRemote::new(remote, dir, policy);
-//!     if !policy.bypass_reads {
-//!         // `example-cli state sync --revalidate-file=<rel> --remote-spec=<spec>`
-//!         if let Some(r) = cache::background_revalidator(BIN, &["state", "sync"], spec) {
-//!             cached = cached.with_revalidator(r);
-//!         }
+//!     let mut policy = cache::CachePolicy::from_env(BIN);
+//!     policy.bypass_reads |= no_cache;
+//!     let mut cached = CachedRemote::new(remote(spec), dir, policy);
+//!     // `example-cli state sync --revalidate-file=<rel> --remote-spec=<spec>`
+//!     if let Some(r) = cache::background_revalidator(&policy, &["state", "sync"], spec) {
+//!         cached = cached.with_revalidator(r);
 //!     }
 //!     Backend::Cached(cached)
 //! }
 //! ```
 //!
-//! A CLI using the cache takes on two obligations: its refresh command
+//! A CLI using the cache takes on two obligations. Its refresh command
 //! accepts the hidden revalidate arguments ([`cache::REVALIDATE_FILE_ARG`],
 //! [`cache::REVALIDATE_LISTING_ARG`], [`cache::REMOTE_SPEC_ARG`]) and calls
-//! [`cache::run_revalidation`]; and it documents one more exit-1 case — a
+//! [`cache::run_revalidation`] with a `Remote`, cache dir and policy built
+//! the way the parent built them. And it documents one more exit-1 case: a
 //! write refused because a copy the command was served stale has since
-//! changed on the remote (nothing written, the cache now current, rerunning
-//! at once is safe).
+//! changed on the remote ([`cache::is_stale_write_refusal`]; nothing written,
+//! the cache now current, rerunning at once is safe).
+//!
+//! `rel` paths are store-relative and come from the CLI itself (its layout,
+//! a listing it just read). The mount backend joins them onto the root as
+//! given, so a CLI that builds one from outside text (a user-typed name, a
+//! provider's filename) sanitizes it first.
+//!
+//! The crate needs Rust 1.89 (`File::lock`), above the workspace's 1.75
+//! floor; adopting it raises the CLI's own minimum to match.
 
 pub mod backend;
 pub mod cache;
@@ -60,7 +72,7 @@ pub mod rclone;
 
 pub use backend::{private_temp_dir, Backend, FileEntry, LocalCopy, TempDir};
 pub use cache::{CachePolicy, CachedRemote, Kind, Outcome, Revalidator};
-pub use rclone::{rclone_version, run_rclone, Remote, RemoteRead};
+pub use rclone::{Remote, RemoteRead};
 
 #[cfg(all(test, unix))]
 pub(crate) mod stub;

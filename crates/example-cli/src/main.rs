@@ -234,20 +234,31 @@ struct Config {
     remote: Option<String>,
 }
 
+/// The rclone remote for `spec` — one constructor, so the background
+/// refresh's child runs exactly what its parent ran.
+fn state_remote(spec: &str) -> Remote {
+    Remote::new(spec).temp_prefix(BIN)
+}
+
+/// The cache policy: `EXAMPLE_CLI_CACHE_*` from the environment, plus the
+/// `--no-cache` flag.
+fn state_cache_policy(no_cache: bool) -> cache::CachePolicy {
+    let mut policy = cache::CachePolicy::from_env(BIN);
+    policy.bypass_reads |= no_cache;
+    policy
+}
+
 /// The store `state` works on: the rclone remote behind the read cache when
 /// one is configured, else the mount.
-fn state_backend(cfg: &Config) -> Result<Backend, CliError> {
+fn state_backend(cfg: &Config, no_cache: bool) -> Result<Backend, CliError> {
     if let Some(spec) = &cfg.remote {
-        let remote = Remote::new(spec).temp_prefix(BIN);
         let Some(dir) = cache::cache_dir_for(BIN, spec) else {
-            return Ok(Backend::Remote(remote));
+            return Ok(Backend::Remote(state_remote(spec)));
         };
-        let policy = cache::CachePolicy::from_env(BIN);
-        let mut cached = CachedRemote::new(remote, dir, policy);
-        if !policy.bypass_reads {
-            if let Some(r) = cache::background_revalidator(BIN, &["state", "sync"], spec) {
-                cached = cached.with_revalidator(r);
-            }
+        let policy = state_cache_policy(no_cache);
+        let mut cached = CachedRemote::new(state_remote(spec), dir, policy);
+        if let Some(r) = cache::background_revalidator(&policy, &["state", "sync"], spec) {
+            cached = cached.with_revalidator(r);
         }
         return Ok(Backend::Cached(cached));
     }
@@ -477,15 +488,11 @@ fn devices(cli: &Cli, cmd: &DevicesCmd) -> Result<(), CliError> {
 
 fn state(cli: &Cli, args: &StateArgs, store: &ConfigStore) -> Result<(), CliError> {
     let json = cli.common.json;
-    if args.no_cache {
-        // Exported so a child this run spawns inherits the choice.
-        std::env::set_var(format!("{}_NO_CACHE", cache::env_prefix(BIN)), "1");
-    }
     let cfg: Config = store.load()?;
     if let StateCmd::Sync(sync) = &args.cmd {
-        return state_sync(json, &cfg, sync);
+        return state_sync(json, &cfg, sync, args.no_cache);
     }
-    let backend = state_backend(&cfg)?;
+    let backend = state_backend(&cfg, args.no_cache)?;
     match &args.cmd {
         StateCmd::Get { rel } => {
             let content = backend.read_file(rel)?.ok_or_else(|| {
@@ -537,7 +544,12 @@ fn state(cli: &Cli, args: &StateArgs, store: &ConfigStore) -> Result<(), CliErro
 
 /// `state sync`: the background refresh a stale cached read spawns, or
 /// `--clear`.
-fn state_sync(json: bool, cfg: &Config, args: &StateSyncArgs) -> Result<(), CliError> {
+fn state_sync(
+    json: bool,
+    cfg: &Config,
+    args: &StateSyncArgs,
+    no_cache: bool,
+) -> Result<(), CliError> {
     let spec = args
         .remote_spec
         .as_ref()
@@ -552,8 +564,13 @@ fn state_sync(json: bool, cfg: &Config, args: &StateSyncArgs) -> Result<(), CliE
         (None, Some(rel)) => Some((Kind::Listing, rel)),
         (None, None) => None,
     };
+    let dir = cache::cache_dir_for(BIN, spec).ok_or_else(|| {
+        CliError::Other("cannot resolve a cache directory (is $HOME set?)".into())
+    })?;
     if let Some((kind, rel)) = target {
-        let (dir, outcome) = cache::run_revalidation(BIN, spec, kind, rel)?;
+        // Built exactly as the parent built its cache.
+        let policy = state_cache_policy(no_cache);
+        let outcome = cache::run_revalidation(state_remote(spec), dir.clone(), policy, kind, rel)?;
         let payload = serde_json::json!({
             "cache_dir": dir.display().to_string(),
             "revalidated": { "kind": kind.as_str(), "rel": rel, "outcome": outcome.as_str() },
@@ -568,9 +585,6 @@ fn state_sync(json: bool, cfg: &Config, args: &StateSyncArgs) -> Result<(), CliE
             "nothing to do — pass --clear to wipe the read cache".into(),
         ));
     }
-    let dir = cache::cache_dir_for(BIN, spec).ok_or_else(|| {
-        CliError::Other("cannot resolve a cache directory (is $HOME set?)".into())
-    })?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir)
             .map_err(|e| CliError::Other(format!("clearing cache {}: {e}", dir.display())))?;

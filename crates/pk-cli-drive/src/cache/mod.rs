@@ -45,331 +45,44 @@
 //! with their own mtime; the lock, generation and revalidation markers live
 //! under `.swr/`.
 //!
-//! Knobs, all read from the environment with the binary's prefix
-//! ([`env_prefix`]: `example-cli` → `EXAMPLE_CLI`):
+//! Knobs live in one [`CachePolicy`], resolved once and handed to the cache,
+//! its [`background_revalidator`] and the child's [`run_revalidation`].
+//! [`CachePolicy::from_env`] reads them from the environment with the
+//! binary's prefix ([`env_prefix`]: `example-cli` → `EXAMPLE_CLI`):
 //!
 //! | Variable | Meaning | Default |
 //! |---|---|---|
-//! | `<BIN>_NO_CACHE` | bypass reads (what a `--no-cache` flag exports) | off |
+//! | `<BIN>_NO_CACHE` | bypass reads (a `--no-cache` flag sets [`CachePolicy::bypass_reads`] directly) | off |
 //! | `<BIN>_CACHE_TTL` | seconds a copy is fresh; `0` makes every read fetch | 900 |
 //! | `<BIN>_CACHE_MAX_STALE` | seconds a copy may be served stale; `0` turns stale serving off | 86400 |
 //! | `<BIN>_CACHE_REVALIDATE_TIMEOUT` | bound on one background refresh's rclone calls | 120 |
 //! | `<BIN>_CACHE_NO_REVALIDATE` | serve stale copies without starting a refresh | off |
 
+mod policy;
+mod revalidate;
+mod store;
+
+pub use policy::{
+    cache_base, cache_dir_for, env_prefix, CachePolicy, DEFAULT_MAX_STALE_SECS,
+    DEFAULT_REVALIDATE_TIMEOUT_SECS, DEFAULT_TTL_SECS,
+};
+pub use revalidate::{
+    background_revalidator, run_revalidation, Revalidator, SpawnRevalidator, REMOTE_SPEC_ARG,
+    REVALIDATE_FILE_ARG, REVALIDATE_LISTING_ARG,
+};
+
 use std::collections::hash_map::DefaultHasher;
+use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io;
-use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
-use std::{env, fs};
 
 use pk_cli_core::CliError;
 
 use crate::backend::FileEntry;
-use crate::private_file::{self, Replace};
 use crate::rclone::{Remote, RemoteRead};
-
-/// Default read-cache TTL. Bounds how long an *external* change (an edit made
-/// directly in the provider's UI or on another machine) can be served without
-/// a note — local writes are write-through, so they are never stale. 15
-/// minutes keeps a working session fast.
-pub const DEFAULT_TTL_SECS: u64 = 900;
-/// Default staleness bound: the oldest copy served immediately (with a stderr
-/// note and a background refresh) instead of blocking on rclone. A day covers
-/// an overnight idle; anything older is fetched synchronously.
-pub const DEFAULT_MAX_STALE_SECS: u64 = 24 * 60 * 60;
-/// Default bound on one background revalidation's rclone calls.
-pub const DEFAULT_REVALIDATE_TIMEOUT_SECS: u64 = 120;
-/// The argument a [`SpawnRevalidator`] passes to refresh one file:
-/// `--revalidate-file=<rel>`. The CLI's command accepts it (hidden) and calls
-/// [`run_revalidation`].
-pub const REVALIDATE_FILE_ARG: &str = "--revalidate-file";
-/// `--revalidate-listing=<rel>`: refresh one recursive listing.
-pub const REVALIDATE_LISTING_ARG: &str = "--revalidate-listing";
-/// `--remote-spec=<spec>`: the spec the spawning command read through, so the
-/// refresh lands in the same cache dir even if the config changed since.
-pub const REMOTE_SPEC_ARG: &str = "--remote-spec";
-/// Cached directory listings live under this sibling of the mirrored content.
-/// The `-v2` suffix is the listing format: v2 entries carry `modified`, so a
-/// listing cached before the field existed is never read back as "no mtime".
-const LISTINGS_SUBDIR: &str = ".listings-v2";
-/// Listing dirs of earlier formats, dropped whenever listings are invalidated.
-const LEGACY_LISTINGS_SUBDIRS: &[&str] = &[".listings"];
-/// The lock, the write generation and the revalidation markers.
-const CONTROL_SUBDIR: &str = ".swr";
-
-/// The environment-variable prefix for `bin`: uppercased, `-` → `_`
-/// (`example-cli` → `EXAMPLE_CLI`), per the family's flag > env > config rule.
-pub fn env_prefix(bin: &str) -> String {
-    bin.chars()
-        .map(|c| match c {
-            '-' | '.' | ' ' => '_',
-            c => c.to_ascii_uppercase(),
-        })
-        .collect()
-}
-
-fn var(bin: &str, suffix: &str) -> String {
-    format!("{}_{suffix}", env_prefix(bin))
-}
-
-/// Is caching disabled for this run (`<BIN>_NO_CACHE`)? A CLI's `--no-cache`
-/// global flag exports it, so a child process inherits the choice.
-pub fn disabled(bin: &str) -> bool {
-    truthy(&var(bin, "NO_CACHE"))
-}
-
-/// Effective read TTL (`<BIN>_CACHE_TTL`, whole seconds). `0` means "never
-/// fresh": every read falls through to the remote and no copy is served
-/// stale.
-pub fn ttl(bin: &str) -> Duration {
-    secs_env(&var(bin, "CACHE_TTL"), DEFAULT_TTL_SECS)
-}
-
-/// Effective staleness bound (`<BIN>_CACHE_MAX_STALE`, whole seconds; `0`
-/// off).
-pub fn max_stale(bin: &str) -> Duration {
-    secs_env(&var(bin, "CACHE_MAX_STALE"), DEFAULT_MAX_STALE_SECS)
-}
-
-/// Effective bound on a background revalidation
-/// (`<BIN>_CACHE_REVALIDATE_TIMEOUT`, whole seconds).
-pub fn revalidate_timeout(bin: &str) -> Duration {
-    secs_env(
-        &var(bin, "CACHE_REVALIDATE_TIMEOUT"),
-        DEFAULT_REVALIDATE_TIMEOUT_SECS,
-    )
-}
-
-fn secs_env(key: &str, default: u64) -> Duration {
-    Duration::from_secs(parse_secs(env::var(key).ok().as_deref()).unwrap_or(default))
-}
-
-fn parse_secs(value: Option<&str>) -> Option<u64> {
-    value?.trim().parse::<u64>().ok()
-}
-
-/// The cache directory for `bin`'s cache over a remote spec, or `None` when
-/// no home/cache base can be resolved (caching then simply stays off —
-/// fail-open). Keyed on the spec trimmed like [`Remote::new`] trims it, so
-/// `remote:State` and `remote:State/` (one remote) share a dir.
-pub fn cache_dir_for(bin: &str, spec: &str) -> Option<PathBuf> {
-    Some(cache_base(bin)?.join(dir_name(spec.trim_end_matches('/'))))
-}
-
-/// The per-machine cache root for `bin`: `$XDG_CACHE_HOME/<bin>`, else
-/// `~/.cache/<bin>`; `None` when neither resolves. A CLI can keep its other
-/// caches under it too.
-pub fn cache_base(bin: &str) -> Option<PathBuf> {
-    let base = if let Some(xdg) = env::var("XDG_CACHE_HOME").ok().filter(|s| !s.is_empty()) {
-        PathBuf::from(xdg)
-    } else {
-        PathBuf::from(env::var("HOME").ok().filter(|s| !s.is_empty())?).join(".cache")
-    };
-    Some(base.join(bin))
-}
-
-/// A unique, human-recognizable directory name for a remote spec. The slug is
-/// readable; the hash suffix guarantees two distinct specs never collide onto
-/// one cache dir (which would serve one remote's data for another).
-fn dir_name(spec: &str) -> String {
-    let mut h = DefaultHasher::new();
-    spec.hash(&mut h);
-    format!("{}-{:016x}", slug(spec), h.finish())
-}
-
-/// Lowercase alphanumerics; every other run collapses to a single `-`.
-fn slug(spec: &str) -> String {
-    let mut out = String::with_capacity(spec.len());
-    let mut dash = false;
-    for c in spec.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-            dash = false;
-        } else if !dash && !out.is_empty() {
-            out.push('-');
-            dash = true;
-        }
-    }
-    let trimmed = out.trim_matches('-');
-    // Keep the readable prefix bounded; uniqueness comes from the hash suffix.
-    trimmed.chars().take(40).collect()
-}
-
-fn truthy(key: &str) -> bool {
-    is_truthy(env::var(key).ok().as_deref())
-}
-
-/// The flag parser behind [`truthy`], over the variable's value (`None`:
-/// unset) so the semantics are testable without touching the process env.
-fn is_truthy(value: Option<&str>) -> bool {
-    match value {
-        Some(v) => {
-            let v = v.trim();
-            !v.is_empty()
-                && v != "0"
-                && !v.eq_ignore_ascii_case("false")
-                && !v.eq_ignore_ascii_case("no")
-        }
-        None => false,
-    }
-}
-
-/// How a [`CachedRemote`] may use its copies. Resolved once, where the
-/// backend is built ([`CachePolicy::from_env`]), and passed in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CachePolicy {
-    /// Copies younger than this are fresh.
-    pub ttl: Duration,
-    /// Copies past the TTL but younger than this are served stale.
-    pub max_stale: Duration,
-    /// The bound on one background refresh. A refresh's in-flight marker
-    /// older than this plus 30s belongs to a refresh that died, and is taken
-    /// over.
-    pub revalidate_timeout: Duration,
-    /// `--no-cache`: every read goes to the remote and nothing read is
-    /// stored, but writes still update the cache, so a later cached read
-    /// never serves the pre-write copy.
-    pub bypass_reads: bool,
-}
-
-impl Default for CachePolicy {
-    /// The documented defaults, cache on.
-    fn default() -> Self {
-        Self {
-            ttl: Duration::from_secs(DEFAULT_TTL_SECS),
-            max_stale: Duration::from_secs(DEFAULT_MAX_STALE_SECS),
-            revalidate_timeout: Duration::from_secs(DEFAULT_REVALIDATE_TIMEOUT_SECS),
-            bypass_reads: false,
-        }
-    }
-}
-
-impl CachePolicy {
-    /// The policy `bin`'s `<BIN>_CACHE_*` / `<BIN>_NO_CACHE` variables
-    /// describe.
-    pub fn from_env(bin: &str) -> Self {
-        Self {
-            ttl: ttl(bin),
-            max_stale: max_stale(bin),
-            revalidate_timeout: revalidate_timeout(bin),
-            bypass_reads: disabled(bin),
-        }
-    }
-}
-
-/// Starts a background refresh of one cache entry. The cache claims the
-/// entry's in-flight marker before calling [`start`](Self::start) and
-/// releases it if the start fails; the refresh releases it when it ends
-/// ([`CachedRemote::revalidate_claimed`]).
-pub trait Revalidator: Send + Sync {
-    /// Start the refresh; `false` if it could not be started.
-    fn start(&self, kind: Kind, rel: &str) -> bool;
-}
-
-/// The production [`Revalidator`]: a detached
-/// `<exe> <command…> --revalidate-file=<rel> --remote-spec=<spec>` (or
-/// `--revalidate-listing`). The child's stdio is null, so it never holds a
-/// caller's pipes (an app reading a command's output to EOF would wait on
-/// it), and it sits in its own process group, so the terminal's Ctrl-C to
-/// the command does not cut a refresh short. The child bounds its own
-/// rclone calls ([`run_revalidation`]), which bounds its lifetime.
-pub struct SpawnRevalidator {
-    exe: PathBuf,
-    command: Vec<String>,
-    spec: String,
-}
-
-impl SpawnRevalidator {
-    /// Refresh by running `exe` with `command` (the CLI's subcommand that
-    /// accepts the revalidate arguments, e.g. `["sync"]`) against `spec`.
-    pub fn new(exe: PathBuf, command: &[&str], spec: &str) -> Self {
-        Self {
-            exe,
-            command: command.iter().map(|s| s.to_string()).collect(),
-            spec: spec.to_string(),
-        }
-    }
-
-    /// The argv the refresh of `rel` runs (after the executable).
-    pub fn args(&self, kind: Kind, rel: &str) -> Vec<String> {
-        let flag = match kind {
-            Kind::File => REVALIDATE_FILE_ARG,
-            Kind::Listing => REVALIDATE_LISTING_ARG,
-        };
-        let mut args = self.command.clone();
-        args.push(format!("{flag}={rel}"));
-        args.push(format!("{REMOTE_SPEC_ARG}={}", self.spec));
-        args
-    }
-}
-
-impl Revalidator for SpawnRevalidator {
-    fn start(&self, kind: Kind, rel: &str) -> bool {
-        let mut cmd = Command::new(&self.exe);
-        cmd.args(self.args(kind, rel))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
-        match cmd.spawn() {
-            Ok(mut child) => {
-                // Reap it if this process lives long enough; a short-lived
-                // CLI exits first and init reaps it.
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
-                true
-            }
-            Err(_) => false,
-        }
-    }
-}
-
-/// The background refresh for `bin`'s cache over `spec`: this binary run
-/// with `command`. `None` when `<BIN>_CACHE_NO_REVALIDATE` is set or this
-/// binary's path is unknown.
-pub fn background_revalidator(
-    bin: &str,
-    command: &[&str],
-    spec: &str,
-) -> Option<Box<dyn Revalidator>> {
-    if truthy(&var(bin, "CACHE_NO_REVALIDATE")) {
-        return None;
-    }
-    Some(Box::new(SpawnRevalidator::new(
-        env::current_exe().ok()?,
-        command,
-        spec,
-    )))
-}
-
-/// The child side of a [`SpawnRevalidator`]: refresh one entry of `bin`'s
-/// cache over `spec` with every rclone call bounded by
-/// `<BIN>_CACHE_REVALIDATE_TIMEOUT`, and release the in-flight marker the
-/// spawner claimed however the refresh ends. Returns the cache dir and what
-/// the refresh did.
-pub fn run_revalidation(
-    bin: &str,
-    spec: &str,
-    kind: Kind,
-    rel: &str,
-) -> Result<(PathBuf, Outcome), CliError> {
-    let dir = cache_dir_for(bin, spec).ok_or_else(|| {
-        CliError::Other("cannot resolve a cache directory (is $HOME set?)".into())
-    })?;
-    let policy = CachePolicy::from_env(bin);
-    let remote = Remote::new(spec).with_budget(policy.revalidate_timeout);
-    let cached = CachedRemote::new(remote, dir.clone(), policy);
-    let outcome = cached.revalidate_claimed(kind, rel)?;
-    Ok((dir, outcome))
-}
+use store::{claim_marker, CacheDir, MarkerGuard};
 
 /// How a stale serve's refresh went, for the stderr note.
 #[derive(Debug, PartialEq, Eq)]
@@ -590,18 +303,15 @@ impl<R: RemoteRead> CachedRemote<R> {
         })
     }
 
-    /// Re-pull a file from the remote into the cache regardless of TTL.
-    /// Returns whether the file existed on the remote.
+    /// [`revalidate`](Self::revalidate) a file for a warming command, which
+    /// counts the files that exist. Returns whether the remote has the file —
+    /// what the remote said, not whether the copy was stored: a
+    /// [`Outcome::Superseded`] fetch still found the file.
     pub fn refresh_file(&self, rel: &str) -> Result<bool, CliError> {
         let generation = self.cache.generation();
         let content = self.remote.cat(rel)?;
         self.cache.commit_file(rel, content.as_deref(), generation);
         Ok(content.is_some())
-    }
-
-    /// Re-pull a recursive listing from the remote into the cache.
-    pub fn refresh_listing(&self, rel: &str) -> Result<(), CliError> {
-        self.revalidate(Kind::Listing, rel).map(|_| ())
     }
 
     /// The background refresh's body: [`revalidate`](Self::revalidate) the
@@ -696,9 +406,8 @@ impl<R: RemoteRead> CachedRemote<R> {
             };
             if current != Some(read.digest) {
                 return Err(CliError::Other(format!(
-                    "{} changed on the remote after this command read an older cached \
-                     copy of it, so the write was refused. The cache now holds the current \
-                     copy — rerun the command.",
+                    "{} {STALE_WRITE_REFUSED} The cache now holds the current copy — rerun \
+                     the command.",
                     self.target(&read.rel)
                 )));
             }
@@ -780,208 +489,7 @@ impl CachedRemote<Remote> {
     }
 }
 
-/// The on-disk cache for one remote spec. All plumbing is best-effort: a disk
-/// error makes a read miss (and fall through) and a store a no-op.
-struct CacheDir {
-    dir: PathBuf,
-}
-
-impl CacheDir {
-    /// A cached file and its age (`None`: unreadable or future mtime).
-    fn file(&self, rel: &str) -> Option<(String, Option<Duration>)> {
-        let path = self.content_path(rel)?;
-        let content = fs::read_to_string(&path).ok()?;
-        Some((content, age(&path)))
-    }
-
-    fn listing(&self, rel: &str) -> Option<(Vec<FileEntry>, Option<Duration>)> {
-        let path = self.listing_path(rel)?;
-        let entries = serde_json::from_slice(&fs::read(&path).ok()?).ok()?;
-        Some((entries, age(&path)))
-    }
-
-    /// Store (or, for `None`, drop) a fetched file — only if no write bumped
-    /// the generation since `generation` was read before the fetch. Returns
-    /// whether the cache now reflects the fetch.
-    fn commit_file(&self, rel: &str, content: Option<&str>, generation: u64) -> bool {
-        let Some(_lock) = self.lock() else {
-            return false;
-        };
-        if self.generation() != generation {
-            return false;
-        }
-        match content {
-            Some(content) => self.store_file(rel, content),
-            None => self.remove_file(rel),
-        }
-        true
-    }
-
-    fn commit_listing(&self, rel: &str, entries: &[FileEntry], generation: u64) -> bool {
-        let Some(_lock) = self.lock() else {
-            return false;
-        };
-        if self.generation() != generation {
-            return false;
-        }
-        if let (Some(path), Ok(json)) = (self.listing_path(rel), serde_json::to_vec(entries)) {
-            let _ = self.write_atomic(&path, &json);
-        }
-        true
-    }
-
-    /// A completed remote write: bump the generation (so any fetch in flight
-    /// discards its possibly pre-write result), store or drop each written
-    /// path's copy, and drop every cached listing — any write can add, move
-    /// or delete a file, and writes are rare next to reads. Without the lock
-    /// (a disk error) nothing can be ordered, so every touched copy is
-    /// dropped instead of stored.
-    fn record_write<'a>(&self, paths: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) {
-        let lock = self.lock();
-        if lock.is_some() {
-            let _ = self.write_atomic(
-                &self.control().join("generation"),
-                (self.generation().wrapping_add(1)).to_string().as_bytes(),
-            );
-        }
-        for (rel, content) in paths {
-            match content {
-                Some(content) if lock.is_some() => self.store_file(rel, content),
-                _ => self.remove_file(rel),
-            }
-        }
-        for sub in std::iter::once(&LISTINGS_SUBDIR).chain(LEGACY_LISTINGS_SUBDIRS) {
-            let _ = fs::remove_dir_all(self.dir.join(sub));
-        }
-    }
-
-    /// The write generation: bumped by every write through this cache dir.
-    fn generation(&self) -> u64 {
-        fs::read_to_string(self.control().join("generation"))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
-    }
-
-    /// The cache-wide lock that orders a write's generation bump and stores
-    /// against a fetch's check-and-store. Held only around local file
-    /// operations, never across a network call. Released on drop.
-    fn lock(&self) -> Option<fs::File> {
-        self.secure_base().ok()?;
-        fs::create_dir_all(self.control()).ok()?;
-        let mut opts = fs::OpenOptions::new();
-        opts.create(true).truncate(false).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let file = opts.open(self.control().join("lock")).ok()?;
-        file.lock().ok()?;
-        Some(file)
-    }
-
-    /// The in-flight marker for one entry's background refresh.
-    fn marker(&self, kind: Kind, rel: &str) -> Option<PathBuf> {
-        Some(self.control().join("revalidating").join(format!(
-            "{}-{:016x}",
-            kind.as_str(),
-            digest(rel.as_bytes())
-        )))
-    }
-
-    fn control(&self) -> PathBuf {
-        self.dir.join(CONTROL_SUBDIR)
-    }
-
-    fn store_file(&self, rel: &str, content: &str) {
-        if let Some(path) = self.content_path(rel) {
-            let _ = self.write_atomic(&path, content.as_bytes());
-        }
-    }
-
-    fn remove_file(&self, rel: &str) {
-        if let Some(path) = self.content_path(rel) {
-            let _ = fs::remove_file(path);
-        }
-    }
-
-    /// Content mirrors the data-root relative path directly under the cache dir.
-    fn content_path(&self, rel: &str) -> Option<PathBuf> {
-        safe_join(&self.dir, rel)
-    }
-
-    /// Listings live under `.listings-v2/<rel>.json` (root listing → `_root_`).
-    fn listing_path(&self, rel: &str) -> Option<PathBuf> {
-        let key = if rel.is_empty() { "_root_" } else { rel };
-        safe_join(&self.dir.join(LISTINGS_SUBDIR), &format!("{key}.json"))
-    }
-
-    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.secure_base()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        // Temp file + rename: a reader never sees a torn write and the mtime
-        // (the TTL clock) advances atomically.
-        private_file::write(path, bytes, Replace::Always)
-    }
-
-    /// Create the cache dir if needed and lock it to `0700` (per-machine,
-    /// sensitive-adjacent — mirrors the data root's own contents).
-    fn secure_base(&self) -> io::Result<()> {
-        fs::create_dir_all(&self.dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700))?;
-        }
-        Ok(())
-    }
-}
-
-/// Drops an in-flight marker when the refresh that holds it ends, so the
-/// next stale read may start another.
-struct MarkerGuard(Option<PathBuf>);
-
-impl Drop for MarkerGuard {
-    fn drop(&mut self) {
-        if let Some(marker) = &self.0 {
-            let _ = fs::remove_file(marker);
-        }
-    }
-}
-
-/// Claim an entry's revalidation: create its marker exclusively. A marker
-/// older than `bound` belongs to a revalidator that died without releasing
-/// it, and is taken over.
-fn claim_marker(marker: &Path, bound: Duration) -> bool {
-    let Some(parent) = marker.parent() else {
-        return false;
-    };
-    if fs::create_dir_all(parent).is_err() {
-        return false;
-    }
-    let create = || {
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(marker)
-            .is_ok()
-    };
-    if create() {
-        return true;
-    }
-    match age(marker) {
-        Some(age) if age <= bound => false,
-        _ => {
-            let _ = fs::remove_file(marker);
-            create()
-        }
-    }
-}
-
-fn digest(bytes: &[u8]) -> u64 {
+pub(crate) fn digest(bytes: &[u8]) -> u64 {
     let mut h = DefaultHasher::new();
     bytes.hash(&mut h);
     h.finish()
@@ -1008,30 +516,18 @@ fn human(d: Duration) -> String {
     }
 }
 
-/// Join `rel` under `base`, rejecting anything but plain forward path
-/// components — no `..`, absolute paths, or prefixes can escape the cache dir.
-fn safe_join(base: &Path, rel: &str) -> Option<PathBuf> {
-    if rel.is_empty() {
-        return None;
-    }
-    let mut path = base.to_path_buf();
-    for comp in Path::new(rel).components() {
-        match comp {
-            Component::Normal(c) => path.push(c),
-            _ => return None,
-        }
-    }
-    Some(path)
-}
+/// The fixed part of the stale-write refusal, which [`is_stale_write_refusal`]
+/// recognizes.
+const STALE_WRITE_REFUSED: &str = "changed on the remote after this command read an older \
+                                   cached copy of it, so the write was refused.";
 
-/// How long ago `path` was last written. `None` for a missing file, an
-/// unreadable mtime, or a future mtime (clock skew) — all of which the
-/// caller treats as too old to serve.
-fn age(path: &Path) -> Option<Duration> {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|mtime| mtime.elapsed().ok())
+/// Is `err` the refusal of a write that would have derived from a copy served
+/// stale that has since changed on the remote? It is exit 1, like any other
+/// generic error, so a CLI that renders it differently, or reruns the command
+/// on it, asks here instead of matching the text. Nothing was written, and
+/// the cache now holds the current copy.
+pub fn is_stale_write_refusal(err: &CliError) -> bool {
+    matches!(err, CliError::Other(message) if message.contains(STALE_WRITE_REFUSED))
 }
 
 /// The source of truth was unreachable but a cached copy exists — surface that
@@ -1044,6 +540,8 @@ fn warn_unreachable(target: &str, err: &CliError) {
 
 #[cfg(test)]
 mod tests {
+    use super::policy::{dir_name, is_truthy, parse_secs, slug, var};
+    use super::store::safe_join;
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
@@ -1190,11 +688,29 @@ mod tests {
         max_stale: Duration::from_secs(86_400),
         revalidate_timeout: Duration::from_secs(120),
         bypass_reads: false,
+        background_refresh: true,
     };
 
     #[test]
     fn the_default_policy_is_the_documented_defaults() {
         assert_eq!(CachePolicy::default(), POLICY);
+    }
+
+    /// The policy the parent's cache uses is the one that decides whether a
+    /// refresh is spawned at all.
+    #[test]
+    fn no_background_refresh_when_the_policy_says_so() {
+        let off = CachePolicy {
+            background_refresh: false,
+            ..POLICY
+        };
+        assert!(background_revalidator(&off, &["sync"], "ex:S").is_none());
+        let bypass = CachePolicy {
+            bypass_reads: true,
+            ..POLICY
+        };
+        assert!(background_revalidator(&bypass, &["sync"], "ex:S").is_none());
+        assert!(background_revalidator(&POLICY, &["sync"], "ex:S").is_some());
     }
 
     #[test]
@@ -1423,7 +939,17 @@ mod tests {
         assert_eq!(c.cat("notes.md").unwrap().as_deref(), Some("one"));
         let err = c.confirm_stale_reads().unwrap_err();
         assert_eq!(err.exit_code(), 1);
-        assert!(err.to_string().contains("rerun"), "{err}");
+        assert!(is_stale_write_refusal(&err), "{err}");
+        // The exact text is a contract: adopters document it.
+        assert!(
+            matches!(&err, CliError::Other(m) if m == "fake:notes.md changed on the remote after \
+                this command read an older cached copy of it, so the write was refused. The cache \
+                now holds the current copy — rerun the command."),
+            "{err:?}"
+        );
+        assert!(!is_stale_write_refusal(&CliError::Other(
+            "disk full".into()
+        )));
         let cats = c.remote.cats.get();
         assert_eq!(c.cat("notes.md").unwrap().as_deref(), Some("one\ntwo"));
         assert_eq!(c.remote.cats.get(), cats);

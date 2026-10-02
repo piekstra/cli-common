@@ -95,6 +95,12 @@ impl Remote {
         }
     }
 
+    /// The first line of `rclone version` from this remote's program, for a
+    /// health check. Exit 2 when the program is missing.
+    pub fn version(&self) -> Result<String, CliError> {
+        version(&self.program)
+    }
+
     fn run(&self, args: &[&str]) -> Result<Output, CliError> {
         match self.deadline {
             Some(deadline) => run_until(&self.program, args, deadline),
@@ -311,11 +317,6 @@ fn upstream(verb: &str, target: &str, out: &Output) -> CliError {
     CliError::Upstream(format!("rclone {verb} {target}: {first}"))
 }
 
-/// Run `rclone <args> --log-level=ERROR` to completion, unbounded.
-pub fn run_rclone(args: &[&str]) -> Result<Output, CliError> {
-    run("rclone", args)
-}
-
 fn run(program: &str, args: &[&str]) -> Result<Output, CliError> {
     Command::new(program)
         .args(args)
@@ -388,9 +389,11 @@ fn run_until(program: &str, args: &[&str], deadline: Instant) -> Result<Output, 
     })
 }
 
-/// The first line of `rclone version`, for a health check.
-pub fn rclone_version() -> Result<String, CliError> {
-    let out = Command::new("rclone")
+/// The first line of `<program> version`, for a health check. A missing
+/// program is exit 2 with a short message of its own, since a health check
+/// reports it beside its other findings.
+fn version(program: &str) -> Result<String, CliError> {
+    let out = Command::new(program)
         .args(["version", "--log-level=ERROR"])
         .output()
         .map_err(|e| {
@@ -562,5 +565,21 @@ mod tests {
             err.to_string().contains("rclone not found on PATH"),
             "{err}"
         );
+        let err = r.version().unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.to_string().ends_with("rclone not found on PATH"),
+            "{err}"
+        );
+    }
+
+    /// The health check runs this remote's program, not whatever `rclone`
+    /// is first on `PATH`.
+    #[cfg(unix)]
+    #[test]
+    fn the_version_comes_from_the_remotes_program() {
+        let stub = Stub::new("printf 'rclone v1.70.0\\n- os/version: test\\n'");
+        assert_eq!(stub.remote().version().unwrap(), "rclone v1.70.0");
+        assert_eq!(stub.calls(), vec!["version --log-level=ERROR"]);
     }
 }

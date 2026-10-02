@@ -437,22 +437,34 @@ per-machine accelerator, never a second source of truth:
 | Bounded background work | the refresh is a detached child (`<bin> <command> --revalidate-file=<rel> --remote-spec=<spec>`, null stdio, own process group) whose rclone calls are killed at the revalidate timeout (120 s); a per-entry marker stops duplicates |
 
 Location `$XDG_CACHE_HOME/<bin>/<slug>-<hash>/` (else `~/.cache/<bin>/…`),
-directory `0700`, files `0600`. Knobs are environment variables with the
-binary's prefix: `<BIN>_NO_CACHE`, `<BIN>_CACHE_TTL` (`0`: every read
-fetches), `<BIN>_CACHE_MAX_STALE` (`0`: no stale serving),
-`<BIN>_CACHE_REVALIDATE_TIMEOUT`, `<BIN>_CACHE_NO_REVALIDATE`.
+directory `0700`, files `0600`. The knobs are one `CachePolicy`, resolved
+once and passed to the cache, to `background_revalidator` and to the
+child's `run_revalidation`. `CachePolicy::from_env(bin)` reads environment
+variables with the binary's prefix: `<BIN>_NO_CACHE`, `<BIN>_CACHE_TTL`
+(`0`: every read fetches), `<BIN>_CACHE_MAX_STALE` (`0`: no stale serving),
+`<BIN>_CACHE_REVALIDATE_TIMEOUT`, `<BIN>_CACHE_NO_REVALIDATE`. A `--no-cache`
+flag sets `bypass_reads` on the policy; nothing is exported to the
+environment.
 
 A CLI that uses the cache:
 
 - accepts the hidden revalidate arguments on one command
   (`cache::REVALIDATE_FILE_ARG`, `REVALIDATE_LISTING_ARG`, `REMOTE_SPEC_ARG`)
-  and calls `cache::run_revalidation`;
+  and calls `cache::run_revalidation` with a `Remote`, cache dir and policy
+  built by the same code that built the parent's, so the child runs the same
+  rclone under the same bound;
 - builds one `CachedRemote` per command (a refused write keeps refusing
   through the same handle; the remedy is a rerun);
 - documents the stale-write refusal as an exit-1 case: the remote answered,
   so it is not exit 5, and rerunning at once is safe.
+  `cache::is_stale_write_refusal` recognizes it;
+- passes store-relative `rel` paths it built itself. The mount backend
+  joins them onto the root as given, so text from outside (a user-typed
+  name, a provider's filename) is sanitized before it becomes a `rel`.
 
-`example-cli state get|put|list|sync` is the worked example.
+The crate needs Rust 1.89 (`File::lock`), above the workspace's 1.75 floor,
+so adopting it raises the CLI's own minimum. `example-cli state
+get|put|list|sync` is the worked example.
 
 ### Versioning & consumption
 
