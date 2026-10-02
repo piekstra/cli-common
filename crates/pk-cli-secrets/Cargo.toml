@@ -1,6 +1,6 @@
 [package]
 name = "pk-cli-secrets"
-description = "Keychain-backed secret handling for the piekstra CLI family: redacting Secret type, credential store, stdin/env ingestion."
+description = "Secret handling for the piekstra CLI family: redacting Secret type, keychain credential store, stdin/env ingestion, 1Password (op) references, source precedence."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -42,6 +42,35 @@ Additive: no existing function, default or `/v1` shape changes.
   stored `ParkedLogin` keeps `insp`'s field names (`rejected` is new and
   defaulted), so adopting it reads the item `insp` already parks. Adopting
   CLIs that exit 0 on "code sent" today (`insp`) change to exit 3.
+- **1Password as a credential source in `pk-cli-secrets`** (DESIGN.md
+  §1.7). `OpRef` is a validated `op://vault/item/[section/]field[?query]`
+  reference that parses from a flag and (de)serializes as a config string.
+  `OnePassword::read` resolves one with `op read --no-newline
+  [--account <A>] <REF>`: the value comes back over a pipe into a `Secret`,
+  never on argv, in logs or on disk; `op`'s stdin is closed; each read is one
+  call killed at a timeout (60 s default) and never retried. Not signed in,
+  an expired session, a dismissed approval or a timeout is exit 3 naming
+  `op signin`; a missing vault, item or field (or an empty value) is exit 4
+  naming the reference; another `op` failure is exit 5; no `op` is exit 1.
+  `OpArgs` is a flattenable `--op <REF>` flag, read beside
+  `SecretSourceArgs` with the new `SecretSourceArgs::read_with_op` (exactly
+  one of `--stdin`, `--from-env`, `--op`); a value that is not a
+  reference is rejected without being echoed, since it may be the secret
+  itself. It is a separate struct, not a
+  new `SecretSourceArgs`/`LoginArgs` field, so CLIs that build those by hand
+  keep compiling. `SecretResolver` resolves a `SecretSpec` (keychain
+  account, optional env var, optional reference) across env, keychain and
+  1Password in a `SourceOrder`: default `env,keychain,op`, configurable from
+  a `secret_sources` string; a missing source falls through, a failing one
+  stops the walk, and an empty value from any source is an error (an empty
+  keychain item is exit 3 naming it). The keychain side is the public
+  `KeychainRead` trait (implemented for `CredentialStore`), so a CLI's tests
+  can run its resolver over an in-memory store. `SourceKind`, `Resolved` and
+  `OpArgs` are `#[non_exhaustive]`; build `OpArgs` with
+  `OpArgs::reference`. `read_from_env` now reports a non-UTF-8 variable as
+  such instead of "not set". `example-cli` shows `auth login --op`, `config set op_ref`
+  / `secret_sources`, and a resolver read in `summary`. Tests use a fake
+  `op` script; nothing calls a real `op`.
 - **`make verify`**: the format check, clippy and tests as one local
   command. CI's `check` job now runs the same `Makefile` targets, so the gate
   has one definition.
