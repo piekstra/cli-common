@@ -19,7 +19,7 @@ reqwest = { workspace = true, optional = true }
 # no build script; already in the workspace's lockfile through the HTTP and
 # keyring crates.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = { workspace = true }
 
 [features]
 # `From<reqwest::Error> for CliError` (orphan rule keeps this out of consumer crates).

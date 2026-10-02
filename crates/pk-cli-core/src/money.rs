@@ -86,7 +86,12 @@ impl Money {
     pub fn grouped(&self) -> String {
         let (negative, digits) = split_sign(self.amount.trim());
         let sign = if negative { "-" } else { "" };
-        let body = group_unsigned(digits);
+        self.render(sign, &group_unsigned(digits))
+    }
+
+    /// The one place a currency's symbol and position are decided, shared by
+    /// `Display` and [`Money::grouped`].
+    fn render(&self, sign: &str, body: &str) -> String {
         if self.currency == "USD" {
             format!("{sign}${body}")
         } else {
@@ -160,11 +165,7 @@ fn group_unsigned(s: &str) -> String {
 
 impl fmt::Display for Money {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.currency == "USD" {
-            write!(f, "${}", self.amount)
-        } else {
-            write!(f, "{} {}", self.amount, self.currency)
-        }
+        f.write_str(&self.render("", &self.amount))
     }
 }
 

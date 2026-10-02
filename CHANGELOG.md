@@ -22,8 +22,11 @@ Additive: no existing function, default or `/v1` shape changes.
   that comes from data. Non-Unix targets have no offset source and fall
   back to UTC. `today()` is unchanged and now documents when to use which.
   Adds `libc` (Unix only; bindings, already in the workspace lockfile).
-- **`make verify`**: CI's `check` job (fmt check, clippy, tests) as one
-  local command.
+- **`make verify`**: the format check, clippy and tests as one local
+  command. CI's `check` job now runs the same `Makefile` targets, so the gate
+  has one definition.
+- `Display for Money` and `output::scalar`'s money rendering now share one
+  private renderer with `grouped()`. Output is byte-identical.
 
 ## v0.8.0 — 2026-09-10
 

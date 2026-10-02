@@ -38,6 +38,11 @@ keychain ACL grants stable by signing with the `pk-cli-codesign` identity. The
 identity lives only in the owner's login keychain — never commit or distribute
 it.
 
+The targets below belong in each **family CLI's** Makefile, the repos that
+ship a keychain-reading binary. This repo's own Makefile has only the
+`verify` gate: `example-cli` is a template that never reads a real keychain,
+so it has no grant to keep stable.
+
 **Sign every target that produces a binary.** `cargo build` and
 `cargo install` both ad-hoc sign, giving the binary a *new* code identity each
 time. macOS scopes keychain "Always Allow" grants to that identity, so any
@@ -84,9 +89,9 @@ adopting this.
 
 ## Workflow
 
-- `make verify` (`cargo fmt --all --check`, `cargo clippy --workspace
-  --all-targets -- -D warnings`, `cargo test --workspace`) must be clean
-  before committing.
+- `make verify` (format check, clippy `-D warnings`, tests; the `Makefile`
+  defines them and CI runs the same targets) must be clean before
+  committing.
 - `example-cli` must keep compiling and demonstrating the full surface — it is
   the template new CLIs copy.
 - Releases: bump `workspace.package.version`, update `CHANGELOG.md`, tag

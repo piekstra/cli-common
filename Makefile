@@ -1,5 +1,5 @@
-# The local gate, matching CI's `check` job (.github/workflows/ci.yml): a green
-# `make verify` predicts a green PR.
+# The one definition of the gate. CI's `check` job runs these targets
+# (.github/workflows/ci.yml), so a green `make verify` predicts a green PR.
 
 CARGO ?= cargo
 

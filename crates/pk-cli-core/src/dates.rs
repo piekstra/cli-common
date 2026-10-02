@@ -56,7 +56,8 @@ pub fn today() -> Civil {
 }
 
 /// Today's date in the local timezone, the date on the user's wall calendar.
-/// Falls back to UTC (that is, [`today`]) when the offset is unknown.
+/// Falls back to UTC (that is, [`today`]) when the offset is unknown. Reads
+/// the zone through the C library; see [`local_utc_offset`] on thread safety.
 pub fn today_local() -> Civil {
     civil_from_days(local_epoch_days())
 }
@@ -82,7 +83,7 @@ pub fn civil_from_unix_at_offset(secs: i64, offset_secs: i64) -> Civil {
 }
 
 /// The civil date a Unix timestamp falls on in the local timezone. Falls back
-/// to UTC when [`local_utc_offset`] has no answer.
+/// to UTC when [`local_utc_offset`] has no answer; see it on thread safety.
 pub fn civil_from_unix_local(secs: i64) -> Civil {
     civil_from_unix_at_offset(secs, local_utc_offset(secs).unwrap_or(0))
 }
@@ -95,14 +96,22 @@ pub fn civil_from_unix_local(secs: i64) -> Civil {
 /// library (`localtime_r`), so it honors `TZ` and the system zone the same
 /// way `date` does. `None` where the platform gives no answer: non-Unix
 /// targets, or a timestamp outside `time_t`.
+///
+/// # Thread safety
+///
+/// The C library reads `TZ` with its own `getenv`, outside the lock
+/// `std::env` holds, so this call must not race `std::env::set_var` or
+/// `remove_var` on another thread (undefined behavior on glibc). The same
+/// goes for every `*_local` helper, which all call this. Set `TZ` before
+/// spawning threads, or pass a known offset to [`civil_from_unix_at_offset`].
 pub fn local_utc_offset(secs: i64) -> Option<i64> {
     local_offset::at(secs)
 }
 
 #[cfg(unix)]
 mod local_offset {
-    // POSIX, in every Unix libc, but not bound by the `libc` crate on Apple
-    // targets.
+    // POSIX and in every Unix libc, but the `libc` crate binds it only for
+    // Windows.
     extern "C" {
         fn tzset();
     }
@@ -319,11 +328,15 @@ mod tests {
         );
     }
 
-    /// Runs only as a child of `local_offset_honors_tz` (see there), with `TZ`
-    /// set and the expected offsets in the environment.
+    /// Asserts only as a child of `local_offset_honors_tz` (see there), with
+    /// `TZ` set and the expected offsets in the environment. Run any other way
+    /// (`--include-ignored`) it has nothing to check and passes.
     #[test]
     #[ignore = "driven by local_offset_honors_tz in a child process"]
     fn tz_probe() {
+        if std::env::var_os("PK_TZ_PROBE").is_none() {
+            return;
+        }
         let expect = |var: &str| -> i64 {
             std::env::var(var)
                 .expect("set by the parent test")
@@ -359,6 +372,7 @@ mod tests {
             let out = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["dates::tests::tz_probe", "--exact", "--ignored"])
                 .env("TZ", tz)
+                .env("PK_TZ_PROBE", "1")
                 .env("PK_TZ_PROBE_SUMMER", summer.to_string())
                 .env("PK_TZ_PROBE_WINTER", winter.to_string())
                 .env("PK_TZ_PROBE_EVENING_DATE", evening)

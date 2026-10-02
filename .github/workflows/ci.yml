@@ -27,9 +27,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux keyring build deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # The Makefile is the one definition of the gate; `make verify` runs
+      # these three locally.
+      - run: make fmt-check
+      - run: make lint
+      - run: make test
 
   # The platform-specific slivers are the apple-native keyring backend in
   # pk-cli-secrets and the codesign re-sign step in pk-cli-selfupdate
