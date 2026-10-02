@@ -51,12 +51,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       - run: cargo test -p pk-cli-secrets -p pk-cli-selfupdate
+      # shell: bash adds pipefail, so the lister's own failure fails the step.
       - name: self-view Swift helpers
+        shell: bash
         run: |
           for f in scripts/lib/*.swift; do swiftc -typecheck "$f"; done
           swift scripts/lib/self-view-windows.swift | awk '
             $0 !~ /^-?[0-9]+( -?[0-9]+){6}$/ { bad = 1; print "bad window line: " $0 }
-            END { exit bad }'
+            END { print NR " window lines"; if (NR == 0) exit 1; exit bad }'
 
   security:
     runs-on: ubuntu-latest
