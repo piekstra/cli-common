@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -398,10 +398,73 @@ AGENTS.md, same house style as the CLIs.
 | `pk-cli-utility` | the `utility/v1` domain profile (§1.8): `UtilitySummary`, `Statement`, `Payment`, `UsagePeriod`, `Transaction` (re-exports core's `Paged`/`RangeArgs`) | utiman's per-provider `balance-fields`/`scale`/`items-path` manifest hacks |
 | `pk-cli-documents` | the `documents/v1` domain profile (§1.8): `Document`, `SavedDocument`, `DownloadBatch`, `OpenedDocument` — list & download a portal's published files | `organize-scans`' per-CLI download-command adapter table |
 | `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages: elements, attributes, table rows/cells, entity decoding — all total, never panicking | a DOM-parser dependency, and the ad-hoc `str::find` scraping each portal CLI grows on its own |
+| `pk-cli-drive` | state in the owner's Drive (§2.1): one `Backend` over a mounted folder or an rclone remote, the stale-while-revalidate read cache in front of the remote (`CachedRemote`), its bounded background refresh, and owner-only file output (`private_file`) | tax-cli's `drive.rs` + `cache.rs` + `private_file.rs`, and the copy every other CLI that keeps state in Drive would write |
 
 Each crate is small and independent; a CLI adopts them piecemeal. Provider
 scraping/session logic (tojfl's DNN dance, xfin's browser-session replay) stays
 in each CLI/SDK — cli-common owns *surface*, not *providers*.
+
+### 2.1 State in the owner's Drive (`pk-cli-drive`)
+
+For a CLI whose own state (a registry, notes, settings shared across
+machines) lives in a cloud-drive folder the owner already has, rather than
+in `~/.config`. The crate owns the mechanism; the CLI owns its layout (which
+files, which folders) and its data contract.
+
+**Two ways at one folder.** `Backend::Mount(path)` is a local directory — a
+Drive-for-desktop mount or any folder. It is fast but can go stale without
+saying so (a plain directory left where a mount used to be accepts writes and
+syncs nothing; a lazily-materialized mount answers "no such file" for folders
+the remote has), so a CLI certifies a mount before trusting it.
+`Remote` is rclone (`cat`/`copyto`/`moveto`/`lsf`/`mkdir`) against a spec
+`<remote>:<folder>`: slower, but it talks to the provider's API and is immune
+to mount health. When both are configured, the remote is used for every
+state operation. rclone's exit codes 3 and 4 read as "missing" (a missing file
+is `None`, a missing folder lists empty); every other failure is exit 5,
+never an empty result. A move to a computed name uses `move_no_clobber`,
+which refuses an occupied destination with exit 2 and both files untouched.
+
+**The read cache** (`CachedRemote`, the default in front of a remote) is a
+per-machine accelerator, never a second source of truth:
+
+| Rule | |
+|---|---|
+| Write-through | every write hits the remote first; only on success is the cache updated (content stored, listings dropped). A `--no-cache` run bypasses reads only; its writes still update the cache |
+| Freshness tiers | a copy within the TTL (900 s) is served; past it but within the staleness bound (24 h) it is served at once with a `note:` on stderr and refreshed in the background; past the bound, or with nothing cached, the read fetches before the command continues |
+| A write is never undone by a refresh | each write bumps a generation counter under a lock; a fetch stores its result only if the generation is unchanged since before it read |
+| A write never derives from an unconfirmed stale copy | before a write, every copy the command was served stale is re-read; if one changed, the write is refused, nothing written, the cache now current |
+| Fail-open | a cache miss or disk error falls through to the remote; an unreachable remote with a cached copy serves the copy with a stderr warning |
+| Bounded background work | the refresh is a detached child (`<bin> <command> --revalidate-file=<rel> --remote-spec=<spec>`, null stdio, own process group) whose rclone calls are killed at the revalidate timeout (120 s); a per-entry marker stops duplicates |
+
+Location `$XDG_CACHE_HOME/<bin>/<slug>-<hash>/` (else `~/.cache/<bin>/…`),
+directory `0700`, files `0600`. The knobs are one `CachePolicy`, resolved
+once and passed to the cache, to `background_revalidator` and to the
+child's `run_revalidation`. `CachePolicy::from_env(bin)` reads environment
+variables with the binary's prefix: `<BIN>_NO_CACHE`, `<BIN>_CACHE_TTL`
+(`0`: every read fetches), `<BIN>_CACHE_MAX_STALE` (`0`: no stale serving),
+`<BIN>_CACHE_REVALIDATE_TIMEOUT`, `<BIN>_CACHE_NO_REVALIDATE`. A `--no-cache`
+flag sets `bypass_reads` on the policy; nothing is exported to the
+environment.
+
+A CLI that uses the cache:
+
+- accepts the hidden revalidate arguments on one command
+  (`cache::REVALIDATE_FILE_ARG`, `REVALIDATE_LISTING_ARG`, `REMOTE_SPEC_ARG`)
+  and calls `cache::run_revalidation` with a `Remote`, cache dir and policy
+  built by the same code that built the parent's, so the child runs the same
+  rclone under the same bound;
+- builds one `CachedRemote` per command (a refused write keeps refusing
+  through the same handle; the remedy is a rerun);
+- documents the stale-write refusal as an exit-1 case: the remote answered,
+  so it is not exit 5, and rerunning at once is safe.
+  `cache::is_stale_write_refusal` recognizes it;
+- passes store-relative `rel` paths it built itself. The mount backend
+  joins them onto the root as given, so text from outside (a user-typed
+  name, a provider's filename) is sanitized before it becomes a `rel`.
+
+The crate needs Rust 1.89 (`File::lock`), above the workspace's 1.75 floor,
+so adopting it raises the CLI's own minimum. `example-cli state
+get|put|list|sync` is the worked example.
 
 ### Versioning & consumption
 

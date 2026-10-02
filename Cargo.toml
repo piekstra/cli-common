@@ -10,6 +10,7 @@ members = [
     "crates/pk-cli-utility",
     "crates/pk-cli-documents",
     "crates/pk-cli-scrape",
+    "crates/pk-cli-drive",
     "crates/example-cli",
 ]
 
@@ -32,6 +33,7 @@ pk-cli-http = { path = "crates/pk-cli-http", version = "0.8.0" }
 pk-cli-utility = { path = "crates/pk-cli-utility", version = "0.8.0" }
 pk-cli-documents = { path = "crates/pk-cli-documents", version = "0.8.0" }
 pk-cli-scrape = { path = "crates/pk-cli-scrape", version = "0.8.0" }
+pk-cli-drive = { path = "crates/pk-cli-drive", version = "0.8.0" }
 
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }

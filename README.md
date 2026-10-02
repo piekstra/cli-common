@@ -28,6 +28,7 @@ self-update.
 | `pk-cli-utility` | the `utility/v1` domain profile: `utility-summary/v1` + statement/payment/usage/transaction DTOs |
 | `pk-cli-documents` | the `documents/v1` domain profile: list & download a portal's published files (`document-list/v1`, `document-download/v1`, …) |
 | `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages rather than JSON |
+| `pk-cli-drive` | state in the owner's Drive: one backend over a mounted folder or an rclone remote, with a stale-while-revalidate read cache that never becomes a second source of truth (needs Rust 1.89) |
 | `example-cli` | a runnable template wiring it all together — copy it to start a new family CLI |
 
 ## Consuming

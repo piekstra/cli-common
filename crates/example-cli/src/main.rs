@@ -7,7 +7,10 @@
 //! `confirm` gate). Credentials show both 1Password paths: `auth login --op`
 //! (or a configured `op_ref`) at login, and a `SecretResolver` walking env,
 //! keychain and 1Password in the configured `secret_sources` order when
-//! `summary` needs the credential.
+//! `summary` needs the credential. The `state` noun keeps small files in the
+//! owner's Drive (`pk-cli-drive`): a mounted folder (`data_root`) or an
+//! rclone remote (`remote`) behind the stale-while-revalidate read cache,
+//! with `state sync` as the background refresh's child.
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -16,6 +19,7 @@ use pk_cli_config::ConfigStore;
 use pk_cli_core::info::{AuthInfo, CliInfo};
 use pk_cli_core::{confirm, output, resolve, CliError, CommonArgs};
 use pk_cli_documents::Document;
+use pk_cli_drive::{cache, Backend, CachedRemote, Kind, Remote};
 use pk_cli_secrets::{
     CredentialStore, OnePassword, OpArgs, OpRef, SecretResolver, SecretSpec, SourceOrder,
 };
@@ -25,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 const BIN: &str = "example-cli";
 const REPO: &str = "piekstra/cli-common";
-const CONFIG_KEYS: &str = "username, account, op_ref, secret_sources";
+const CONFIG_KEYS: &str = "username, account, op_ref, secret_sources, data_root, remote";
 
 /// Example member of the piekstra CLI family (conforms to piekstra-cli/1).
 #[derive(Parser, Debug)]
@@ -59,6 +63,8 @@ enum Command {
     /// Devices — a plain (non-profile) noun: list, resolve a reference, mutate.
     #[command(subcommand)]
     Devices(DevicesCmd),
+    /// Small state files in the owner's Drive (mount or rclone remote).
+    State(StateArgs),
     /// Update to the latest release from GitHub.
     SelfUpdate(SelfUpdateArgs),
     /// Print a shell completion script.
@@ -123,6 +129,48 @@ enum DevicesCmd {
     },
 }
 
+#[derive(clap::Args, Debug)]
+struct StateArgs {
+    /// Read straight from the remote, bypassing the read cache (writes
+    /// still update it). Same as `EXAMPLE_CLI_NO_CACHE=1`.
+    #[arg(long, global = true)]
+    no_cache: bool,
+    #[command(subcommand)]
+    cmd: StateCmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum StateCmd {
+    /// Print a state file (state-file/v1). Exit 4 when it does not exist.
+    Get { rel: String },
+    /// Write a state file from stdin.
+    Put { rel: String },
+    /// List the files under a folder, recursively (state-entry-list/v1).
+    #[command(visible_alias = "ls")]
+    List {
+        #[arg(default_value = "")]
+        rel: String,
+    },
+    /// Wipe the read cache (`--clear`); hidden: the background refresh.
+    Sync(StateSyncArgs),
+}
+
+/// `state sync`. The revalidate arguments are what
+/// `pk_cli_drive::cache::SpawnRevalidator` passes; they are hidden because
+/// only the cache runs them.
+#[derive(clap::Args, Debug)]
+struct StateSyncArgs {
+    /// Wipe the read cache for the configured remote.
+    #[arg(long)]
+    clear: bool,
+    #[arg(long, hide = true, value_name = "REL", conflicts_with_all = ["clear", "revalidate_listing"])]
+    revalidate_file: Option<String>,
+    #[arg(long, hide = true, value_name = "REL", conflicts_with = "clear")]
+    revalidate_listing: Option<String>,
+    #[arg(long, hide = true, value_name = "SPEC")]
+    remote_spec: Option<String>,
+}
+
 #[derive(Subcommand, Debug)]
 enum ConfigCmd {
     /// Print the resolved config file path.
@@ -177,6 +225,50 @@ struct Config {
     /// `env,keychain,op`).
     #[serde(skip_serializing_if = "Option::is_none")]
     secret_sources: Option<SourceOrder>,
+    /// A local folder for `state` — a Drive-for-desktop mount, or any dir.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_root: Option<String>,
+    /// An rclone spec for `state` (`<remote>:<folder>`); preferred over
+    /// `data_root` when both are set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<String>,
+}
+
+/// The rclone remote for `spec` — one constructor, so the background
+/// refresh's child runs exactly what its parent ran.
+fn state_remote(spec: &str) -> Remote {
+    Remote::new(spec).temp_prefix(BIN)
+}
+
+/// The cache policy: `EXAMPLE_CLI_CACHE_*` from the environment, plus the
+/// `--no-cache` flag.
+fn state_cache_policy(no_cache: bool) -> cache::CachePolicy {
+    let mut policy = cache::CachePolicy::from_env(BIN);
+    policy.bypass_reads |= no_cache;
+    policy
+}
+
+/// The store `state` works on: the rclone remote behind the read cache when
+/// one is configured, else the mount.
+fn state_backend(cfg: &Config, no_cache: bool) -> Result<Backend, CliError> {
+    if let Some(spec) = &cfg.remote {
+        let Some(dir) = cache::cache_dir_for(BIN, spec) else {
+            return Ok(Backend::Remote(state_remote(spec)));
+        };
+        let policy = state_cache_policy(no_cache);
+        let mut cached = CachedRemote::new(state_remote(spec), dir, policy);
+        if let Some(r) = cache::background_revalidator(&policy, &["state", "sync"], spec) {
+            cached = cached.with_revalidator(r);
+        }
+        return Ok(Backend::Cached(cached));
+    }
+    match &cfg.data_root {
+        Some(root) => Ok(Backend::Mount(root.into())),
+        None => Err(CliError::Usage(format!(
+            "no state store configured — `{BIN} config set data_root <dir>` or \
+             `{BIN} config set remote <remote>:<folder>`"
+        ))),
+    }
 }
 
 fn main() {
@@ -252,6 +344,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
             Ok(())
         }
         Command::Devices(cmd) => devices(cli, cmd),
+        Command::State(args) => state(cli, args, &store),
         Command::SelfUpdate(args) => Updater {
             repo: REPO.into(),
             binary: BIN.into(),
@@ -273,7 +366,14 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     method: "password".into(),
                     login_hint: Some(format!("{BIN} auth login")),
                 },
-                &["summary", "balance", "bills", "documents", "devices"],
+                &[
+                    "summary",
+                    "balance",
+                    "bills",
+                    "documents",
+                    "devices",
+                    "state",
+                ],
             )
             .with_profiles(&[pk_cli_utility::PROFILE, pk_cli_documents::PROFILE]);
             output::json(&serde_json::to_value(&info).expect("CliInfo serializes to JSON"));
@@ -386,6 +486,116 @@ fn devices(cli: &Cli, cmd: &DevicesCmd) -> Result<(), CliError> {
     }
 }
 
+fn state(cli: &Cli, args: &StateArgs, store: &ConfigStore) -> Result<(), CliError> {
+    let json = cli.common.json;
+    let cfg: Config = store.load()?;
+    if let StateCmd::Sync(sync) = &args.cmd {
+        return state_sync(json, &cfg, sync, args.no_cache);
+    }
+    let backend = state_backend(&cfg, args.no_cache)?;
+    match &args.cmd {
+        StateCmd::Get { rel } => {
+            let content = backend.read_file(rel)?.ok_or_else(|| {
+                CliError::NotFound(format!("{}: no such file", backend.display_path(rel)))
+            })?;
+            let payload = serde_json::json!({
+                "rel": rel,
+                "location": backend.display_path(rel),
+                "content": content,
+            });
+            output::emit(json, "state-file", payload, |p| {
+                print!("{}", p["content"].as_str().unwrap_or_default());
+            });
+            Ok(())
+        }
+        StateCmd::Put { rel } => {
+            let mut content = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut content)
+                .map_err(|e| CliError::Other(format!("reading stdin: {e}")))?;
+            backend.write_file(rel, &content)?;
+            // Read back, never trust the write's status (SPEC §1.3).
+            let stored = backend.read_file(rel)?.unwrap_or_default();
+            let payload = serde_json::json!({
+                "rel": rel,
+                "location": backend.display_path(rel),
+                "bytes": stored.len(),
+            });
+            output::emit(json, "state-write", payload, |p| {
+                eprintln!(
+                    "wrote {} bytes to {}",
+                    p["bytes"],
+                    p["location"].as_str().unwrap_or("")
+                );
+            });
+            Ok(())
+        }
+        StateCmd::List { rel } => {
+            let rows = backend
+                .list_entries(rel)?
+                .iter()
+                .map(|e| serde_json::to_value(e).unwrap_or_default())
+                .collect();
+            output::emit_list(json, "state-entry", rows, &["rel", "size", "modified"]);
+            Ok(())
+        }
+        StateCmd::Sync(_) => unreachable!("handled above"),
+    }
+}
+
+/// `state sync`: the background refresh a stale cached read spawns, or
+/// `--clear`.
+fn state_sync(
+    json: bool,
+    cfg: &Config,
+    args: &StateSyncArgs,
+    no_cache: bool,
+) -> Result<(), CliError> {
+    let spec = args
+        .remote_spec
+        .as_ref()
+        .or(cfg.remote.as_ref())
+        .ok_or_else(|| {
+            CliError::Usage(
+                "`state sync` manages the read cache of a remote, and none is configured".into(),
+            )
+        })?;
+    let target = match (&args.revalidate_file, &args.revalidate_listing) {
+        (Some(rel), _) => Some((Kind::File, rel)),
+        (None, Some(rel)) => Some((Kind::Listing, rel)),
+        (None, None) => None,
+    };
+    let dir = cache::cache_dir_for(BIN, spec).ok_or_else(|| {
+        CliError::Other("cannot resolve a cache directory (is $HOME set?)".into())
+    })?;
+    if let Some((kind, rel)) = target {
+        // Built exactly as the parent built its cache.
+        let policy = state_cache_policy(no_cache);
+        let outcome = cache::run_revalidation(state_remote(spec), dir.clone(), policy, kind, rel)?;
+        let payload = serde_json::json!({
+            "cache_dir": dir.display().to_string(),
+            "revalidated": { "kind": kind.as_str(), "rel": rel, "outcome": outcome.as_str() },
+        });
+        output::emit(json, "state-sync", payload, |_| {
+            eprintln!("{} {rel}: {}", kind.as_str(), outcome.as_str());
+        });
+        return Ok(());
+    }
+    if !args.clear {
+        return Err(CliError::Usage(
+            "nothing to do — pass --clear to wipe the read cache".into(),
+        ));
+    }
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)
+            .map_err(|e| CliError::Other(format!("clearing cache {}: {e}", dir.display())))?;
+    }
+    let payload = serde_json::json!({ "cache_dir": dir.display().to_string(), "cleared": true });
+    output::emit(json, "state-sync", payload, |_| {
+        eprintln!("cache cleared: {}", dir.display());
+    });
+    Ok(())
+}
+
 fn config(cli: &Cli, cmd: &ConfigCmd, store: &ConfigStore) -> Result<(), CliError> {
     match cmd {
         ConfigCmd::Path => {
@@ -411,6 +621,8 @@ fn config(cli: &Cli, cmd: &ConfigCmd, store: &ConfigStore) -> Result<(), CliErro
                 "secret_sources" => {
                     cfg.secret_sources = Some(value.parse().map_err(CliError::Usage)?)
                 }
+                "data_root" => cfg.data_root = Some(value.clone()),
+                "remote" => cfg.remote = Some(value.clone()),
                 other => {
                     return Err(CliError::Usage(format!(
                         "unknown config key `{other}` (known: {CONFIG_KEYS})"
@@ -426,6 +638,8 @@ fn config(cli: &Cli, cmd: &ConfigCmd, store: &ConfigStore) -> Result<(), CliErro
                 "account" => cfg.account = None,
                 "op_ref" => cfg.op_ref = None,
                 "secret_sources" => cfg.secret_sources = None,
+                "data_root" => cfg.data_root = None,
+                "remote" => cfg.remote = None,
                 other => {
                     return Err(CliError::Usage(format!(
                         "unknown config key `{other}` (known: {CONFIG_KEYS})"

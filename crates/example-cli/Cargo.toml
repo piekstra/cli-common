@@ -4,7 +4,8 @@ description = "Template CLI exercising every pk-cli-* crate — copy this to sta
 publish = false
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# pk-cli-drive needs 1.89 (`File::lock`); the template inherits that floor.
+rust-version = "1.89"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -23,6 +24,7 @@ pk-cli-auth = { workspace = true }
 pk-cli-http = { workspace = true }
 pk-cli-utility = { workspace = true }
 pk-cli-documents = { workspace = true }
+pk-cli-drive = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4"
 serde = { workspace = true }

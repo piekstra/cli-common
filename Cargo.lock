@@ -613,6 +613,7 @@ dependencies = [
  "pk-cli-config",
  "pk-cli-core",
  "pk-cli-documents",
+ "pk-cli-drive",
  "pk-cli-http",
  "pk-cli-secrets",
  "pk-cli-selfupdate",
@@ -1342,6 +1343,16 @@ dependencies = [
  "pk-cli-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "pk-cli-drive"
+version = "0.8.0"
+dependencies = [
+ "pk-cli-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
