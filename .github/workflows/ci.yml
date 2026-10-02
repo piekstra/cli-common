@@ -28,10 +28,11 @@ jobs:
       - name: Install Linux keyring build deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
       # The Makefile is the one definition of the gate; `make verify` runs
-      # these three locally.
+      # these four locally.
       - run: make fmt-check
       - run: make lint
       - run: make test
+      - run: make scripts-check
 
   # The platform-specific slivers are the apple-native keyring backend in
   # pk-cli-secrets and the codesign re-sign step in pk-cli-selfupdate
