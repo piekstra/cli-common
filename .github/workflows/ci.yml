@@ -28,16 +28,20 @@ jobs:
       - name: Install Linux keyring build deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
       # The Makefile is the one definition of the gate; `make verify` runs
-      # these three locally.
+      # these four locally.
       - run: make fmt-check
       - run: make lint
       - run: make test
+      - run: make scripts-check
 
   # The platform-specific slivers are the apple-native keyring backend in
   # pk-cli-secrets and the codesign re-sign step in pk-cli-selfupdate
   # (`#[cfg(target_os = "macos")]`), so macOS builds the workspace and runs
   # those two crates' tests — not a second copy of the whole gate (macOS
   # minutes bill at ~10x). Add a crate here when it grows a macOS-only path.
+  # The self-view Swift helpers are the scripts' macOS sliver: the Linux
+  # tests stub them, so this job type-checks each one and holds the window
+  # lister to the line format the stub imitates.
   macos-smoke:
     name: macos smoke (apple-native keyring, codesign)
     runs-on: macos-latest
@@ -47,6 +51,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
       - run: cargo test -p pk-cli-secrets -p pk-cli-selfupdate
+      # shell: bash adds pipefail, so the lister's own failure fails the step.
+      - name: self-view Swift helpers
+        shell: bash
+        run: |
+          for f in scripts/lib/*.swift; do swiftc -typecheck "$f"; done
+          swift scripts/lib/self-view-windows.swift | awk '
+            $0 !~ /^-?[0-9]+( -?[0-9]+){6}$/ { bad = 1; print "bad window line: " $0 }
+            END { print NR " window lines"; if (NR == 0) exit 1; exit bad }'
 
   security:
     runs-on: ubuntu-latest

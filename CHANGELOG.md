@@ -71,11 +71,54 @@ Additive: no existing function, default or `/v1` shape changes.
   such instead of "not set". `example-cli` shows `auth login --op`, `config set op_ref`
   / `secret_sources`, and a resolver read in `summary`. Tests use a fake
   `op` script; nothing calls a real `op`.
+- **`pk-cli-drive`** (new crate; DESIGN.md §2.1) — state in the owner's
+  Drive, extracted from tax-cli. `Backend` is one interface over a mounted
+  folder (`Mount`), rclone straight through (`Remote`) or rclone behind the
+  read cache (`Cached`): read/write small UTF-8 files, copy binary files in
+  and out, move (with a no-clobber variant that refuses an occupied
+  destination, exit 2), list recursively with sizes and modification times.
+  `Remote` maps rclone's exit codes 3/4 to "missing" and everything else to
+  exit 5, falls back to a sizes-only listing on an rclone older than 1.63,
+  stages uploads in an exclusive owner-only temp file, and can be bounded
+  (`with_budget`), pointed at another program (`program`, which `version()`
+  uses too) and given the CLI's temp-name prefix (`temp_prefix`).
+  `CachedRemote` is the stale-while-revalidate read cache: write-through,
+  fresh/stale/expired tiers (900 s / 24 h defaults), a generation counter so
+  a refresh never undoes a write, a refusal (exit 1,
+  `is_stale_write_refusal`) when a write would derive from a stale copy that
+  has since changed, fail-open on cache or remote errors, and a bounded
+  detached background refresh (`SpawnRevalidator`, `background_revalidator`,
+  `run_revalidation`) deduplicated by a per-entry marker. One `CachePolicy`
+  carries every knob to the cache, the spawner and the child;
+  `CachePolicy::from_env` reads `<BIN>_NO_CACHE` and
+  `<BIN>_CACHE_{TTL,MAX_STALE,REVALIDATE_TIMEOUT,NO_REVALIDATE}`. The cache
+  lives under `$XDG_CACHE_HOME/<bin>/`. `private_file::write` is the
+  owner-only (0600) writer, exclusive or atomic-replace. The crate needs Rust
+  1.89 (`File::lock`). Tests use an in-memory remote and a stub `rclone`
+  script; nothing calls a real rclone. `example-cli` gains `state
+  get|put|list|sync` and the `data_root` / `remote` config keys, and with
+  them a 1.89 floor.
 - **`make verify`**: the format check, clippy and tests as one local
   command. CI's `check` job now runs the same `Makefile` targets, so the gate
   has one definition.
 - `Display for Money` and `output::scalar`'s money rendering now share one
   private renderer with `grouped()`. Output is byte-identical.
+- **`scripts/self-view.sh`**: lets a builder see and drive the desktop app
+  it is building, and nothing else. `launch` starts the app and records its
+  PID and start time in a pidfile. `shot`, `bounds` and `drive` act only on
+  a window owned by that process or a descendant, never one matched by name.
+  They refuse when the pidfile is missing, the PID was recycled, the process
+  exited, no window is tied to it, or the screen is locked. `drive` also
+  refuses when another app's window covers the target point, and reports
+  success only once the pointer reads back at the target. `web` renders a
+  loopback dev server in a headless browser with a throwaway profile, and
+  only when the port's listeners belong to the launched tree. `stop` ends
+  the tree. Refusals use the family exit codes (3 permission, 4 nothing to
+  act on, 5 environment; a safety refusal is the generic 1). The macOS effects are small Swift
+  helpers in `scripts/lib/`, each behind a `SELF_VIEW_*` test seam, so the
+  tests run on Linux; `make scripts-check` runs them with shellcheck, as
+  part of `make verify` and CI, and the macOS CI job type-checks the
+  helpers and holds the window lister to the line format the tests stub.
 
 ## v0.8.0 — 2026-09-10
 
