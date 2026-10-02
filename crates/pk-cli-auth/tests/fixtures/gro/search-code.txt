@@ -1,0 +1,16 @@
+ID: 19a0c0ffee000001
+ThreadID: 19a0c0ffee000001
+From: Example Portal <no-reply@example.com>
+Subject: Your verification code
+Date: Fri, 02 Oct 2026 09:14:05 -0400
+Labels: INBOX, UNREAD
+Snippet: Hello, your one-time verification code is 482917. It expires in 10 minutes. If you did not request it, contact support at 555-0100.
+---
+ID: 19a0c0ffee000000
+ThreadID: 19a0c0ffee000000
+From: Example Portal <no-reply@example.com>
+Subject: New sign-in to your account
+Date: Fri, 02 Oct 2026 09:14:01 -0400
+Labels: INBOX, UNREAD
+Snippet: We noticed a new sign-in from a device on 10/02/2026.
+---

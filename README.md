@@ -23,7 +23,7 @@ self-update.
 | `pk-cli-secrets` | redacting `Secret` type, OS-keychain `CredentialStore` (`piekstra.<bin>`) with one-item JSON credentials (`get_json`/`set_json`) and legacy-service `migrate_from`, `--stdin`/`--from-env` ingestion (secrets never on argv) |
 | `pk-cli-config` | non-secret JSON config at `~/.config/<bin>/config.json` |
 | `pk-cli-selfupdate` | `self-update [--check] [-y]` from GitHub Releases, `self-update/v1` DTO |
-| `pk-cli-auth` | `auth login/status/logout/set-credential` arg structs, the canonical `auth-status/v1` DTO, `token` (bearer-token claim reads: expiry, `expires_at`), and `reauth::with_reauth` (retry a read once after re-authenticating, with the retry-once/no-login-storm rails) |
+| `pk-cli-auth` | `auth login/status/logout/set-credential` arg structs, the canonical `auth-status/v1` DTO, `token` (bearer-token claim reads: expiry, `expires_at`), `reauth::with_reauth` (retry a read once after re-authenticating, with the retry-once/no-login-storm rails), and `otp` (the one-time-code login: request, park for a `--code` resume, read the code from the mailbox through `gro` or prompt) |
 | `pk-cli-http` | blocking client builder with family defaults, raw `api` passthrough command |
 | `pk-cli-utility` | the `utility/v1` domain profile: `utility-summary/v1` + statement/payment/usage/transaction DTOs |
 | `pk-cli-documents` | the `documents/v1` domain profile: list & download a portal's published files (`document-list/v1`, `document-download/v1`, …) |

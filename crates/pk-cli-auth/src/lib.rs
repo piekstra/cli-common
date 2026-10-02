@@ -3,6 +3,7 @@
 //! rendering for status. Each CLI supplies its own credential verification;
 //! this crate owns the shapes so drivers can treat every CLI identically.
 
+pub mod otp;
 pub mod reauth;
 pub mod token;
 
