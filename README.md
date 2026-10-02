@@ -111,7 +111,7 @@ stopped 41234
 
   | Code | Meaning | What to do |
   | --- | --- | --- |
-  | 1 | Refused for safety: another app's window or listener is involved, a non-loopback URL, or a launch is already tracked | stop or bring the app forward |
+  | 1 | The table's generic code: a safety refusal (another app's window or listener is involved, a non-loopback URL, a launch already tracked) or an unexpected failure; the message says which | read the message |
   | 2 | Usage | fix the call |
   | 3 | Permission missing: Screen Recording (`shot`) or Accessibility (`drive`) | owner grants it |
   | 4 | Nothing to act on: no pidfile, process exited or PID recycled, no window, nothing listening | launch again |

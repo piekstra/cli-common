@@ -33,8 +33,10 @@
 #
 # Exit codes (the family's table, DESIGN.md §1.5):
 #   0 ok
-#   1 refused for safety: another app's window or listener is involved, the
-#     URL is not loopback, or the pidfile already tracks a running launch
+#   1 the table's generic code: a safety refusal (another app's window or
+#     listener is involved, the URL is not loopback, the pidfile already
+#     tracks a running launch) or an unexpected failure; the message says
+#     which
 #   2 usage
 #   3 permission missing: Screen Recording (shot) or Accessibility (drive)
 #   4 nothing to act on: no pidfile, the launched process exited or its PID
@@ -56,6 +58,16 @@ set -euo pipefail
 
 prog="self-view"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# The one exit hook. Functions only set these: ERRF is a scratch file for a
+# helper's stderr, SERVED a pidfile `web --serve` launched and must stop.
+ERRF=""
+SERVED=""
+cleanup() {
+  [ -z "$ERRF" ] || rm -f "$ERRF"
+  [ -z "$SERVED" ] || cmd_stop --pidfile "$SERVED" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 
 usage() {
   sed -n '/^# Commands:/,/^#   5 environment/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
@@ -127,9 +139,8 @@ tree_pids() {
 
 # Set WINDOWS to the on-screen window list; a failing source ends the run
 # with its own error rather than reading as "no window".
-ERRF=""
 read_windows() {
-  [ -n "$ERRF" ] || { ERRF="$(mktemp "${TMPDIR:-/tmp}/self-view-err.XXXXXX")"; trap 'rm -f "$ERRF"' EXIT; }
+  [ -n "$ERRF" ] || ERRF="$(mktemp "${TMPDIR:-/tmp}/self-view-err.XXXXXX")"
   if ! WINDOWS="$(helper "${SELF_VIEW_WINDOW_LIST:-}" self-view-windows.swift 2>"$ERRF")"; then
     env_fail "listing windows failed: $(tr '\n' ' ' <"$ERRF")"
   fi
@@ -324,7 +335,10 @@ cmd_drive() {
   # forward once and look again.
   front="$(front_window_at "$sx" "$sy")"
   if [ "$front" != "$WIN_ID" ]; then
-    helper "${SELF_VIEW_RAISE:-}" self-view-raise.swift "$WIN_PID" >/dev/null 2>&1 || true
+    rc=0
+    helper "${SELF_VIEW_RAISE:-}" self-view-raise.swift "$WIN_PID" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 4 ] \
+      || refuse "drive: another window (id ${front:-none}) is in front of the launched app at ($px, $py), and the window's owner (PID $WIN_PID) is not an app that can be activated. Bring its window to the front and retry; no event was sent."
     find_window 0
     sx="$(awk -v a="$WIN_X" -v b="$px" 'BEGIN { print a + b }')"
     sy="$(awk -v a="$WIN_Y" -v b="$py" 'BEGIN { print a + b }')"
@@ -366,7 +380,7 @@ find_browser() {
 
 cmd_web() {
   local pidfile="" serve="" url="" out="" size="1280x800" wait=30 port
-  local browser bpid profile deadline listeners outside served=""
+  local browser bpid profile deadline listeners outside
   while [ $# -gt 0 ]; do
     case "$1" in
       --pidfile) pidfile="${2:-}"; shift 2 ;;
@@ -395,10 +409,8 @@ cmd_web() {
 
   if [ -n "$serve" ]; then
     pidfile="$(mktemp -d "${TMPDIR:-/tmp}/self-view-web.XXXXXX")/server.pid"
-    served="$pidfile"
     cmd_launch --pidfile "$pidfile" -- bash -c "$serve" >/dev/null
-    # shellcheck disable=SC2064 # expand now: the pidfile path is fixed
-    trap "cmd_stop --pidfile '$pidfile' >/dev/null 2>&1 || true" EXIT
+    SERVED="$pidfile"
   fi
   load_pidfile "$pidfile"
 
@@ -407,7 +419,7 @@ cmd_web() {
   while :; do
     listeners="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
     [ -n "$listeners" ] && break
-    [ -n "$(start_time "$ROOT")" ] || missing "web: the launched server $ROOT exited before listening on port $port${served:+; see ${served%.pid}.log}"
+    [ -n "$(start_time "$ROOT")" ] || missing "web: the launched server $ROOT exited before listening on port $port${SERVED:+; see ${SERVED%.pid}.log}"
     [ "$(date +%s)" -lt "$deadline" ] || missing "web: nothing listens on port $port after ${wait}s."
     sleep 1
   done

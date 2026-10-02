@@ -117,6 +117,10 @@ run "drive refuses when a foreign window stays in front: 1" 1 "no event was sent
 check "raise was attempted for the launched window's owner" [ "$(tail -n1 "$work/raised")" = "$root" ]
 check "nothing posted under a foreign window" [ ! -s "$work/posted" ]
 
+run "drive when the owner cannot be activated: 1, says so" 1 "not an app that can be activated" -- env SELF_VIEW_RAISE="exit 4" \
+  "$sv" drive --pidfile "$pf" click 250 100 --wait 0
+check "nothing posted when the raise is impossible" [ ! -s "$work/posted" ]
+
 # Raising brings our window forward -> the click goes through.
 run "drive raises, then clicks" 0 -- env SELF_VIEW_RAISE="printf '%s\n' '$root 11 0 100 50 800 600' >'$work/windows.txt'" \
   "$sv" drive --pidfile "$pf" click 250 100 --wait 0

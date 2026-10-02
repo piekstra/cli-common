@@ -57,8 +57,8 @@ Additive: no existing function, default or `/v1` shape changes.
   success only once the pointer reads back at the target. `web` renders a
   loopback dev server in a headless browser with a throwaway profile, and
   only when the port's listeners belong to the launched tree. `stop` ends
-  the tree. Refusals use the family exit codes (1 safety, 3 permission,
-  4 nothing to act on, 5 environment). The macOS effects are small Swift
+  the tree. Refusals use the family exit codes (3 permission, 4 nothing to
+  act on, 5 environment; a safety refusal is the generic 1). The macOS effects are small Swift
   helpers in `scripts/lib/`, each behind a `SELF_VIEW_*` test seam, so the
   tests run on Linux; `make scripts-check` runs them with shellcheck, as
   part of `make verify` and CI, and the macOS CI job type-checks the
