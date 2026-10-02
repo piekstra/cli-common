@@ -40,8 +40,10 @@ it.
 
 The targets below belong in each **family CLI's** Makefile, the repos that
 ship a keychain-reading binary. This repo's own Makefile has only the
-`verify` gate: `example-cli` is a template that never reads a real keychain,
-so it has no grant to keep stable.
+`verify` gate and no install, dev or release target, so it never produces a
+binary meant to run against a real keychain. `example-cli` does store
+credentials through the real `keyring` backend on `auth login`; a copy that
+ships needs these targets like any family CLI.
 
 **Sign every target that produces a binary.** `cargo build` and
 `cargo install` both ad-hoc sign, giving the binary a *new* code identity each

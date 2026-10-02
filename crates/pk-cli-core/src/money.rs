@@ -85,6 +85,11 @@ impl Money {
     /// ```
     pub fn grouped(&self) -> String {
         let (negative, digits) = split_sign(self.amount.trim());
+        if !is_plain_decimal(digits) {
+            // Not a plain decimal (`n/a`, `--5`): the `Display` form, so the
+            // sign is never moved ahead of the symbol on a value left ungrouped.
+            return self.render("", &self.amount);
+        }
         let sign = if negative { "-" } else { "" };
         self.render(sign, &group_unsigned(digits))
     }
@@ -140,14 +145,9 @@ fn is_plain_decimal(s: &str) -> bool {
     digits(int) && digits(frac) && !(int.is_empty() && frac.is_empty())
 }
 
-/// Group the integer part of an unsigned amount. A value that is not a plain
-/// decimal is returned as given, so [`Money::grouped`] degrades to the
-/// ungrouped amount instead of mangling a provider string it was handed
-/// verbatim.
+/// Group the integer part of an unsigned plain decimal. Callers check
+/// [`is_plain_decimal`] first, so a provider string is never half-formatted.
 fn group_unsigned(s: &str) -> String {
-    if !is_plain_decimal(s) {
-        return s.to_string();
-    }
     let (int, frac) = match s.find('.') {
         Some(i) => s.split_at(i),
         None => (s, ""),
@@ -268,6 +268,9 @@ mod tests {
         assert_eq!(Money::usd("n/a").grouped(), "$n/a");
         assert_eq!(Money::usd("1,234.00").grouped(), "$1,234.00");
         assert_eq!(Money::usd("").grouped(), "$");
+        // A signed non-decimal keeps its Display form: the sign is not moved.
+        assert_eq!(Money::usd("-n/a").grouped(), "$-n/a");
+        assert_eq!(Money::usd("--5").grouped(), "$--5");
     }
 
     #[test]
