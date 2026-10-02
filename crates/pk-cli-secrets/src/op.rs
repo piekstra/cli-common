@@ -416,9 +416,18 @@ fn first_line(stderr: &str) -> String {
 
 #[cfg(test)]
 pub(crate) mod fake {
-    //! A fake `op`: a shell script written per test into its own directory,
-    //! which logs its argv and answers from a fixture. Tests never call a
-    //! real `op`.
+    //! A fake `op`: per test, a directory holding a symlink `op` to the
+    //! checked-in `tests/fake-op/op.sh` and a `body` the script sources.
+    //! It logs its argv and answers from a fixture. Tests never call a real
+    //! `op`.
+    //!
+    //! The test never writes the file it execs. Writing an executable and
+    //! then running it is racy on Linux: while the write fd is open, another
+    //! test thread can spawn a child, which inherits a copy of that fd until
+    //! it execs. An exec of the script in that window fails with ETXTBSY
+    //! ("Text file busy"). Write-to-temp-then-rename does not help, because
+    //! the inherited fd still refers to the same inode. A script that is
+    //! never opened for writing in this process cannot be busy.
 
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -430,7 +439,7 @@ pub(crate) mod fake {
     }
 
     impl FakeOp {
-        /// `body` is the script after the argv logging line.
+        /// `body` is the shell the fake runs after logging its argv.
         pub fn new(body: &str) -> FakeOp {
             let dir = std::env::temp_dir().join(format!(
                 "pk-cli-secrets-fake-op-{}-{}",
@@ -439,18 +448,13 @@ pub(crate) mod fake {
             ));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
-            let script = format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\necho call >> \"{}\"\n{body}\n",
-                dir.join("argv").display(),
-                dir.join("calls").display()
-            );
-            let path = dir.join("op");
-            std::fs::write(&path, script).unwrap();
+            std::fs::write(dir.join("body"), format!("{body}\n")).unwrap();
             #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
+            std::os::unix::fs::symlink(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake-op/op.sh"),
+                dir.join("op"),
+            )
+            .unwrap();
             FakeOp { dir }
         }
 
@@ -479,7 +483,8 @@ pub(crate) mod fake {
             read_lines(&self.dir.join("calls")).len()
         }
 
-        /// Every file in the fake's directory: the script and its own logs.
+        /// Every file in the fake's directory: the script, its body and its
+        /// own logs.
         pub fn files(&self) -> Vec<String> {
             let mut names: Vec<String> = std::fs::read_dir(&self.dir)
                 .unwrap()
@@ -545,8 +550,9 @@ mod tests {
     fn nothing_is_written_to_disk_by_a_read() {
         let fake = FakeOp::answering(SECRET);
         op(&fake).read(&reference()).unwrap();
-        // Only the fake's own script and logs; no output file, no temp file.
-        assert_eq!(fake.files(), ["argv", "calls", "op"]);
+        // Only the fake's own script, body and logs; no output file, no temp
+        // file.
+        assert_eq!(fake.files(), ["argv", "body", "calls", "op"]);
         for f in ["argv", "calls"] {
             let body = std::fs::read_to_string(fake.dir.join(f)).unwrap();
             assert!(!body.contains(SECRET));
