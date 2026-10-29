@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use pk_cli_core::CliError;
+use crate::error::BrowserError;
 
 /// A host a capture may be read from: exactly one host, or a registrable
 /// domain together with every host under it.
@@ -24,9 +24,9 @@ pub struct HostRule {
 impl HostRule {
     /// Exactly `host` (`dashboard.example.com`), and no other host:
     /// neither its parent nor its subdomains.
-    pub fn exact(host: &str) -> Result<Self, CliError> {
+    pub fn exact(host: &str) -> Result<Self, BrowserError> {
         let host = normalize_host(host)
-            .ok_or_else(|| CliError::Other(format!("invalid capture host `{host}`")))?;
+            .ok_or_else(|| BrowserError::Invalid(format!("invalid capture host `{host}`")))?;
         Ok(HostRule {
             host,
             subdomains: false,
@@ -38,15 +38,15 @@ impl HostRule {
     /// registrable domain the provider owns: a public suffix such as `com`
     /// is refused, though a multi-label suffix (`co.uk`) cannot be told
     /// apart without the Public Suffix List, so that is on the caller.
-    pub fn domain(domain: &str) -> Result<Self, CliError> {
+    pub fn domain(domain: &str) -> Result<Self, BrowserError> {
         let host = normalize_host(domain)
-            .ok_or_else(|| CliError::Other(format!("invalid capture domain `{domain}`")))?;
+            .ok_or_else(|| BrowserError::Invalid(format!("invalid capture domain `{domain}`")))?;
         let labels: Vec<&str> = host.split('.').collect();
         let numeric_tld = labels
             .last()
             .is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit()));
         if labels.len() < 2 || numeric_tld {
-            return Err(CliError::Other(format!(
+            return Err(BrowserError::Invalid(format!(
                 "capture domain `{domain}` is not a registrable domain"
             )));
         }

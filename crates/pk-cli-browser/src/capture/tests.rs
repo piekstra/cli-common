@@ -241,7 +241,7 @@ fn settings(timeout: Duration) -> WaitSettings {
 }
 
 struct Outcome {
-    result: Result<Vec<Captured>, CliError>,
+    result: Result<Vec<Captured>, BrowserError>,
     notes: Vec<String>,
 }
 
@@ -368,9 +368,9 @@ fn answers_that_are_not_a_session_keep_the_wait_going() {
         (json!(true), "returned a boolean, not a string"),
         (
             json!({"access_token": "x"}),
-            "returned a object, not a string",
+            "returned an object, not a string",
         ),
-        (json!(["x"]), "returned a object, not a string"),
+        (json!(["x"]), "returned an object, not a string"),
     ];
     for (value, why) in cases {
         let mut p = page("T-app", "https://app.example.com/");
@@ -565,6 +565,10 @@ fn an_error_from_the_handler_ends_the_wait() {
         &mut |_| Err(CliError::Upstream("import failed".into())),
     )
     .unwrap_err();
+    assert!(
+        matches!(&err, BrowserError::Handler(CliError::Upstream(_))),
+        "{err:?}"
+    );
     assert_eq!(err.exit_code(), 5);
 }
 
@@ -603,6 +607,7 @@ fn a_cancel_ends_the_wait_as_a_canceled_login() {
     let mut fake = fake_with(vec![page("T-app", "https://app.example.com/")]);
     fake.0.borrow_mut().canceled = true;
     let err = run(&mut fake, &[app_capture()], LONG).result.unwrap_err();
+    assert!(matches!(err, BrowserError::Canceled), "{err:?}");
     assert_eq!(err.to_string(), "browser login canceled");
     assert_eq!(err.exit_code(), 1);
     assert!(fake.0.borrow().calls.is_empty());

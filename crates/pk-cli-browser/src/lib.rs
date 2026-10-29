@@ -51,6 +51,14 @@
 //! under an unpredictable name, and removed on every exit path, Ctrl-C
 //! included ([`Launch::ctrl_c`]).
 //!
+//! # Errors
+//!
+//! Every fallible call returns a [`BrowserError`], so a CLI can branch on
+//! the cause (fall back to its `--stdin` path on
+//! [`BrowserError::ChromeNotFound`], recognise its own
+//! [`BrowserError::Canceled`]); `?` converts it into the family's
+//! `CliError` with the matching exit code.
+//!
 //! # Secrets
 //!
 //! A captured value is a [`pk_cli_secrets::Secret`]: it never prints through
@@ -63,11 +71,13 @@
 mod capture;
 mod cdp;
 mod chrome;
+mod error;
 mod host;
 mod interrupt;
 
 pub use capture::{capture, Capture, Captured, DEFAULT_TIMEOUT};
-pub use chrome::{chrome_env_var, find_chrome, Browser, Launch};
+pub use chrome::{Browser, Launch};
+pub use error::BrowserError;
 pub use host::HostRule;
 pub use interrupt::cancel;
 
@@ -82,14 +92,6 @@ pub struct BrowserArgs {
     /// in this CLI.
     #[arg(long)]
     pub browser: bool,
-}
-
-impl BrowserArgs {
-    /// The flag as if given `--browser`, for a CLI whose default login is
-    /// the browser.
-    pub fn enabled() -> Self {
-        BrowserArgs { browser: true }
-    }
 }
 
 #[cfg(test)]
@@ -111,6 +113,5 @@ mod tests {
                 .browser
         );
         assert!(!Cli::try_parse_from(["x"]).unwrap().browser.browser);
-        assert!(BrowserArgs::enabled().browser);
     }
 }

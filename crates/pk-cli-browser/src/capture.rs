@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 
 use crate::cdp::{Cdp, CdpError, Transport, WsTransport};
 use crate::chrome::{Browser, Launch};
+use crate::error::BrowserError;
 use crate::host::{parse_url, HostRule, UrlParts};
 use crate::interrupt;
 
@@ -139,8 +140,8 @@ impl Capture {
     /// non-empty expression, and each cookie an `https` URL on one of the
     /// capture's hosts with a valid, distinct name. The waits call this
     /// before reading anything; a CLI can call it in a unit test.
-    pub fn validate(&self) -> Result<(), CliError> {
-        let bad = |why: String| Err(CliError::Other(format!("invalid capture: {why}")));
+    pub fn validate(&self) -> Result<(), BrowserError> {
+        let bad = |why: String| Err(BrowserError::Invalid(format!("invalid capture: {why}")));
         if self.label.trim().is_empty() {
             return bad("the label is empty".into());
         }
@@ -206,9 +207,9 @@ fn cookie_name_ok(name: &str) -> bool {
 
 /// Several captures in one window must be distinguishable and must not
 /// share a host, or one capture would read and close the other's tabs.
-fn validate_set(captures: &[Capture]) -> Result<(), CliError> {
+fn validate_set(captures: &[Capture]) -> Result<(), BrowserError> {
     if captures.is_empty() {
-        return Err(CliError::Other(
+        return Err(BrowserError::Invalid(
             "invalid capture: nothing to capture".into(),
         ));
     }
@@ -216,7 +217,7 @@ fn validate_set(captures: &[Capture]) -> Result<(), CliError> {
         a.validate()?;
         for b in &captures[..i] {
             if a.label.eq_ignore_ascii_case(&b.label) {
-                return Err(CliError::Other(format!(
+                return Err(BrowserError::Invalid(format!(
                     "invalid capture: two captures are labelled `{}`",
                     a.label
                 )));
@@ -225,7 +226,7 @@ fn validate_set(captures: &[Capture]) -> Result<(), CliError> {
                 .iter()
                 .any(|x| b.hosts.iter().any(|y| x.overlaps(y)))
             {
-                return Err(CliError::Other(format!(
+                return Err(BrowserError::Invalid(format!(
                     "invalid capture: `{}` and `{}` read from overlapping hosts",
                     b.label, a.label
                 )));
@@ -278,7 +279,11 @@ impl Captured {
 /// Launch, wait for one capture, and tear the window down: the whole
 /// `auth login --browser` mechanism in one call. The capture is validated
 /// before Chrome starts.
-pub fn capture(launch: Launch, capture: &Capture, timeout: Duration) -> Result<Captured, CliError> {
+pub fn capture(
+    launch: Launch,
+    capture: &Capture,
+    timeout: Duration,
+) -> Result<Captured, BrowserError> {
     capture.validate()?;
     launch.spawn()?.wait(capture, timeout)
 }
@@ -290,13 +295,17 @@ impl Browser {
     /// Errors: timeout, or the window closed before the sign-in finished,
     /// is exit 3 naming what was (not) seen and the command to re-run;
     /// Ctrl-C is "browser login canceled" (exit 1).
-    pub fn wait(&mut self, capture: &Capture, timeout: Duration) -> Result<Captured, CliError> {
+    pub fn wait(&mut self, capture: &Capture, timeout: Duration) -> Result<Captured, BrowserError> {
         let mut out = None;
         self.wait_each(std::slice::from_ref(capture), timeout, |captured| {
             out = Some(captured);
             Ok(())
         })?;
-        out.ok_or_else(|| CliError::Other("the browser wait ended without a capture".into()))
+        // Unreachable in practice: the wait returns `Ok` only once every
+        // capture has been handed over.
+        out.ok_or_else(|| {
+            BrowserError::Invalid("the browser wait ended without its capture".into())
+        })
     }
 
     /// Wait for several captures in one window (one tab per provider),
@@ -308,7 +317,7 @@ impl Browser {
         captures: &[Capture],
         timeout: Duration,
         mut on_capture: impl FnMut(Captured) -> Result<(), CliError>,
-    ) -> Result<(), CliError> {
+    ) -> Result<(), BrowserError> {
         let settings = WaitSettings {
             timeout,
             poll_interval: POLL_INTERVAL,
@@ -727,7 +736,7 @@ pub(crate) fn run_wait<D: Driver>(
     settings: &WaitSettings,
     note: &mut dyn FnMut(&str),
     on_capture: &mut dyn FnMut(Captured) -> Result<(), CliError>,
-) -> Result<(), CliError> {
+) -> Result<(), BrowserError> {
     validate_set(captures)?;
     let mut waiting: Vec<Waiting> = captures
         .iter()
@@ -776,7 +785,7 @@ pub(crate) fn run_wait<D: Driver>(
                         &waiting[read.index].capture.label,
                         &read.closed,
                     ));
-                    on_capture(read.captured)?;
+                    on_capture(read.captured).map_err(BrowserError::Handler)?;
                 }
                 if poll.canceled {
                     return Err(canceled());
@@ -807,7 +816,7 @@ fn pause<D: Driver>(
     driver: &D,
     interval: Duration,
     deadline: Option<Instant>,
-) -> Result<(), CliError> {
+) -> Result<(), BrowserError> {
     let next = Instant::now() + interval;
     let until = deadline.map_or(next, |d| next.min(d));
     loop {
@@ -822,8 +831,8 @@ fn pause<D: Driver>(
     }
 }
 
-fn canceled() -> CliError {
-    CliError::Other("browser login canceled".into())
+fn canceled() -> BrowserError {
+    BrowserError::Canceled
 }
 
 fn duration_words(d: Duration) -> String {
@@ -909,8 +918,8 @@ fn sign_ins(labels: &[&str]) -> String {
     format!("{} sign-in{s}", and_list(labels))
 }
 
-fn window_closed(login_hint: &str, waiting: &[Waiting<'_>]) -> CliError {
-    CliError::Auth(format!(
+fn window_closed(login_hint: &str, waiting: &[Waiting<'_>]) -> BrowserError {
+    BrowserError::WindowClosed(format!(
         "the Chrome window was closed before the {} finished. Re-run `{login_hint}` and \
          finish signing in.",
         sign_ins(&pending_labels(waiting))
@@ -936,7 +945,12 @@ pub(crate) fn diagnose(capture: &Capture, progress: &Progress) -> String {
     match &progress.check {
         Some((host, Check::Empty)) => format!("{host} was open but held no session yet"),
         Some((host, Check::NotString(kind))) => {
-            format!("the session check on {host} returned a {kind}, not a string")
+            let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("the session check on {host} returned {article} {kind}, not a string")
         }
         Some((host, Check::Threw)) => format!("the session check on {host} threw an exception"),
         Some((host, Check::LeftHost)) => {
@@ -957,7 +971,7 @@ fn timed_out(
     timeout: Duration,
     waiting: &[Waiting<'_>],
     port_error: Option<&str>,
-) -> CliError {
+) -> BrowserError {
     let pending: Vec<&Waiting> = waiting.iter().filter(|w| !w.done).collect();
     let mut why = match pending.as_slice() {
         [one] => diagnose(one.capture, &one.progress),
@@ -970,7 +984,7 @@ fn timed_out(
     if let Some(e) = port_error {
         why.push_str(&format!("; Chrome's debug port: {e}"));
     }
-    CliError::Auth(format!(
+    BrowserError::TimedOut(format!(
         "timed out after {}: the {} not completed in the browser window ({why}). Re-run \
          `{login_hint}` and finish signing in.",
         duration_words(timeout),

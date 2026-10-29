@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-use pk_cli_core::CliError;
-
+use crate::error::BrowserError;
 use crate::host::parse_url;
 use crate::interrupt;
 
@@ -40,7 +39,7 @@ const USER_CANDIDATES: [&str; 2] = [
 /// The environment variable that points `bin` at a Chrome binary:
 /// `<PREFIX>_CHROME`, the prefix being the binary name uppercased with `-`
 /// and `.` as `_` (`sfi` → `SFI_CHROME`, `example-cli` → `EXAMPLE_CLI_CHROME`).
-pub fn chrome_env_var(bin: &str) -> String {
+pub(crate) fn chrome_env_var(bin: &str) -> String {
     let prefix: String = bin
         .chars()
         .map(|c| match c {
@@ -53,7 +52,7 @@ pub fn chrome_env_var(bin: &str) -> String {
 
 /// Locate Chrome for `bin`: the path in `<PREFIX>_CHROME` when set (which
 /// must exist), else the first standard install location that does.
-pub fn find_chrome(bin: &str) -> Result<PathBuf, CliError> {
+pub(crate) fn find_chrome(bin: &str) -> Result<PathBuf, BrowserError> {
     let var = chrome_env_var(bin);
     let mut candidates: Vec<PathBuf> = CANDIDATES.iter().map(PathBuf::from).collect();
     if let Some(home) = std::env::var_os("HOME") {
@@ -67,12 +66,12 @@ fn choose_chrome(
     var: &str,
     override_path: Option<PathBuf>,
     candidates: &[PathBuf],
-) -> Result<PathBuf, CliError> {
+) -> Result<PathBuf, BrowserError> {
     if let Some(path) = override_path {
         if path.is_file() {
             return Ok(path);
         }
-        return Err(CliError::Other(format!(
+        return Err(BrowserError::ChromeNotFound(format!(
             "{var} points at {}, which is not a file",
             path.display()
         )));
@@ -82,7 +81,7 @@ fn choose_chrome(
         .find(|p| p.is_file())
         .cloned()
         .ok_or_else(|| {
-            CliError::Other(format!(
+            BrowserError::ChromeNotFound(format!(
                 "no Chrome found — install Google Chrome, or set {var} to a Chrome binary"
             ))
         })
@@ -101,11 +100,11 @@ pub(crate) struct ProfileDir {
 }
 
 impl ProfileDir {
-    pub fn create(prefix: &str) -> Result<Self, CliError> {
+    pub fn create(prefix: &str) -> Result<Self, BrowserError> {
         Self::create_in(&std::env::temp_dir(), prefix)
     }
 
-    pub fn create_in(parent: &Path, prefix: &str) -> Result<Self, CliError> {
+    pub fn create_in(parent: &Path, prefix: &str) -> Result<Self, BrowserError> {
         let path = parent.join(format!(
             "{}-browser-login-{}-{:016x}",
             fs_safe(prefix),
@@ -122,22 +121,42 @@ impl ProfileDir {
 }
 
 impl Drop for ProfileDir {
+    /// A profile left behind may hold the signed-in session, so a failure
+    /// to remove it is reported even under `-q`: it is the one outcome the
+    /// owner has to act on.
     fn drop(&mut self) {
-        remove_dir_patiently(&self.path);
+        if let Err(e) = remove_dir_patiently(&self.path, 10, Duration::from_millis(100)) {
+            eprintln!("{}", removal_warning(&self.path, &e));
+        }
     }
 }
 
-/// Remove `path`, retrying briefly: Chrome's helper processes can still be
-/// writing into the profile for a moment after the browser process exits,
-/// which fails a single `remove_dir_all` with "directory not empty".
-fn remove_dir_patiently(path: &Path) {
-    for _ in 0..10 {
+/// Remove `path`, retrying `attempts` times `pause` apart: Chrome's helper
+/// processes can still be writing into the profile for a moment after the
+/// browser process exits, which fails a single `remove_dir_all` with
+/// "directory not empty". A path already gone counts as removed; the last
+/// error is returned once the attempts run out.
+fn remove_dir_patiently(path: &Path, attempts: u32, pause: Duration) -> std::io::Result<()> {
+    let mut last = None;
+    for attempt in 0..attempts.max(1) {
+        if attempt > 0 {
+            std::thread::sleep(pause);
+        }
         match std::fs::remove_dir_all(path) {
-            Ok(()) => return,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => last = Some(e),
         }
     }
+    Err(last.unwrap_or_else(|| std::io::Error::other("not removed")))
+}
+
+fn removal_warning(path: &Path, e: &std::io::Error) -> String {
+    format!(
+        "warning: could not remove the browser profile {} ({e}); it may hold the signed-in \
+         session, so delete it",
+        path.display()
+    )
 }
 
 /// 64 bits from the standard library's randomly keyed hasher (seeded from
@@ -171,7 +190,7 @@ fn fs_safe(prefix: &str) -> String {
     }
 }
 
-fn create_private_dir(path: &Path) -> Result<(), CliError> {
+fn create_private_dir(path: &Path) -> Result<(), BrowserError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -180,16 +199,16 @@ fn create_private_dir(path: &Path) -> Result<(), CliError> {
             .recursive(false)
             .create(path)
             .map_err(|e| {
-                CliError::Other(format!(
+                BrowserError::Launch(format!(
                     "creating the browser profile dir {} (it must not already exist): {e}",
                     path.display()
                 ))
             })?;
         let meta = std::fs::symlink_metadata(path)
-            .map_err(|e| CliError::Other(format!("checking the browser profile dir: {e}")))?;
+            .map_err(|e| BrowserError::Launch(format!("checking the browser profile dir: {e}")))?;
         if !meta.is_dir() || meta.permissions().mode() & 0o777 != 0o700 {
             let _ = std::fs::remove_dir_all(path);
-            return Err(CliError::Other(
+            return Err(BrowserError::Launch(
                 "the browser profile dir is not a private (0700) directory; refusing to launch"
                     .into(),
             ));
@@ -199,7 +218,7 @@ fn create_private_dir(path: &Path) -> Result<(), CliError> {
     #[cfg(not(unix))]
     {
         std::fs::create_dir(path).map_err(|e| {
-            CliError::Other(format!(
+            BrowserError::Launch(format!(
                 "creating the browser profile dir {} (it must not already exist): {e}",
                 path.display()
             ))
@@ -315,14 +334,14 @@ impl Launch {
     /// Launch Chrome and wait (up to 20 s) for its debug port. The returned
     /// [`Browser`] kills Chrome and removes the profile when dropped, on
     /// every path including errors after this point.
-    pub fn spawn(self) -> Result<Browser, CliError> {
+    pub fn spawn(self) -> Result<Browser, BrowserError> {
         if self.urls.is_empty() {
-            return Err(CliError::Other(
+            return Err(BrowserError::Invalid(
                 "a browser sign-in needs at least one start URL".into(),
             ));
         }
         if let Some(bad) = self.urls.iter().find(|u| !start_url_ok(u)) {
-            return Err(CliError::Other(format!(
+            return Err(BrowserError::Invalid(format!(
                 "start URL `{bad}` is not an https URL"
             )));
         }
@@ -348,7 +367,7 @@ impl Launch {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| CliError::Other(format!("launching {}: {e}", chrome.display())))?;
+            .map_err(|e| BrowserError::Launch(format!("launching {}: {e}", chrome.display())))?;
         let live = interrupt::register(child.id(), profile.path().to_path_buf());
         let mut browser = Browser {
             child,
@@ -387,21 +406,8 @@ impl std::fmt::Debug for Browser {
 }
 
 impl Browser {
-    /// The browser target's DevTools websocket URL
-    /// (`ws://127.0.0.1:<port>/devtools/browser/<id>`), for a CLI that
-    /// watches more than this crate reads (network requests, say). It
-    /// grants full control of the window: keep it in the process.
-    pub fn debugger_url(&self) -> String {
-        format!("ws://127.0.0.1:{}{}", self.port, self.ws_path)
-    }
-
-    /// The scratch profile directory.
-    pub fn profile_dir(&self) -> &Path {
-        self.profile.path()
-    }
-
     /// Whether Chrome has exited (the owner quit it, or it crashed).
-    pub fn exited(&mut self) -> bool {
+    pub(crate) fn exited(&mut self) -> bool {
         self.try_reap().is_some()
     }
 
@@ -410,7 +416,7 @@ impl Browser {
         interrupt::reap_with(self.live, || child.try_wait().ok().flatten())
     }
 
-    fn read_active_port(&mut self) -> Result<(u16, String), CliError> {
+    fn read_active_port(&mut self) -> Result<(u16, String), BrowserError> {
         let file = self.profile.path().join("DevToolsActivePort");
         let deadline = Instant::now() + PORT_DEADLINE;
         loop {
@@ -422,15 +428,15 @@ impl Browser {
                 return Ok(found);
             }
             if let Some(status) = self.try_reap() {
-                return Err(CliError::Other(format!(
+                return Err(BrowserError::Launch(format!(
                     "Chrome exited before opening its debug port ({status})"
                 )));
             }
             if interrupt::canceled() {
-                return Err(CliError::Other("browser login canceled".into()));
+                return Err(BrowserError::Canceled);
             }
             if Instant::now() >= deadline {
-                return Err(CliError::Other(
+                return Err(BrowserError::Launch(
                     "Chrome did not open its debug port within 20 seconds".into(),
                 ));
             }
@@ -518,7 +524,7 @@ mod tests {
         // Nothing found: the error says how to point at one.
         let err = choose_chrome("X_CHROME", None, &[missing]).unwrap_err();
         assert!(err.to_string().contains("set X_CHROME"), "{err}");
-        assert_eq!(err.exit_code(), 1);
+        assert!(matches!(err, BrowserError::ChromeNotFound(_)), "{err:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -615,6 +621,41 @@ mod tests {
         assert!(err.to_string().contains("not an https URL"), "{err}");
     }
 
+    /// The give-up path: a profile that cannot be removed (here: its parent
+    /// made read-only) ends the retries with the error, never a hang, and
+    /// the warning names the path. Skipped where permissions do not bind
+    /// (running as root).
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_that_cannot_be_removed_is_reported_not_hung_on() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = std::env::temp_dir().join(format!("pk-cli-browser-stuck-{}", unpredictable()));
+        std::fs::create_dir(&parent).unwrap();
+        let profile = ProfileDir::create_in(&parent, "t").unwrap();
+        let path = profile.path().to_path_buf();
+        let mode = |m| std::fs::Permissions::from_mode(m);
+        std::fs::set_permissions(&parent, mode(0o500)).unwrap();
+        let started = Instant::now();
+        let result = remove_dir_patiently(&path, 3, Duration::from_millis(1));
+        std::fs::set_permissions(&parent, mode(0o700)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        if let Err(e) = result {
+            assert!(path.exists());
+            let warning = removal_warning(&path, &e);
+            assert!(warning.starts_with("warning: could not remove the browser profile "));
+            assert!(warning.contains(&path.display().to_string()), "{warning}");
+            assert!(
+                warning.contains("may hold the signed-in session"),
+                "{warning}"
+            );
+        }
+        drop(profile);
+        assert!(!path.exists(), "removed once it can be");
+        // A path already gone is not an error.
+        assert!(remove_dir_patiently(&path, 1, Duration::ZERO).is_ok());
+        std::fs::remove_dir(&parent).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_profile_is_private_exclusive_and_removed_on_drop() {
@@ -669,11 +710,9 @@ mod tests {
             .quiet(true)
             .spawn()
             .unwrap();
-        assert_eq!(
-            browser.debugger_url(),
-            "ws://127.0.0.1:9222/devtools/browser/fake-browser-id"
-        );
-        let profile = browser.profile_dir().to_path_buf();
+        assert_eq!(browser.port, 9222);
+        assert_eq!(browser.ws_path, "/devtools/browser/fake-browser-id");
+        let profile = browser.profile.path().to_path_buf();
         let args = std::fs::read_to_string(profile.join("args")).unwrap();
         assert_eq!(
             args.lines().collect::<Vec<_>>(),

@@ -87,10 +87,10 @@ Google Home's, replacing a hand-kept device→room table. Producers declare
 
 | CLI | `auth login --browser` |
 |---|---|
-| example-cli | demo (`auth login --browser`) |
-| sfi | embedded copy (cookies, plus a request-header watch) — migrate to `pk-cli-browser`, keeping the watch on `Browser::debugger_url` |
+| example-cli | demo of the flag check and the capture (`auth login --browser`) |
+| sfi | embedded copy (cookies, plus a request-header watch) — migrate to `pk-cli-browser` once the crate offers a narrow way to observe that request (no raw DevTools handle is exported) |
 | wfr | embedded copy (cookies, validated with a read) — migrate; its session cookie is also set for anonymous visitors, so it needs a signed-in-only readiness signal |
-| carta | embedded copy (cookies, then endpoint recording) — migrate, keeping the recording on `Browser::debugger_url` |
+| carta | embedded copy (cookies, then endpoint recording) — migrate once the crate offers endpoint recording |
 | m1f, rhd, nlnt | planned — today a `--stdin` import of a value the owner copies out of DevTools |
 
 ## CI

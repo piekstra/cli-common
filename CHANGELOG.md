@@ -27,10 +27,20 @@ Additive: no existing function, default or `/v1` shape changes.
   default) or a closed window is exit 3 naming what was seen; Ctrl-C (a
   process-wide handler, opt-out with `Launch::ctrl_c(false)` plus
   `pk_cli_browser::cancel()`) cancels with cleanup, and a second Ctrl-C
-  force-quits. `BrowserArgs` is the flattenable `--browser` flag. The CDP
-  client is blocking (tungstenite, no async runtime); tests run offline
-  against an in-memory fake browser and a stand-in Chrome script. Needs Rust
-  1.85. `example-cli auth login --browser` is the worked example.
+  force-quits. Every call returns a `#[non_exhaustive]` `BrowserError`
+  (`Invalid`, `ChromeNotFound`, `Launch`, `Canceled`, `TimedOut`,
+  `WindowClosed`, `Handler`), so a CLI can branch on the cause (fall back to
+  its `--stdin` path when no Chrome is installed); `?` converts it into
+  `CliError` with exit 3 for a timeout or a closed window and 1 otherwise.
+  `Launch::spawn` and `Browser::wait_each` are public for the multi-provider
+  window (one Chrome signing in to several providers, as a prototype capture
+  for `m1f` and `rhd` does); no raw DevTools handle is exported.
+  `BrowserArgs` is the flattenable `--browser` flag. The CDP client is
+  blocking (tungstenite, no async runtime); tests run offline against an
+  in-memory fake browser and a stand-in Chrome script. Needs Rust 1.85.
+  `example-cli auth login --browser` shows the flag check and the capture;
+  verifying the session and reporting `browser-session` are the real CLI's
+  part (DESIGN.md §2.2).
 - **`Money::grouped()`**: text display with thousands separators and the
   sign ahead of the symbol, `$1,234.56`, `-$1,234.56`, `1,234.56 EUR`.
   `Display` keeps its ungrouped `$1234.56` (and its `$-5.00` for

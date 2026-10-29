@@ -515,7 +515,7 @@ let session = pk_cli_browser::capture(
 | Several providers | `Browser::wait_each` waits for several captures in one window, one tab each (their hosts must not overlap), and hands each over as it is read, so one provider's timeout never loses another's session |
 | Secrets | values come back as `pk_cli_secrets::Secret` (redacted `Debug`/`Display`, zeroized on drop). The crate never logs one, never puts one on a command line and never writes one to disk; status lines and errors name labels, hosts and cookie names only |
 | Status lines | on stderr, suppressed by `-q`: `A Chrome window opened at the Example sign-in. Sign in there (password and the texted code); this waits for the session and captures it (up to 10 minutes; Ctrl-C cancels).`, then `Example: session captured, tab closed.` |
-| Errors | a timeout (`DEFAULT_TIMEOUT`, 10 minutes) and a window closed before the sign-in finished are exit 3, naming what was seen (no page on the host was open, the page held no session yet, the expression threw, which cookie was missing) and the command to re-run (`<bin> auth login --browser`; `Launch::login_hint` overrides it). Ctrl-C is `browser login canceled`, exit 1. No Chrome is exit 1 naming `<PREFIX>_CHROME` |
+| Errors | every call returns a `BrowserError`, which `?` turns into the family's `CliError`. `TimedOut` (after `DEFAULT_TIMEOUT`, 10 minutes, unless the CLI passes another) and `WindowClosed` are exit 3, naming what was seen (no page on the host was open, the page held no session yet, the expression threw, which cookie was missing) and the command to re-run (`<bin> auth login --browser`; `Launch::login_hint` overrides it). `Canceled` (`browser login canceled`), `ChromeNotFound` (naming `<PREFIX>_CHROME`), `Launch` and `Invalid` are exit 1, and `Handler` passes the `wait_each` handler's own error through. A CLI branches on the variant: on `ChromeNotFound` it can point the owner at its `--stdin` path |
 | Ctrl-C | the crate installs one process-wide handler: the first Ctrl-C ends the wait, so the guard drops and cleans up; a second kills Chrome, removes the profile and exits 130; with no window open, Ctrl-C exits 130 as it would without a handler. A CLI with its own handler sets `Launch::ctrl_c(false)` and calls `pk_cli_browser::cancel()` from it |
 
 **Choosing the readiness signal.** A capture is read once and its tab
@@ -525,13 +525,18 @@ cookie the site sets only once signed in. A cookie a site also sets for an
 anonymous visitor is not a signal.
 
 **What stays in the CLI.** The provider knowledge (which host, which storage
-key or cookie, which start page), verifying and storing the session, and
-anything else the CLI watches in the same window: `Browser::debugger_url`
-hands it the browser target, for recording the app's API calls, say.
-`Capture::validate` lets a CLI's unit tests check its captures offline.
+key or cookie, which start page), and verifying and storing the session.
+`Capture::validate` lets a CLI's unit tests check its captures offline. The
+crate hands out no raw DevTools handle, since one would bypass every rule
+above; when a CLI that watches more in the window (a request's headers, the
+app's API calls) adopts the crate, the crate gains a narrow capability for
+that need.
 
 The crate needs Rust 1.85 (tungstenite 0.30). `example-cli auth login
---browser` is the worked example.
+--browser` shows the flag check and the capture. Its demo portal has no read
+to verify a session against, and its `auth status` and `info` stay those of
+its password login, so the verification, the `browser-session` method and
+the `--browser` hint above are what a real CLI adds.
 
 ### Versioning & consumption
 
