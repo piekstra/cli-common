@@ -37,6 +37,8 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Bound on one CDP call, the in-page check included.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// A timeout this long is announced as no limit at all.
+const NO_LIMIT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// Consecutive polls finding no page at all, after pages were seen, that
 /// mean the owner closed the window (on macOS Chrome keeps running with no
 /// window, so the process exiting is not the only signal).
@@ -537,7 +539,11 @@ struct Read {
 
 struct Poll {
     pages: usize,
+    /// Captures read (and their tabs closed) in this poll. Always handed
+    /// over, even when the poll was cut short by a cancel: a read whose tab
+    /// is closed cannot be read again.
     reads: Vec<Read>,
+    canceled: bool,
 }
 
 fn poll_once<T: Transport>(
@@ -545,9 +551,11 @@ fn poll_once<T: Transport>(
     waiting: &mut [Waiting<'_>],
 ) -> Result<Poll, CdpError> {
     let pages = page_targets(&cdp.call("Target.getTargets", Value::Null, None)?);
-    let mut jar: Option<Value> = None;
+    // The browser's cookie jar, read at most once per poll.
+    let mut jar: Option<Result<Value, CdpError>> = None;
     let mut reads = Vec::new();
-    for (index, w) in waiting.iter_mut().enumerate() {
+    let mut canceled = false;
+    'captures: for (index, w) in waiting.iter_mut().enumerate() {
         if w.done {
             continue;
         }
@@ -573,7 +581,10 @@ fn poll_once<T: Transport>(
                         Ok(Evaluation::NotReady(check)) => {
                             w.progress.check = Some((page_host(page), check));
                         }
-                        Err(CdpError::Canceled) => return Err(CdpError::Canceled),
+                        Err(CdpError::Canceled) => {
+                            canceled = true;
+                            break 'captures;
+                        }
                         Err(e) => {
                             w.progress.check =
                                 Some((page_host(page), Check::NoAnswer(e.to_string())));
@@ -591,11 +602,26 @@ fn poll_once<T: Transport>(
         let mut cookies = Vec::new();
         let mut missing = Vec::new();
         if !w.capture.cookies.is_empty() {
-            if jar.is_none() {
-                let all = cdp.call("Storage.getCookies", Value::Null, None)?;
-                jar = Some(all.get("cookies").cloned().unwrap_or(Value::Null));
-            }
-            let jar = jar.as_ref().unwrap_or(&Value::Null);
+            let jar = jar.get_or_insert_with(|| {
+                cdp.call("Storage.getCookies", Value::Null, None)
+                    .map(|all| all.get("cookies").cloned().unwrap_or(Value::Null))
+            });
+            let jar = match jar {
+                Ok(jar) => &*jar,
+                Err(CdpError::Canceled) => {
+                    canceled = true;
+                    break 'captures;
+                }
+                // Not ready this poll; nothing was closed, so the next poll
+                // reads it again.
+                Err(e) => {
+                    w.progress.check = Some((
+                        host,
+                        Check::NoAnswer(format!("reading the cookies failed: {e}")),
+                    ));
+                    continue;
+                }
+            };
             for read in &w.capture.cookies {
                 let found = parse_url(&read.url).and_then(|u| pick_cookie(jar, &u, &read.name));
                 match found {
@@ -626,6 +652,7 @@ fn poll_once<T: Transport>(
     Ok(Poll {
         pages: pages.len(),
         reads,
+        canceled,
     })
 }
 
@@ -712,7 +739,8 @@ pub(crate) fn run_wait<D: Driver>(
         .collect();
     note(&announce(captures, settings.timeout));
 
-    let deadline = Instant::now() + settings.timeout;
+    // `None`: a timeout too large to add to the clock, i.e. no deadline.
+    let deadline = Instant::now().checked_add(settings.timeout);
     let mut saw_pages = false;
     let mut empty_polls = 0;
     loop {
@@ -750,6 +778,9 @@ pub(crate) fn run_wait<D: Driver>(
                     ));
                     on_capture(read.captured)?;
                 }
+                if poll.canceled {
+                    return Err(canceled());
+                }
                 if waiting.iter().all(|w| w.done) {
                     return Ok(());
                 }
@@ -759,7 +790,7 @@ pub(crate) fn run_wait<D: Driver>(
                 None
             }
         };
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(timed_out(
                 &settings.login_hint,
                 settings.timeout,
@@ -772,8 +803,13 @@ pub(crate) fn run_wait<D: Driver>(
 }
 
 /// Sleep until the next poll (or the deadline), waking to notice a cancel.
-fn pause<D: Driver>(driver: &D, interval: Duration, deadline: Instant) -> Result<(), CliError> {
-    let until = (Instant::now() + interval).min(deadline);
+fn pause<D: Driver>(
+    driver: &D,
+    interval: Duration,
+    deadline: Option<Instant>,
+) -> Result<(), CliError> {
+    let next = Instant::now() + interval;
+    let until = deadline.map_or(next, |d| next.min(d));
     loop {
         if driver.canceled() {
             return Err(canceled());
@@ -810,7 +846,11 @@ fn and_list(items: &[&str]) -> String {
 
 /// The status line printed when the wait starts.
 pub(crate) fn announce(captures: &[Capture], timeout: Duration) -> String {
-    let limit = format!("up to {}; Ctrl-C cancels", duration_words(timeout));
+    let limit = if timeout >= NO_LIMIT {
+        "no time limit; Ctrl-C cancels".to_string()
+    } else {
+        format!("up to {}; Ctrl-C cancels", duration_words(timeout))
+    };
     match captures {
         [one] => {
             let hint = one

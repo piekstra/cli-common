@@ -3,7 +3,7 @@
 //! close) runs offline and deterministically. Every value here is an
 //! obvious dummy.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
@@ -56,6 +56,21 @@ struct State {
     exited: bool,
     canceled: bool,
     connect_error: Option<String>,
+    /// `Storage.getCookies` answers with a protocol error.
+    cookies_fail: bool,
+    /// Attaching to this target raises the cancel flag first, as a Ctrl-C
+    /// landing mid-poll would.
+    cancel_on_attach: Option<&'static str>,
+}
+
+thread_local! {
+    /// The CDP-level cancel flag for the current test's thread (tests run
+    /// on their own threads, so this never leaks between them).
+    static CANCELED_MID_POLL: Cell<bool> = const { Cell::new(false) };
+}
+
+fn canceled_mid_poll() -> bool {
+    CANCELED_MID_POLL.with(Cell::get)
 }
 
 #[derive(Clone, Default)]
@@ -107,6 +122,9 @@ impl Transport for FakeTransport {
             }
             "Target.attachToTarget" => {
                 let target = target.unwrap();
+                if s.cancel_on_attach == Some(target.as_str()) {
+                    CANCELED_MID_POLL.with(|c| c.set(true));
+                }
                 match s.pages.iter().find(|p| p.id == target) {
                     Some(p) => {
                         let id = p.id;
@@ -153,6 +171,7 @@ impl Transport for FakeTransport {
                 s.sessions.remove(params["sessionId"].as_str().unwrap());
                 Ok(json!({}))
             }
+            "Storage.getCookies" if s.cookies_fail => Err((-32000, "Storage unavailable")),
             "Storage.getCookies" => {
                 let cookies = if s.polls > s.cookies_after {
                     s.cookies.clone()
@@ -184,10 +203,6 @@ impl Transport for FakeTransport {
     }
 }
 
-fn never() -> bool {
-    false
-}
-
 impl Driver for Fake {
     type T = FakeTransport;
     fn connect(&mut self) -> Result<FakeTransport, String> {
@@ -206,7 +221,7 @@ impl Driver for Fake {
         self.0.borrow().canceled
     }
     fn cancel_check(&self) -> fn() -> bool {
-        never
+        canceled_mid_poll
     }
 }
 
@@ -960,4 +975,91 @@ fn diagnostics_cover_every_state_without_values() {
     for (p, want) in cases {
         assert_eq!(diagnose(&capture, &p), want);
     }
+}
+
+#[test]
+fn a_failed_cookie_read_never_costs_another_capture_its_session() {
+    // Example is read (and its tab closed) first in the poll; Other's
+    // cookie read then fails. Example must still be handed over: its tab is
+    // gone, so it could not be read again.
+    let mut a = page("T-a", "https://app.example.com/");
+    a.value = json!("dummy-a");
+    let mut b = page("T-b", "https://portal.example.org/");
+    b.value = json!("dummy-b");
+    let mut fake = fake_with(vec![a, b]);
+    fake.0.borrow_mut().cookies_fail = true;
+    let captures = [
+        app_capture(),
+        Capture::new("Other", HostRule::exact("portal.example.org").unwrap())
+            .expression("2")
+            .cookie("https://portal.example.org/", "sid"),
+    ];
+    let mut handed = Vec::new();
+    let err = run_wait(
+        &mut fake,
+        &captures,
+        &settings(Duration::ZERO),
+        &mut |_| {},
+        &mut |c| {
+            handed.push(c.label().to_string());
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert_eq!(handed, ["Example"]);
+    let msg = err.to_string();
+    assert!(
+        msg.contains(
+            "the session check on portal.example.org got no answer (reading the cookies \
+             failed: Storage unavailable (-32000))"
+        ),
+        "{msg}"
+    );
+    // Other's tab stays open for the next poll.
+    assert_eq!(fake.0.borrow().closed, ["T-a"]);
+}
+
+#[test]
+fn a_cancel_mid_poll_still_hands_over_what_was_read() {
+    let mut a = page("T-a", "https://app.example.com/");
+    a.value = json!("dummy-a");
+    let mut b = page("T-b", "https://portal.example.org/");
+    b.value = json!("dummy-b");
+    let mut fake = fake_with(vec![a, b]);
+    fake.0.borrow_mut().cancel_on_attach = Some("T-b");
+    let captures = [
+        app_capture(),
+        Capture::new("Other", HostRule::exact("portal.example.org").unwrap()).expression("2"),
+    ];
+    let mut handed = Vec::new();
+    let err = run_wait(
+        &mut fake,
+        &captures,
+        &settings(LONG),
+        &mut |_| {},
+        &mut |c| {
+            handed.push(c.label().to_string());
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    CANCELED_MID_POLL.with(|c| c.set(false));
+    assert_eq!(handed, ["Example"]);
+    assert_eq!(err.to_string(), "browser login canceled");
+    assert_eq!(fake.0.borrow().closed, ["T-a"]);
+}
+
+#[test]
+fn an_unbounded_timeout_waits_without_overflowing_the_clock() {
+    let mut p = page("T-app", "https://app.example.com/");
+    p.value = json!(TOKEN);
+    p.ready_after = 1;
+    let mut fake = fake_with(vec![p]);
+    let out = run(&mut fake, &[app_capture()], Duration::MAX);
+    assert_eq!(out.result.unwrap().len(), 1);
+    assert!(
+        out.notes[0].contains("(no time limit; Ctrl-C cancels)"),
+        "{}",
+        out.notes[0]
+    );
 }
