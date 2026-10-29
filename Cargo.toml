@@ -11,6 +11,7 @@ members = [
     "crates/pk-cli-documents",
     "crates/pk-cli-scrape",
     "crates/pk-cli-drive",
+    "crates/pk-cli-browser",
     "crates/example-cli",
 ]
 
@@ -34,6 +35,7 @@ pk-cli-utility = { path = "crates/pk-cli-utility", version = "0.8.0" }
 pk-cli-documents = { path = "crates/pk-cli-documents", version = "0.8.0" }
 pk-cli-scrape = { path = "crates/pk-cli-scrape", version = "0.8.0" }
 pk-cli-drive = { path = "crates/pk-cli-drive", version = "0.8.0" }
+pk-cli-browser = { path = "crates/pk-cli-browser", version = "0.8.0" }
 
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
@@ -52,6 +54,11 @@ tar = "0.4"
 self-replace = "1"
 keyring = "3"
 libc = "0.2"
+# pk-cli-browser: the blocking CDP websocket (no TLS: Chrome's debug port is
+# plain ws:// on loopback) and the Ctrl-C hook that tears the window down.
+# The same pins sofi-cli, wealthfront-cli and carta-cli carry.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+ctrlc = "3.5"
 
 [profile.release]
 strip = true

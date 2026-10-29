@@ -18,6 +18,7 @@ status here.
 - [ ] ISO `YYYY-MM-DD` accepted on all date flags; `--limit N` on lists
 - [ ] Mutations prompt unless `--force`; exit 6 when non-interactive — decided **before** any keychain or network work (`pk_cli_core::confirm`)
 - [ ] Mutations report success from a read-back (or the write's echo only when it carries the values), never from the write's status code
+- [ ] A portal the CLI cannot sign in to by itself (bot check, OAuth single-page app) offers `auth login --browser` through `pk-cli-browser` (DESIGN.md §2.2), reports `method: "browser-session"`, and verifies the captured session before storing it
 
 ## Family status
 
@@ -81,6 +82,16 @@ expose `documents`. Sequencing and status tracked in issue #8.
 Consumer: `ghome audit` — the vendor's own room placement checked against
 Google Home's, replacing a hand-kept device→room table. Producers declare
 `smart-home/v1` in `info.profiles` once their spec-v1 PRs land.
+
+## Browser sign-in (DESIGN.md §2.2)
+
+| CLI | `auth login --browser` |
+|---|---|
+| example-cli | demo of the flag check and the capture (`auth login --browser`) |
+| sfi | embedded copy (cookies, plus a request-header watch) — migrate to `pk-cli-browser` once the crate offers a narrow way to observe that request (no raw DevTools handle is exported) |
+| wfr | embedded copy (cookies, validated with a read) — migrate; its session cookie is also set for anonymous visitors, so it needs a signed-in-only readiness signal |
+| carta | embedded copy (cookies, then endpoint recording) — migrate once the crate offers endpoint recording |
+| m1f, rhd, nlnt | planned — today a `--stdin` import of a value the owner copies out of DevTools |
 
 ## CI
 

@@ -10,11 +10,15 @@
 //! `summary` needs the credential. The `state` noun keeps small files in the
 //! owner's Drive (`pk-cli-drive`): a mounted folder (`data_root`) or an
 //! rclone remote (`remote`) behind the stale-while-revalidate read cache,
-//! with `state sync` as the background refresh's child.
+//! with `state sync` as the background refresh's child. `auth login
+//! --browser` is the browser sign-in (`pk-cli-browser`) a bot-protected
+//! portal offers: a Chrome window the owner signs in through, and the web
+//! session read back out of it.
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use pk_cli_auth::{AuthStatus, LoginArgs, LogoutArgs, SetCredentialArgs};
+use pk_cli_browser::{BrowserArgs, Capture, HostRule, Launch};
 use pk_cli_config::ConfigStore;
 use pk_cli_core::info::{AuthInfo, CliInfo};
 use pk_cli_core::{confirm, output, resolve, CliError, CommonArgs};
@@ -75,7 +79,8 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum AuthCmd {
-    /// Store the demo credential in the OS keychain.
+    /// Store the demo credential in the OS keychain (with --browser, a session
+    /// captured from a browser sign-in).
     Login(LoginCmd),
     /// Report credential/session state (auth-status/v1).
     Status,
@@ -85,15 +90,26 @@ enum AuthCmd {
     SetCredential(SetCredentialArgs),
 }
 
-/// The standard login flags plus `--op`. `OpArgs` is flattened beside
-/// `LoginArgs` rather than inside it, so CLIs that build `LoginArgs` by hand
-/// keep compiling.
+/// The standard login flags plus `--op` and `--browser`. `OpArgs` and
+/// `BrowserArgs` are flattened beside `LoginArgs` rather than inside it, so
+/// CLIs that build `LoginArgs` by hand keep compiling.
 #[derive(clap::Args, Debug)]
 struct LoginCmd {
     #[command(flatten)]
     login: LoginArgs,
     #[command(flatten)]
     op: OpArgs,
+    #[command(flatten)]
+    browser: BrowserArgs,
+}
+
+/// The demo portal's web session: its single-page app keeps it in
+/// `localStorage` once the owner is signed in. A real CLI names its
+/// provider's app host and storage key (DESIGN.md §2.2).
+fn browser_session() -> Result<Capture, CliError> {
+    Ok(Capture::new("Example", HostRule::exact("app.example.com")?)
+        .expression("localStorage.getItem('session') || null")
+        .hint("password and any code"))
 }
 
 #[derive(Subcommand, Debug)]
@@ -391,11 +407,40 @@ fn auth(
     let cfg: Config = store.load()?;
     let user = cfg.username.clone().unwrap_or_else(|| "demo".into());
     match cmd {
-        AuthCmd::Login(LoginCmd { login: args, op }) => {
+        AuthCmd::Login(LoginCmd {
+            login: args,
+            op,
+            browser,
+        }) => {
+            // Flags first: a refused combination never reaches the keychain.
+            if browser.browser
+                && (args.source.stdin || args.source.from_env.is_some() || op.op.is_some())
+            {
+                return Err(CliError::Usage(
+                    "--browser takes the session from the browser; drop --stdin, --from-env and --op"
+                        .into(),
+                ));
+            }
             if creds.get(&user)?.is_some() && !args.overwrite {
                 return Err(CliError::Usage(
                     "a credential is already stored; pass --overwrite to replace it".into(),
                 ));
+            }
+            if browser.browser {
+                let session = pk_cli_browser::capture(
+                    Launch::new(BIN)
+                        .url("https://app.example.com/login")
+                        .quiet(cli.common.quiet),
+                    &browser_session()?,
+                    pk_cli_browser::DEFAULT_TIMEOUT,
+                )?
+                .into_value()
+                .ok_or_else(|| CliError::Other("the capture read no session".into()))?;
+                // A real CLI verifies the session with one provider read
+                // before storing it, as one JSON item.
+                creds.set(&user, &session)?;
+                eprintln!("session captured from the browser and stored in the OS keychain");
+                return Ok(());
             }
             let prompt = if args.non_interactive {
                 None

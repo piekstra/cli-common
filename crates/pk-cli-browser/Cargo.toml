@@ -1,0 +1,23 @@
+[package]
+name = "pk-cli-browser"
+description = "Browser sign-in for the piekstra CLI family: a scratch-profile Chrome the owner signs in through, and the web session read back over the DevTools protocol (localStorage or cookies) without ever touching disk or argv."
+version.workspace = true
+edition.workspace = true
+# tungstenite 0.30 (through its sha1/digest stack) needs 1.85.
+rust-version = "1.85"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+pk-cli-core = { workspace = true }
+pk-cli-secrets = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+tungstenite = { workspace = true }
+ctrlc = { workspace = true }
+
+# The second Ctrl-C force-kills a live Chrome by pid from the handler thread.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

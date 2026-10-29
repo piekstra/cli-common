@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -40,7 +40,8 @@ spellings are kept one major version):
 ```
 <bin> auth login        # acquire/store credential. --stdin | --from-env <VAR>,
                         #   --no-verify, --overwrite, --non-interactive. Secrets
-                        #   NEVER via argv flags.
+                        #   NEVER via argv flags. --browser where the CLI cannot
+                        #   sign in by itself (bot check, OAuth SPA; §2.2).
 <bin> auth status       # canonical DTO (see 1.4). Works logged-out.
 <bin> auth logout       # clear session; --forget also clears stored credential+config identity.
 <bin> auth set-credential  # raw keychain write for rotation/headless (--stdin | --from-env, --overwrite).
@@ -399,10 +400,13 @@ AGENTS.md, same house style as the CLIs.
 | `pk-cli-documents` | the `documents/v1` domain profile (§1.8): `Document`, `SavedDocument`, `DownloadBatch`, `OpenedDocument` — list & download a portal's published files | `organize-scans`' per-CLI download-command adapter table |
 | `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages: elements, attributes, table rows/cells, entity decoding — all total, never panicking | a DOM-parser dependency, and the ad-hoc `str::find` scraping each portal CLI grows on its own |
 | `pk-cli-drive` | state in the owner's Drive (§2.1): one `Backend` over a mounted folder or an rclone remote, the stale-while-revalidate read cache in front of the remote (`CachedRemote`), its bounded background refresh, and owner-only file output (`private_file`) | tax-cli's `drive.rs` + `cache.rs` + `private_file.rs`, and the copy every other CLI that keeps state in Drive would write |
+| `pk-cli-browser` | browser sign-in (§2.2): a scratch-profile Chrome the owner signs in through (`Launch`, a `Browser` guard that kills it and removes the profile on drop), and the web session read back over the DevTools protocol (`Capture`: exact hosts, an in-page expression, `HttpOnly`-capable cookies) as `Secret`s, the tab closed the moment it is read; the `--browser` flag (`BrowserArgs`) | the browser-login module `sfi`, `wfr` and `carta` each embed, and the DevTools-console paste `m1f`, `rhd` and `nlnt` ask of the owner |
 
 Each crate is small and independent; a CLI adopts them piecemeal. Provider
 scraping/session logic (tojfl's DNN dance, xfin's browser-session replay) stays
-in each CLI/SDK — cli-common owns *surface*, not *providers*.
+in each CLI/SDK — cli-common owns *surface* and provider-free *mechanism*
+(`pk-cli-browser` knows how to read a session out of a browser; which host,
+key or cookie holds it is the CLI's), not *providers*.
 
 ### 2.1 State in the owner's Drive (`pk-cli-drive`)
 
@@ -465,6 +469,74 @@ A CLI that uses the cache:
 The crate needs Rust 1.89 (`File::lock`), above the workspace's 1.75 floor,
 so adopting it raises the CLI's own minimum. `example-cli state
 get|put|list|sync` is the worked example.
+
+### 2.2 Browser sign-in (`pk-cli-browser`)
+
+For a portal a CLI cannot sign in to by itself: a bot check (Cloudflare
+Turnstile, reCAPTCHA Enterprise, Akamai) stands in front of the password, or
+the session only exists inside an OAuth single-page app. The owner signs in
+on the provider's own page in a real Chrome window, password and MFA
+included; the CLI reads the session the web app keeps out of that window
+over the Chrome DevTools Protocol and stores it like any other credential.
+
+**The surface.** `<bin> auth login --browser`, the flag being
+`pk_cli_browser::BrowserArgs` flattened beside `LoginArgs`. It takes no
+other credential source: `--browser` with `--stdin`, `--from-env` or `--op`
+is exit 2, decided before any keychain or network work. After the capture
+the CLI verifies the session with one provider read and stores it as one
+keychain item (§1.7), exactly as a `--stdin` import of the same value would.
+`auth status` reports `method: "browser-session"`, and `info.auth.login_hint`
+is `<bin> auth login --browser`. The manual path (`--stdin` with a value
+copied out of DevTools) stays as the fallback for a machine without Chrome.
+
+```rust
+use pk_cli_browser::{Capture, HostRule, Launch, DEFAULT_TIMEOUT};
+
+let capture = Capture::new("Example", HostRule::exact("app.example.com")?)
+    .expression("localStorage.getItem('session') || null")
+    .hint("password and the texted code");
+let session = pk_cli_browser::capture(
+    Launch::new(BIN).url("https://app.example.com/login").quiet(common.quiet),
+    &capture,
+    DEFAULT_TIMEOUT,
+)?
+.into_value();
+```
+
+| Rule | |
+|---|---|
+| A plain Chrome | launched with only `--remote-debugging-port=0` (Chrome picks the port and writes it to `DevToolsActivePort`), a scratch `--user-data-dir`, `--no-first-run` and `--no-default-browser-check`. No automation flags, so `navigator.webdriver` is false and bot checks see an ordinary browser; no service-disabling flags either, which Turnstile reads as automation. The owner clicks; the crate never drives a page |
+| Which Chrome | `<PREFIX>_CHROME` (`SFI_CHROME`, `M1F_CHROME`) when set, else the standard macOS app paths (Chrome, Chromium, Edge; also under `~/Applications`), then the Linux ones |
+| The scratch profile | created `0700`, exclusively, under an unpredictable name in the temp dir, and checked to be a private directory before Chrome starts. It holds the unauthenticated debug port's address and the live session, so it is removed on every exit: the `Browser` guard's drop stops Chrome (SIGTERM, SIGKILL after 3 s) and then deletes it |
+| Exact hosts | a capture names the hosts it may be read from: `HostRule::exact` (one host) or `HostRule::domain` (a registrable domain and its subdomains). A page counts only when its URL is `https` on the default port and its parsed host matches label for label, never by substring: `example.com.evil.example`, `notexample.com`, `evil.example/?x=example.com`, `example.com@evil.example`, an `http` page and punycode look-alikes all fail. The expression also returns the answering document's own `location.hostname`, which must match too |
+| What is read | a JavaScript expression evaluated in each matching page that answers with the session as a non-empty string once signed in (`null`, `undefined` or `""` before; a promise is awaited), and/or named cookies for `https` URLs on the capture's hosts, read from the browser's jar (`Storage.getCookies`, so `HttpOnly` cookies work) and chosen as the browser would send them. A capture is ready when a page on its hosts is open, the expression answers, and every required cookie is set |
+| A light footprint | the page list and the cookies are browser-level calls no page can observe. The expression runs only in pages on the capture's hosts, never on a login host where the bot checks run, through a flattened target session, with no `Runtime.enable` or `Network.enable` |
+| The tab is closed | the moment a capture is read, every page on its hosts is closed, before anything else happens, so the web app cannot renew, and so rotate, the token it just handed over |
+| Several providers | `Browser::wait_each` waits for several captures in one window, one tab each (their hosts must not overlap), and hands each over as it is read, so one provider's timeout never loses another's session |
+| Secrets | values come back as `pk_cli_secrets::Secret` (redacted `Debug`/`Display`, zeroized on drop). The crate never logs one, never puts one on a command line and never writes one to disk; status lines and errors name labels, hosts and cookie names only |
+| Status lines | on stderr, suppressed by `-q`: `A Chrome window opened at the Example sign-in. Sign in there (password and the texted code); this waits for the session and captures it (up to 10 minutes; Ctrl-C cancels).`, then `Example: session captured, tab closed.` |
+| Errors | every call returns a `BrowserError`, which `?` turns into the family's `CliError`. `TimedOut` (after `DEFAULT_TIMEOUT`, 10 minutes, unless the CLI passes another) and `WindowClosed` are exit 3, naming what was seen (no page on the host was open, the page held no session yet, the expression threw, which cookie was missing) and the command to re-run (`<bin> auth login --browser`; `Launch::login_hint` overrides it). `Canceled` (`browser login canceled`), `ChromeNotFound` (naming `<PREFIX>_CHROME`), `Launch` and `Invalid` are exit 1, and `Handler` passes the `wait_each` handler's own error through. A CLI branches on the variant: on `ChromeNotFound` it can point the owner at its `--stdin` path |
+| Ctrl-C | the crate installs one process-wide handler: the first Ctrl-C ends the wait, so the guard drops and cleans up; a second kills Chrome, removes the profile and exits 130; with no window open, Ctrl-C exits 130 as it would without a handler. A CLI with its own handler sets `Launch::ctrl_c(false)` and calls `pk_cli_browser::cancel()` from it |
+
+**Choosing the readiness signal.** A capture is read once and its tab
+closed, so the signal must exist only after sign-in: the access token inside
+the stored session (`v && v.includes('access_token') ? v : null`), or a
+cookie the site sets only once signed in. A cookie a site also sets for an
+anonymous visitor is not a signal.
+
+**What stays in the CLI.** The provider knowledge (which host, which storage
+key or cookie, which start page), and verifying and storing the session.
+`Capture::validate` lets a CLI's unit tests check its captures offline. The
+crate hands out no raw DevTools handle, since one would bypass every rule
+above; when a CLI that watches more in the window (a request's headers, the
+app's API calls) adopts the crate, the crate gains a narrow capability for
+that need.
+
+The crate needs Rust 1.85 (tungstenite 0.30). `example-cli auth login
+--browser` shows the flag check and the capture. Its demo portal has no read
+to verify a session against, and its `auth status` and `info` stay those of
+its password login, so the verification, the `browser-session` method and
+the `--browser` hint above are what a real CLI adds.
 
 ### Versioning & consumption
 
