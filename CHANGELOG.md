@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.9.0 — 2026-10-29
 
 Additive: no existing function, default or `/v1` shape changes.
 
