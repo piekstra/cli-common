@@ -29,6 +29,7 @@ self-update.
 | `pk-cli-documents` | the `documents/v1` domain profile: list & download a portal's published files (`document-list/v1`, `document-download/v1`, …) |
 | `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages rather than JSON |
 | `pk-cli-drive` | state in the owner's Drive: one backend over a mounted folder or an rclone remote, with a stale-while-revalidate read cache that never becomes a second source of truth (needs Rust 1.89) |
+| `pk-cli-browser` | `auth login --browser` for portals a CLI cannot sign in to itself: a scratch-profile Chrome the owner signs in through, the web session (a `localStorage` entry, `HttpOnly` cookies) read back over the DevTools protocol from exact hosts only, the tab closed at once, Chrome killed and the profile deleted (needs Rust 1.85) |
 | `example-cli` | a runnable template wiring it all together — copy it to start a new family CLI |
 
 ## Consuming

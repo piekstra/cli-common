@@ -4,6 +4,33 @@
 
 Additive: no existing function, default or `/v1` shape changes.
 
+- **`pk-cli-browser`** (new crate; DESIGN.md §2.2) — `auth login --browser`
+  for portals a CLI cannot sign in to by itself, the mechanism `sfi`, `wfr`
+  and `carta` each embed and `m1f`, `rhd` and `nlnt` ask the owner to do by
+  hand in DevTools. `Launch` starts Chrome
+  (`<PREFIX>_CHROME`, else the standard macOS and Linux paths) with only a
+  self-chosen debug port, a scratch profile and first-run suppression, and
+  waits for `DevToolsActivePort`; the profile is `0700`, created exclusively
+  under an unpredictable name, and the returned `Browser` guard stops Chrome
+  (SIGTERM, then SIGKILL) and deletes the profile when dropped. A `Capture`
+  names the hosts it may be read from (`HostRule::exact`, `HostRule::domain`:
+  parsed `https` hosts on the default port, label for label, so confusable
+  hosts, credentials in the URL and `http` pages never match) and what to
+  read: an expression evaluated in those pages only (it must also report an
+  allowed `location.hostname`), and/or cookies read from the browser's jar,
+  `HttpOnly` included, chosen as the browser would send them.
+  `Browser::wait` (one capture) and `Browser::wait_each` (several providers
+  in one window, each handed over as it is read) close every page on a
+  capture's hosts the moment it is read, so the web app cannot rotate the
+  token it handed over. Values come back as `Secret`s; nothing is logged,
+  put on argv or written to disk by the crate. A timeout (10 minutes by
+  default) or a closed window is exit 3 naming what was seen; Ctrl-C (a
+  process-wide handler, opt-out with `Launch::ctrl_c(false)` plus
+  `pk_cli_browser::cancel()`) cancels with cleanup, and a second Ctrl-C
+  force-quits. `BrowserArgs` is the flattenable `--browser` flag. The CDP
+  client is blocking (tungstenite, no async runtime); tests run offline
+  against an in-memory fake browser and a stand-in Chrome script. Needs Rust
+  1.85. `example-cli auth login --browser` is the worked example.
 - **`Money::grouped()`**: text display with thousands separators and the
   sign ahead of the symbol, `$1,234.56`, `-$1,234.56`, `1,234.56 EUR`.
   `Display` keeps its ungrouped `$1234.56` (and its `$-5.00` for
