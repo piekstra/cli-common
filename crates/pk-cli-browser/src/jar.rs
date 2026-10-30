@@ -14,11 +14,15 @@
 //! Path is not filtered. A CLI replays the jar to API paths the crate does
 //! not know, so every path's cookies are kept, and the header lists the
 //! longer paths first, as the browser orders them.
+//!
+//! The one named cookie a [`Capture::cookie`](crate::Capture::cookie) reads
+//! is chosen here too ([`pick_cookie`]), from the same list and by the same
+//! scope rules, for one URL.
 
 use pk_cli_secrets::Secret;
 use serde_json::Value;
 
-use crate::host::{normalize_host, parse_url, HostRule};
+use crate::host::{is_under, normalize_host, parse_url, HostRule, UrlParts};
 
 /// One cookie of a captured jar. The value is a [`Secret`]; the rest is
 /// what the browser reports about the cookie's scope.
@@ -60,14 +64,6 @@ impl JarCookie {
     }
 }
 
-/// Whether `host` is `domain` or a host under it, label for label.
-pub(crate) fn is_under(host: &str, domain: &str) -> bool {
-    host == domain
-        || (host.len() > domain.len()
-            && host.ends_with(domain)
-            && host.as_bytes()[host.len() - domain.len() - 1] == b'.')
-}
-
 /// Whether a cookie scoped to `domain` reaches the host `jar` or a host
 /// under it: it sits on one of those hosts, or it is a domain cookie on a
 /// parent of `jar`. A parent that is a bare suffix (`com`) never holds a
@@ -80,7 +76,7 @@ fn reaches(domain: &str, host_only: bool, jar: &str) -> bool {
 /// A listed cookie's scope: its normalized domain, and whether it is
 /// host-only (listed without a leading dot). `None` for a domain that is not
 /// a valid host.
-pub(crate) fn cookie_scope(cookie: &Value) -> Option<(String, bool)> {
+fn cookie_scope(cookie: &Value) -> Option<(String, bool)> {
     let raw = cookie.get("domain")?.as_str()?;
     let host_only = !raw.starts_with('.');
     let domain = normalize_host(raw.trim_start_matches('.'))?;
@@ -92,7 +88,7 @@ pub(crate) fn cookie_scope(cookie: &Value) -> Option<(String, bool)> {
 /// first-party top-level site `site`, and `None` for one keyed to a
 /// cross-site context or to a site that cannot be read, which a CLI's own
 /// first-party request would never carry.
-pub(crate) fn partition_site(cookie: &Value) -> Option<Option<String>> {
+fn partition_site(cookie: &Value) -> Option<Option<String>> {
     match cookie.get("partitionKey") {
         None | Some(Value::Null) => Some(None),
         Some(key) => {
@@ -174,6 +170,50 @@ pub(crate) fn jar_names(jar: &[JarCookie]) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+/// The value of cookie `name` that the browser would send with a request
+/// to `url`, from a `Storage.getCookies` list: domain-matched (a host-only
+/// cookie only on its own host, a domain cookie on the domain and its
+/// subdomains), path-matched, `Secure` only over https, and a partitioned
+/// cookie only in its own top-level site. Of several matches, the longest
+/// path wins, then a host-only cookie, as the browser orders them. An empty
+/// value counts as unset.
+pub(crate) fn pick_cookie(cookies: &Value, url: &UrlParts, name: &str) -> Option<String> {
+    cookies
+        .as_array()?
+        .iter()
+        .filter(|c| c.get("name").and_then(Value::as_str) == Some(name))
+        .filter_map(|c| {
+            let value = c.get("value")?.as_str().filter(|v| !v.is_empty())?;
+            let (domain, host_only) = cookie_scope(c)?;
+            let domain_ok = if host_only {
+                url.host == domain
+            } else {
+                is_under(&url.host, &domain)
+            };
+            let path = c.get("path").and_then(Value::as_str).unwrap_or("/");
+            let secure = c.get("secure").and_then(Value::as_bool).unwrap_or(false);
+            let partition_ok = match partition_site(c) {
+                None => false,
+                Some(None) => true,
+                Some(Some(site)) => is_under(&url.host, &site),
+            };
+            (domain_ok
+                && path_matches(&url.path, path)
+                && (!secure || url.scheme == "https")
+                && partition_ok)
+                .then_some((path.len(), host_only, value))
+        })
+        .max_by_key(|(path_len, host_only, _)| (*path_len, *host_only))
+        .map(|(_, _, value)| value.to_string())
+}
+
+/// RFC 6265 §5.1.4 path-match.
+pub(crate) fn path_matches(request: &str, cookie: &str) -> bool {
+    request == cookie
+        || (request.starts_with(cookie)
+            && (cookie.ends_with('/') || request[cookie.len()..].starts_with('/')))
 }
 
 #[cfg(test)]
@@ -323,18 +363,90 @@ mod tests {
     }
 
     #[test]
-    fn hosts_are_under_a_domain_label_for_label() {
-        let cases: &[(&str, &str, bool)] = &[
-            ("example.com", "example.com", true),
-            ("www.example.com", "example.com", true),
-            ("a.b.example.com", "example.com", true),
-            ("notexample.com", "example.com", false),
-            ("example.com", "www.example.com", false),
-            ("example.com.evil.example", "example.com", false),
-            ("xample.com", "example.com", false),
+    fn cookies_are_chosen_as_the_browser_would_send_them() {
+        let url = |u: &str| parse_url(u).unwrap();
+        let jar = json!([
+            {"name": "host_only", "value": "h", "domain": "app.example.com", "path": "/"},
+            {"name": "domain", "value": "d", "domain": ".example.com", "path": "/"},
+            {"name": "scoped", "value": "root", "domain": ".example.com", "path": "/"},
+            {"name": "scoped", "value": "api", "domain": ".example.com", "path": "/api"},
+            {"name": "tie", "value": "domain-wide", "domain": ".example.com", "path": "/"},
+            {"name": "tie", "value": "host-only", "domain": "app.example.com", "path": "/"},
+            {"name": "empty", "value": "", "domain": ".example.com", "path": "/"},
+            {"name": "confusable", "value": "c", "domain": ".example.com.evil.example", "path": "/"},
+            {"name": "suffix", "value": "s", "domain": ".ample.com", "path": "/"},
+            {"name": "part_own", "value": "p1", "domain": ".example.com", "path": "/",
+             "partitionKey": {"topLevelSite": "https://example.com", "hasCrossSiteAncestor": false}},
+            {"name": "part_cross", "value": "p2", "domain": ".example.com", "path": "/",
+             "partitionKey": {"topLevelSite": "https://example.com", "hasCrossSiteAncestor": true}},
+            {"name": "part_other", "value": "p3", "domain": ".example.com", "path": "/",
+             "partitionKey": "https://other.example"},
+            {"name": "part_null", "value": "p4", "domain": ".example.com", "path": "/",
+             "partitionKey": null},
+            {"name": "no_path", "value": "np", "domain": ".example.com"},
+            {"name": "bad_domain", "value": "b", "domain": "exa mple.com", "path": "/"}
+        ]);
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            ("https://app.example.com/", "host_only", Some("h")),
+            ("https://www.example.com/", "host_only", None),
+            ("https://sub.app.example.com/", "host_only", None),
+            ("https://example.com/", "domain", Some("d")),
+            ("https://deep.app.example.com/x", "domain", Some("d")),
+            ("https://example.org/", "domain", None),
+            ("https://notexample.com/", "domain", None),
+            // The longest matching path wins; a path only matches on a boundary.
+            ("https://app.example.com/api/v1", "scoped", Some("api")),
+            ("https://app.example.com/api", "scoped", Some("api")),
+            ("https://app.example.com/apiary", "scoped", Some("root")),
+            ("https://app.example.com/", "scoped", Some("root")),
+            // Same path: the host-only cookie is the more specific.
+            ("https://app.example.com/", "tie", Some("host-only")),
+            ("https://www.example.com/", "tie", Some("domain-wide")),
+            ("https://app.example.com/", "empty", None),
+            ("https://app.example.com/", "confusable", None),
+            ("https://app.example.com/", "suffix", None),
+            ("https://app.example.com/", "part_own", Some("p1")),
+            ("https://app.example.com/", "part_cross", None),
+            ("https://app.example.com/", "part_other", None),
+            ("https://app.example.com/", "part_null", Some("p4")),
+            ("https://app.example.com/x", "no_path", Some("np")),
+            ("https://app.example.com/", "bad_domain", None),
+            ("https://app.example.com/", "missing", None),
         ];
-        for (host, domain, want) in cases {
-            assert_eq!(is_under(host, domain), *want, "{host} under {domain}");
+        for (u, name, want) in cases {
+            assert_eq!(
+                pick_cookie(&jar, &url(u), name).as_deref(),
+                *want,
+                "{u} {name}"
+            );
+        }
+        // A Secure cookie is never chosen for a plain-http URL.
+        let secure = json!([{"name": "s", "value": "v", "domain": "a.example", "path": "/", "secure": true}]);
+        assert_eq!(pick_cookie(&secure, &url("http://a.example/"), "s"), None);
+        assert_eq!(
+            pick_cookie(&secure, &url("https://a.example/"), "s").as_deref(),
+            Some("v")
+        );
+        assert_eq!(
+            pick_cookie(&Value::Null, &url("https://a.example/"), "s"),
+            None
+        );
+    }
+
+    #[test]
+    fn path_matching_follows_rfc_6265() {
+        let cases: &[(&str, &str, bool)] = &[
+            ("/", "/", true),
+            ("/a", "/", true),
+            ("/a/b", "/a", true),
+            ("/a/b", "/a/", true),
+            ("/a", "/a", true),
+            ("/ab", "/a", false),
+            ("/", "/a", false),
+            ("/b", "/a", false),
+        ];
+        for (request, cookie, want) in cases {
+            assert_eq!(path_matches(request, cookie), *want, "{request} {cookie}");
         }
     }
 }

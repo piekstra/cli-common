@@ -26,9 +26,10 @@ use std::fmt;
 use pk_cli_secrets::Secret;
 use serde_json::{json, Map, Value};
 
-use crate::capture::{path_matches, PageTarget};
+use crate::capture::PageTarget;
 use crate::cdp::{Cdp, CdpError, Transport};
 use crate::host::{parse_url, HostRule, UrlParts};
+use crate::jar::path_matches;
 
 /// Distinct endpoints one request log keeps; later ones are dropped.
 const MAX_LOGGED: usize = 500;

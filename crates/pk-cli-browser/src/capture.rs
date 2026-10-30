@@ -38,11 +38,9 @@ use serde_json::{json, Value};
 use crate::cdp::{Cdp, CdpError, Transport, WsTransport};
 use crate::chrome::{Browser, Launch};
 use crate::error::BrowserError;
-use crate::host::{parse_url, HostRule, UrlParts};
+use crate::host::{parse_url, HostRule};
 use crate::interrupt;
-use crate::jar::{
-    cookie_header, cookie_scope, is_under, jar_cookies, jar_names, partition_site, JarCookie,
-};
+use crate::jar::{cookie_header, jar_cookies, jar_names, pick_cookie, JarCookie};
 use crate::watch::{
     CapturedRequest, LoggedRequest, Next, RequestLog, RequestRule, SeenRequest, Watch,
 };
@@ -810,50 +808,6 @@ pub(crate) fn read_evaluation(result: &Value, hosts: &[HostRule]) -> Evaluation 
     }
 }
 
-/// The value of cookie `name` that the browser would send with a request
-/// to `url`, from a `Storage.getCookies` list: domain-matched (a host-only
-/// cookie only on its own host, a domain cookie on the domain and its
-/// subdomains), path-matched, `Secure` only over https, and a partitioned
-/// cookie only in its own top-level site. Of several matches, the longest
-/// path wins, then a host-only cookie, as the browser orders them. An empty
-/// value counts as unset.
-pub(crate) fn pick_cookie(cookies: &Value, url: &UrlParts, name: &str) -> Option<String> {
-    cookies
-        .as_array()?
-        .iter()
-        .filter(|c| c.get("name").and_then(Value::as_str) == Some(name))
-        .filter_map(|c| {
-            let value = c.get("value")?.as_str().filter(|v| !v.is_empty())?;
-            let (domain, host_only) = cookie_scope(c)?;
-            let domain_ok = if host_only {
-                url.host == domain
-            } else {
-                is_under(&url.host, &domain)
-            };
-            let path = c.get("path").and_then(Value::as_str).unwrap_or("/");
-            let secure = c.get("secure").and_then(Value::as_bool).unwrap_or(false);
-            let partition_ok = match partition_site(c) {
-                None => false,
-                Some(None) => true,
-                Some(Some(site)) => is_under(&url.host, &site),
-            };
-            (domain_ok
-                && path_matches(&url.path, path)
-                && (!secure || url.scheme == "https")
-                && partition_ok)
-                .then_some((path.len(), host_only, value))
-        })
-        .max_by_key(|(path_len, host_only, _)| (*path_len, *host_only))
-        .map(|(_, _, value)| value.to_string())
-}
-
-/// RFC 6265 §5.1.4 path-match.
-pub(crate) fn path_matches(request: &str, cookie: &str) -> bool {
-    request == cookie
-        || (request.starts_with(cookie)
-            && (cookie.ends_with('/') || request[cookie.len()..].starts_with('/')))
-}
-
 /// One capture read in a poll, and how closing its tabs went.
 struct Read {
     index: usize,
@@ -892,6 +846,28 @@ enum Step {
     Read(Box<Captured>, Result<usize, String>),
     Canceled,
     Failed(CliError),
+}
+
+/// Why a gate in [`read_when_ready`] stops a capture for this poll.
+enum Gate {
+    /// Not ready yet, and what stopped it, for the timeout. `None` keeps
+    /// the last reason: no page on the capture's hosts was open to check.
+    Wait(Option<Blocked>),
+    /// Ctrl-C came during a call.
+    Canceled,
+    /// The confirm hook ended the wait.
+    Failed(CliError),
+}
+
+impl From<Blocked> for Gate {
+    fn from(blocked: Blocked) -> Self {
+        Gate::Wait(Some(blocked))
+    }
+}
+
+/// A gate that could not get an answer it needs from the browser.
+fn no_answer(host: &str, why: String) -> Gate {
+    Blocked::Check(host.to_string(), Check::NoAnswer(why)).into()
 }
 
 fn poll_once<T: Transport>(
@@ -935,9 +911,9 @@ fn poll_once<T: Transport>(
     Ok(poll)
 }
 
-/// Check one capture against this poll's pages, in the order the module
-/// docs give, and read and close it if it is ready. Whatever stops it is
-/// recorded in its progress for the timeout.
+/// Check one capture against this poll's pages, and read and close it if
+/// it is ready. Whatever stops it is recorded in its progress for the
+/// timeout.
 fn check_capture<T: Transport>(
     cdp: &mut Cdp<T>,
     w: &mut Waiting<'_>,
@@ -945,134 +921,49 @@ fn check_capture<T: Transport>(
     state: &mut PollState<'_>,
     notes: &mut Vec<String>,
 ) -> Step {
+    match read_when_ready(cdp, w, pages, state, notes) {
+        Ok((captured, closed)) => {
+            w.progress.blocked = None;
+            Step::Read(Box::new(captured), closed)
+        }
+        Err(Gate::Wait(blocked)) => {
+            if blocked.is_some() {
+                w.progress.blocked = blocked;
+            }
+            Step::Waiting
+        }
+        Err(Gate::Canceled) => Step::Canceled,
+        Err(Gate::Failed(e)) => Step::Failed(e),
+    }
+}
+
+/// The gates, in the order the module docs give; the first one that does
+/// not pass stops the capture for this poll. Once all pass, the capture is
+/// read and every page on its hosts closed.
+fn read_when_ready<T: Transport>(
+    cdp: &mut Cdp<T>,
+    w: &mut Waiting<'_>,
+    pages: &[PageTarget],
+    state: &mut PollState<'_>,
+    notes: &mut Vec<String>,
+) -> Result<(Captured, Result<usize, String>), Gate> {
     let capture = w.capture;
     let matching: Vec<&PageTarget> = pages
         .iter()
         .filter(|p| capture.hosts.iter().any(|r| r.matches_url(&p.url)))
         .collect();
-    let Some(first) = matching.first() else {
-        return Step::Waiting;
-    };
+    let first = *matching.first().ok_or(Gate::Wait(None))?;
     w.progress.saw_page = true;
 
-    let (host, value) = match &capture.expression {
-        Some(expression) => {
-            let mut ready = None;
-            for page in &matching {
-                let check = match evaluate(cdp, page, expression, &capture.hosts) {
-                    Ok(Evaluation::Ready { host, value }) => {
-                        ready = Some((host, Some(value)));
-                        break;
-                    }
-                    Ok(Evaluation::NotReady(check)) => check,
-                    Err(CdpError::Canceled) => return Step::Canceled,
-                    Err(e) => Check::NoAnswer(e.to_string()),
-                };
-                w.progress.blocked = Some(Blocked::Check(page_host(page), check));
-            }
-            match ready {
-                Some(ready) => ready,
-                None => return Step::Waiting,
-            }
-        }
-        None => (page_host(first), None),
-    };
-
-    let mut cookies = Vec::new();
-    let mut jar = None;
-    if !capture.cookies.is_empty() || w.jar.is_some() {
-        let listed = state.cookies.get_or_insert_with(|| {
-            cdp.call("Storage.getCookies", Value::Null, None)
-                .map(|all| all.get("cookies").cloned().unwrap_or(Value::Null))
-        });
-        let listed = match listed {
-            Ok(listed) => &*listed,
-            Err(CdpError::Canceled) => return Step::Canceled,
-            // Not ready this poll; nothing was closed, so the next poll
-            // reads it again.
-            Err(e) => {
-                let why = format!("reading the cookies failed: {e}");
-                w.progress.blocked = Some(Blocked::Check(host, Check::NoAnswer(why)));
-                return Step::Waiting;
-            }
-        };
-        let mut missing = Vec::new();
-        for read in &capture.cookies {
-            let found = parse_url(&read.url).and_then(|u| pick_cookie(listed, &u, &read.name));
-            match found {
-                Some(v) => cookies.push((read.name.clone(), Secret::new(v))),
-                None if read.required => missing.push(read.name.clone()),
-                None => {}
-            }
-        }
-        if let Some(rule) = &w.jar {
-            let found = jar_cookies(listed, rule);
-            w.progress.jar = Some((rule.host().to_string(), jar_names(&found)));
-            if found.is_empty() && missing.is_empty() {
-                w.progress.blocked = Some(Blocked::EmptyJar(rule.host().to_string()));
-                return Step::Waiting;
-            }
-            jar = Some(found);
-        }
-        if !missing.is_empty() {
-            w.progress.blocked = Some(Blocked::Cookies(missing));
-            return Step::Waiting;
-        }
-    }
-
-    let required = matches!(capture.request, Some(RequestRead { within: None, .. }));
-    if let (true, Some(rule), None) = (required, &w.request, &w.seen) {
-        w.progress.blocked = Some(Blocked::Request(rule.to_string()));
-        return Step::Waiting;
-    }
-
-    if let Some(window) = w.window() {
-        let since = match w.hold_since {
-            Some(since) => since,
-            None => {
-                notes.push(hold_note(w, window));
-                w.hold_since = Some(state.now);
-                state.now
-            }
-        };
-        let open = since.checked_add(window).is_none_or(|end| state.now < end);
-        if open && !state.final_round {
-            w.progress.blocked = Some(Blocked::Holding);
-            return Step::Waiting;
-        }
-    }
-
-    let user_agent = if capture.user_agent {
-        if state.user_agent.is_none() {
-            match cdp.call("Browser.getVersion", Value::Null, None) {
-                Ok(version) => {
-                    *state.user_agent = version
-                        .get("userAgent")
-                        .and_then(Value::as_str)
-                        .filter(|ua| !ua.is_empty())
-                        .map(str::to_string);
-                }
-                Err(CdpError::Canceled) => return Step::Canceled,
-                Err(e) => {
-                    let why = format!("reading the browser's user agent failed: {e}");
-                    w.progress.blocked = Some(Blocked::Check(host, Check::NoAnswer(why)));
-                    return Step::Waiting;
-                }
-            }
-        }
-        match state.user_agent.clone() {
-            Some(ua) => Some(ua),
-            None => {
-                let why = "the browser reported no user agent".to_string();
-                w.progress.blocked = Some(Blocked::Check(host, Check::NoAnswer(why)));
-                return Step::Waiting;
-            }
-        }
-    } else {
-        None
-    };
-
-    let mut captured = Captured {
+    let (host, value) = expression_gate(cdp, capture, &matching, first)?;
+    let CookieReads {
+        named: cookies,
+        jar,
+    } = cookie_gate(cdp, w, state, &host)?;
+    request_gate(w)?;
+    hold_gate(w, state, notes)?;
+    let user_agent = user_agent_gate(cdp, capture, state, &host)?;
+    let candidate = Captured {
         label: capture.label.clone(),
         host,
         value,
@@ -1082,22 +973,178 @@ fn check_capture<T: Transport>(
         request_log: w.log.as_ref().map(|log| log.entries().to_vec()),
         user_agent,
     };
-    if let Some(hook) = &capture.confirm {
-        match (hook.0)(&captured) {
-            Confirm::Ready => {}
-            Confirm::NotYet(reason) => {
-                // The request is kept for the next poll; the rest is read
-                // again then.
-                w.seen = captured.request.take();
-                w.progress.blocked = Some(Blocked::Unconfirmed(reason));
-                return Step::Waiting;
-            }
-            Confirm::Fail(e) => return Step::Failed(e),
+    let captured = confirm_gate(w, candidate)?;
+    let closed = close_pages(cdp, &matching);
+    Ok((captured, closed))
+}
+
+/// The expression's answer and the host of the page that gave it, from the
+/// first matching page that has one; for a capture without an expression,
+/// nothing, read from the first page.
+fn expression_gate<T: Transport>(
+    cdp: &mut Cdp<T>,
+    capture: &Capture,
+    matching: &[&PageTarget],
+    first: &PageTarget,
+) -> Result<(String, Option<Secret>), Gate> {
+    let Some(expression) = &capture.expression else {
+        return Ok((page_host(first), None));
+    };
+    let mut blocked = None;
+    for page in matching {
+        let check = match evaluate(cdp, page, expression, &capture.hosts) {
+            Ok(Evaluation::Ready { host, value }) => return Ok((host, Some(value))),
+            Ok(Evaluation::NotReady(check)) => check,
+            Err(CdpError::Canceled) => return Err(Gate::Canceled),
+            Err(e) => Check::NoAnswer(e.to_string()),
+        };
+        blocked = Some(Blocked::Check(page_host(page), check));
+    }
+    Err(Gate::Wait(blocked))
+}
+
+/// What the cookie gate read: the named cookies that were set, and the jar.
+struct CookieReads {
+    named: Vec<(String, Secret)>,
+    jar: Option<Vec<JarCookie>>,
+}
+
+/// The named cookies and the jar, from the browser's cookie list (read at
+/// most once per poll). The jar's cookie names are recorded for the
+/// timeout whatever the outcome; a missing required cookie is reported
+/// ahead of an empty jar.
+fn cookie_gate<T: Transport>(
+    cdp: &mut Cdp<T>,
+    w: &mut Waiting<'_>,
+    state: &mut PollState<'_>,
+    host: &str,
+) -> Result<CookieReads, Gate> {
+    let capture = w.capture;
+    if capture.cookies.is_empty() && w.jar.is_none() {
+        return Ok(CookieReads {
+            named: Vec::new(),
+            jar: None,
+        });
+    }
+    let listed = state.cookies.get_or_insert_with(|| {
+        cdp.call("Storage.getCookies", Value::Null, None)
+            .map(|all| all.get("cookies").cloned().unwrap_or(Value::Null))
+    });
+    let listed = match listed {
+        Ok(listed) => &*listed,
+        Err(CdpError::Canceled) => return Err(Gate::Canceled),
+        // Not ready this poll; nothing was closed, so the next poll reads
+        // it again.
+        Err(e) => return Err(no_answer(host, format!("reading the cookies failed: {e}"))),
+    };
+    let mut named = Vec::new();
+    let mut missing = Vec::new();
+    for read in &capture.cookies {
+        let found = parse_url(&read.url).and_then(|u| pick_cookie(listed, &u, &read.name));
+        match found {
+            Some(v) => named.push((read.name.clone(), Secret::new(v))),
+            None if read.required => missing.push(read.name.clone()),
+            None => {}
         }
     }
-    w.progress.blocked = None;
-    let closed = close_pages(cdp, &matching);
-    Step::Read(Box::new(captured), closed)
+    let jar = w.jar.as_ref().map(|rule| {
+        let found = jar_cookies(listed, rule);
+        w.progress.jar = Some((rule.host().to_string(), jar_names(&found)));
+        found
+    });
+    if !missing.is_empty() {
+        return Err(Blocked::Cookies(missing).into());
+    }
+    if let (Some(rule), Some(found)) = (&w.jar, &jar) {
+        if found.is_empty() {
+            return Err(Blocked::EmptyJar(rule.host().to_string()).into());
+        }
+    }
+    Ok(CookieReads { named, jar })
+}
+
+/// A capture that waits for a request has seen it.
+fn request_gate(w: &Waiting<'_>) -> Result<(), Gate> {
+    let required = matches!(w.capture.request, Some(RequestRead { within: None, .. }));
+    match (&w.request, &w.seen) {
+        (Some(rule), None) if required => Err(Blocked::Request(rule.to_string()).into()),
+        _ => Ok(()),
+    }
+}
+
+/// The tab stays open for the capture's watch window, which starts (with a
+/// status line) the first time every earlier gate passes, and ends when it
+/// runs out or at the deadline's final round.
+fn hold_gate(
+    w: &mut Waiting<'_>,
+    state: &PollState<'_>,
+    notes: &mut Vec<String>,
+) -> Result<(), Gate> {
+    let Some(window) = w.window() else {
+        return Ok(());
+    };
+    let since = match w.hold_since {
+        Some(since) => since,
+        None => {
+            notes.push(hold_note(w, window));
+            w.hold_since = Some(state.now);
+            state.now
+        }
+    };
+    let open = since.checked_add(window).is_none_or(|end| state.now < end);
+    if open && !state.final_round {
+        return Err(Blocked::Holding.into());
+    }
+    Ok(())
+}
+
+/// The browser's user agent, for a capture that asks for it; read once per
+/// wait.
+fn user_agent_gate<T: Transport>(
+    cdp: &mut Cdp<T>,
+    capture: &Capture,
+    state: &mut PollState<'_>,
+    host: &str,
+) -> Result<Option<String>, Gate> {
+    if !capture.user_agent {
+        return Ok(None);
+    }
+    if state.user_agent.is_none() {
+        let version = match cdp.call("Browser.getVersion", Value::Null, None) {
+            Ok(version) => version,
+            Err(CdpError::Canceled) => return Err(Gate::Canceled),
+            Err(e) => {
+                let why = format!("reading the browser's user agent failed: {e}");
+                return Err(no_answer(host, why));
+            }
+        };
+        *state.user_agent = version
+            .get("userAgent")
+            .and_then(Value::as_str)
+            .filter(|ua| !ua.is_empty())
+            .map(str::to_string);
+    }
+    match state.user_agent.clone() {
+        Some(ua) => Ok(Some(ua)),
+        None => Err(no_answer(host, "the browser reported no user agent".into())),
+    }
+}
+
+/// The CLI's check of the candidate. On `NotYet` the watched request is
+/// kept for the next poll; the rest is read again then.
+fn confirm_gate(w: &mut Waiting<'_>, mut candidate: Captured) -> Result<Captured, Gate> {
+    let capture = w.capture;
+    let Some(hook) = &capture.confirm else {
+        return Ok(candidate);
+    };
+    match (hook.0)(&candidate) {
+        Confirm::Ready => Ok(candidate),
+        Confirm::NotYet(reason) => {
+            w.seen = candidate.request.take();
+            Err(Blocked::Unconfirmed(reason).into())
+        }
+        Confirm::Fail(e) => Err(Gate::Failed(e)),
+    }
 }
 
 fn page_host(page: &PageTarget) -> String {

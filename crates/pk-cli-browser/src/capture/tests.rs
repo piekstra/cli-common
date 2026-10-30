@@ -948,95 +948,6 @@ fn page_targets_are_pages_only() {
 }
 
 #[test]
-fn cookies_are_chosen_as_the_browser_would_send_them() {
-    let url = |u: &str| parse_url(u).unwrap();
-    let jar = json!([
-        {"name": "host_only", "value": "h", "domain": "app.example.com", "path": "/"},
-        {"name": "domain", "value": "d", "domain": ".example.com", "path": "/"},
-        {"name": "scoped", "value": "root", "domain": ".example.com", "path": "/"},
-        {"name": "scoped", "value": "api", "domain": ".example.com", "path": "/api"},
-        {"name": "tie", "value": "domain-wide", "domain": ".example.com", "path": "/"},
-        {"name": "tie", "value": "host-only", "domain": "app.example.com", "path": "/"},
-        {"name": "empty", "value": "", "domain": ".example.com", "path": "/"},
-        {"name": "confusable", "value": "c", "domain": ".example.com.evil.example", "path": "/"},
-        {"name": "suffix", "value": "s", "domain": ".ample.com", "path": "/"},
-        {"name": "part_own", "value": "p1", "domain": ".example.com", "path": "/",
-         "partitionKey": {"topLevelSite": "https://example.com", "hasCrossSiteAncestor": false}},
-        {"name": "part_cross", "value": "p2", "domain": ".example.com", "path": "/",
-         "partitionKey": {"topLevelSite": "https://example.com", "hasCrossSiteAncestor": true}},
-        {"name": "part_other", "value": "p3", "domain": ".example.com", "path": "/",
-         "partitionKey": "https://other.example"},
-        {"name": "part_null", "value": "p4", "domain": ".example.com", "path": "/",
-         "partitionKey": null},
-        {"name": "no_path", "value": "np", "domain": ".example.com"},
-        {"name": "bad_domain", "value": "b", "domain": "exa mple.com", "path": "/"}
-    ]);
-    let cases: &[(&str, &str, Option<&str>)] = &[
-        ("https://app.example.com/", "host_only", Some("h")),
-        ("https://www.example.com/", "host_only", None),
-        ("https://sub.app.example.com/", "host_only", None),
-        ("https://example.com/", "domain", Some("d")),
-        ("https://deep.app.example.com/x", "domain", Some("d")),
-        ("https://example.org/", "domain", None),
-        ("https://notexample.com/", "domain", None),
-        // The longest matching path wins; a path only matches on a boundary.
-        ("https://app.example.com/api/v1", "scoped", Some("api")),
-        ("https://app.example.com/api", "scoped", Some("api")),
-        ("https://app.example.com/apiary", "scoped", Some("root")),
-        ("https://app.example.com/", "scoped", Some("root")),
-        // Same path: the host-only cookie is the more specific.
-        ("https://app.example.com/", "tie", Some("host-only")),
-        ("https://www.example.com/", "tie", Some("domain-wide")),
-        ("https://app.example.com/", "empty", None),
-        ("https://app.example.com/", "confusable", None),
-        ("https://app.example.com/", "suffix", None),
-        ("https://app.example.com/", "part_own", Some("p1")),
-        ("https://app.example.com/", "part_cross", None),
-        ("https://app.example.com/", "part_other", None),
-        ("https://app.example.com/", "part_null", Some("p4")),
-        ("https://app.example.com/x", "no_path", Some("np")),
-        ("https://app.example.com/", "bad_domain", None),
-        ("https://app.example.com/", "missing", None),
-    ];
-    for (u, name, want) in cases {
-        assert_eq!(
-            pick_cookie(&jar, &url(u), name).as_deref(),
-            *want,
-            "{u} {name}"
-        );
-    }
-    // A Secure cookie is never chosen for a plain-http URL.
-    let secure =
-        json!([{"name": "s", "value": "v", "domain": "a.example", "path": "/", "secure": true}]);
-    assert_eq!(pick_cookie(&secure, &url("http://a.example/"), "s"), None);
-    assert_eq!(
-        pick_cookie(&secure, &url("https://a.example/"), "s").as_deref(),
-        Some("v")
-    );
-    assert_eq!(
-        pick_cookie(&Value::Null, &url("https://a.example/"), "s"),
-        None
-    );
-}
-
-#[test]
-fn path_matching_follows_rfc_6265() {
-    let cases: &[(&str, &str, bool)] = &[
-        ("/", "/", true),
-        ("/a", "/", true),
-        ("/a/b", "/a", true),
-        ("/a/b", "/a/", true),
-        ("/a", "/a", true),
-        ("/ab", "/a", false),
-        ("/", "/a", false),
-        ("/b", "/a", false),
-    ];
-    for (request, cookie, want) in cases {
-        assert_eq!(path_matches(request, cookie), *want, "{request} {cookie}");
-    }
-}
-
-#[test]
 fn status_lines_and_durations_read_naturally() {
     assert_eq!(duration_words(Duration::from_secs(600)), "10 minutes");
     assert_eq!(duration_words(Duration::from_secs(60)), "1 minute");
@@ -1990,4 +1901,144 @@ fn captures_and_what_they_hand_over_can_cross_threads() {
     cloneable::<Capture>();
     shareable::<Captured>();
     shareable::<Confirm>();
+}
+
+// ---- The gates, without a browser ---------------------------------------
+
+/// What a gate stopped the capture for; `None` when it passed.
+fn gate_blocked<T>(result: Result<T, Gate>) -> Option<Blocked> {
+    match result {
+        Ok(_) => None,
+        Err(Gate::Wait(blocked)) => blocked,
+        Err(Gate::Canceled) => panic!("the gate was canceled"),
+        Err(Gate::Failed(e)) => panic!("the gate failed: {e}"),
+    }
+}
+
+fn sample_request() -> CapturedRequest {
+    CapturedRequest::new(
+        "POST",
+        &parse_url(GRAPHQL).unwrap(),
+        &serde_json::Map::new(),
+    )
+}
+
+fn candidate(request: Option<CapturedRequest>) -> Captured {
+    Captured {
+        label: "Example".into(),
+        host: "www.example.com".into(),
+        value: None,
+        cookies: Vec::new(),
+        jar: None,
+        request,
+        request_log: None,
+        user_agent: None,
+    }
+}
+
+#[test]
+fn the_request_gate_waits_only_for_a_required_request() {
+    let required = jar_capture().request(GRAPHQL);
+    let mut w = Waiting::new(&required);
+    assert_eq!(
+        gate_blocked(request_gate(&w)),
+        Some(Blocked::Request("www.example.com/bff/graphql".into()))
+    );
+    w.seen = Some(sample_request());
+    assert_eq!(gate_blocked(request_gate(&w)), None);
+    let optional = jar_capture().optional_request(GRAPHQL, Duration::from_secs(5));
+    assert_eq!(gate_blocked(request_gate(&Waiting::new(&optional))), None);
+    assert_eq!(
+        gate_blocked(request_gate(&Waiting::new(&jar_capture()))),
+        None
+    );
+}
+
+#[test]
+fn the_hold_gate_holds_for_its_window_and_lets_go_at_the_deadline() {
+    let capture = jar_capture().request_log("example.com", Duration::from_secs(10));
+    let t0 = Instant::now();
+    let mut ua = None;
+    let mut notes = Vec::new();
+    let mut w = Waiting::new(&capture);
+    for (after, want) in [
+        (0, Some(Blocked::Holding)),
+        (5, Some(Blocked::Holding)),
+        (10, None),
+    ] {
+        let state = PollState {
+            cookies: None,
+            user_agent: &mut ua,
+            now: t0 + Duration::from_secs(after),
+            final_round: false,
+        };
+        assert_eq!(
+            gate_blocked(hold_gate(&mut w, &state, &mut notes)),
+            want,
+            "{after}s"
+        );
+    }
+    assert_eq!(w.hold_since, Some(t0));
+    assert_eq!(notes.len(), 1, "one status line when the hold starts");
+
+    // The deadline's final round ends a hold at once.
+    let mut w = Waiting::new(&capture);
+    let state = PollState {
+        cookies: None,
+        user_agent: &mut ua,
+        now: t0,
+        final_round: true,
+    };
+    assert_eq!(gate_blocked(hold_gate(&mut w, &state, &mut notes)), None);
+
+    // An optional request already seen leaves nothing to hold for.
+    let optional = jar_capture().optional_request(GRAPHQL, Duration::from_secs(60));
+    let mut w = Waiting::new(&optional);
+    w.seen = Some(sample_request());
+    assert_eq!(gate_blocked(hold_gate(&mut w, &state, &mut notes)), None);
+    assert_eq!(w.hold_since, None);
+
+    // A window too long for the clock holds until the final round.
+    let forever = jar_capture().optional_request(GRAPHQL, Duration::MAX);
+    let mut w = Waiting::new(&forever);
+    let state = PollState {
+        cookies: None,
+        user_agent: &mut ua,
+        now: t0,
+        final_round: false,
+    };
+    assert_eq!(
+        gate_blocked(hold_gate(&mut w, &state, &mut notes)),
+        Some(Blocked::Holding)
+    );
+}
+
+#[test]
+fn the_confirm_gate_keeps_the_request_for_the_next_poll_on_not_yet() {
+    let (calls, hook) = counting_hook(1);
+    let capture = jar_capture().request(GRAPHQL).confirm(hook);
+    let mut w = Waiting::new(&capture);
+    assert_eq!(
+        gate_blocked(confirm_gate(&mut w, candidate(Some(sample_request())))),
+        Some(Blocked::Unconfirmed("GET /me answered 401 (call 1)".into()))
+    );
+    let kept = w.seen.take();
+    assert!(kept.is_some(), "the request is kept for the next poll");
+    let Ok(captured) = confirm_gate(&mut w, candidate(kept)) else {
+        panic!("the second answer is Ready");
+    };
+    assert!(captured.request().is_some());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    // Without a hook the candidate passes; a Fail ends the wait.
+    let mut w = Waiting::new(&capture);
+    let plain = jar_capture();
+    let mut plain_w = Waiting::new(&plain);
+    assert!(confirm_gate(&mut plain_w, candidate(None)).is_ok());
+    let failing = jar_capture().confirm(|_| Confirm::Fail(CliError::Other("refused".into())));
+    w.capture = &failing;
+    assert!(matches!(
+        confirm_gate(&mut w, candidate(None)),
+        Err(Gate::Failed(CliError::Other(m))) if m == "refused"
+    ));
 }
