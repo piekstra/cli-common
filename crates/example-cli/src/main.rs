@@ -18,7 +18,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use pk_cli_auth::{AuthStatus, LoginArgs, LogoutArgs, SetCredentialArgs};
-use pk_cli_browser::{BrowserArgs, Capture, HostRule, Launch};
+use pk_cli_browser::{BrowserArgs, Capture, Confirm, HostRule, Launch};
 use pk_cli_config::ConfigStore;
 use pk_cli_core::info::{AuthInfo, CliInfo};
 use pk_cli_core::{confirm, output, resolve, CliError, CommonArgs};
@@ -105,11 +105,18 @@ struct LoginCmd {
 
 /// The demo portal's web session: its single-page app keeps it in
 /// `localStorage` once the owner is signed in. A real CLI names its
-/// provider's app host and storage key (DESIGN.md §2.2).
+/// provider's app host and storage key (DESIGN.md §2.2), and confirms the
+/// candidate with one provider read before the tab closes, answering
+/// `NotYet` on an auth error; the demo portal has no read, so it checks the
+/// session's shape.
 fn browser_session() -> Result<Capture, CliError> {
     Ok(Capture::new("Example", HostRule::exact("app.example.com")?)
         .expression("localStorage.getItem('session') || null")
-        .hint("password and any code"))
+        .hint("password and any code")
+        .confirm(|candidate| match candidate.value() {
+            Some(session) if session.expose().contains("access_token") => Confirm::Ready,
+            _ => Confirm::NotYet("the stored session holds no access token yet".into()),
+        }))
 }
 
 #[derive(Subcommand, Debug)]
@@ -436,8 +443,9 @@ fn auth(
                 )?
                 .into_value()
                 .ok_or_else(|| CliError::Other("the capture read no session".into()))?;
-                // A real CLI verifies the session with one provider read
-                // before storing it, as one JSON item.
+                // `browser_session`'s confirm hook is where a real CLI
+                // verifies the session with one provider read; it stores
+                // it as one JSON item.
                 creds.set(&user, &session)?;
                 eprintln!("session captured from the browser and stored in the OS keychain");
                 return Ok(());

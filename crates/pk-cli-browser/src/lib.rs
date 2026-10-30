@@ -9,8 +9,9 @@
 //! profile and a DevTools debug port, waits while the owner signs in
 //! (password and MFA happen on the provider's page, never through the CLI),
 //! reads the session the web app keeps (a `localStorage` entry, a cookie,
-//! `HttpOnly` cookies included) over the Chrome DevTools Protocol, closes the
-//! tab at once, kills Chrome and deletes the profile.
+//! `HttpOnly` cookies included, or a domain's whole cookie jar) over the
+//! Chrome DevTools Protocol, closes the tab at once, kills Chrome and
+//! deletes the profile.
 //!
 //! ```no_run
 //! use pk_cli_browser::{Capture, HostRule, Launch, DEFAULT_TIMEOUT};
@@ -31,16 +32,55 @@
 //! # }
 //! ```
 //!
+//! A site whose cookies exist before sign-in finishes, so that no cookie or
+//! stored value proves the owner is signed in, reads its whole jar and lets
+//! the CLI confirm it with one provider read before the tab closes:
+//!
+//! ```no_run
+//! use pk_cli_browser::{Capture, Captured, Confirm, HostRule, Launch, DEFAULT_TIMEOUT};
+//! # fn me_with(_cookie_header: &str) -> Result<(), pk_cli_core::CliError> { Ok(()) }
+//! # fn main() -> Result<(), pk_cli_core::CliError> {
+//! use pk_cli_core::CliError;
+//!
+//! let capture = Capture::new("Example", HostRule::exact("www.example.com")?)
+//!     .cookie("https://www.example.com/", "sid") // set for visitors too
+//!     .cookie_jar("example.com")
+//!     .confirm(|candidate: &Captured| {
+//!         let header = candidate.cookie_header().expect("the capture reads a jar");
+//!         // The CLI's own request, bounded by its own timeout.
+//!         match me_with(header.expose()) {
+//!             Ok(()) => Confirm::Ready,
+//!             Err(CliError::Auth(_)) => Confirm::NotYet("GET /me answered 401".into()),
+//!             Err(e) => Confirm::Fail(e),
+//!         }
+//!     });
+//! let captured = pk_cli_browser::capture(
+//!     Launch::new("example-cli").url("https://www.example.com/login"),
+//!     &capture,
+//!     DEFAULT_TIMEOUT,
+//! )?;
+//! let session = captured.cookie_header().expect("the capture reads a jar");
+//! # drop(session);
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Why a plain Chrome
 //!
 //! Chrome launched normally, with only a debug port and a scratch profile
 //! and none of the flags a WebDriver or Playwright launch adds, reports
 //! `navigator.webdriver == false` and looks like an ordinary browser to the
 //! bot checks; the owner is the one who clicks. The crate never drives a
-//! page. It lists targets and reads cookies at the browser level, which no
-//! page can observe, and evaluates the capture's expression only in pages on
-//! the capture's own hosts, never on the login host where the bot checks run.
-//! It never enables a CDP domain in a page.
+//! page and never sends a request of its own. It lists targets and reads
+//! cookies and the user agent at the browser level, which no page can
+//! observe, and evaluates the capture's expression only in pages on the
+//! capture's own hosts, never on the login host where the bot checks run.
+//! It enables one CDP domain in a page, `Network`, and only for a capture
+//! that watches requests ([`Capture::request`],
+//! [`Capture::optional_request`], [`Capture::request_log`]): only in pages
+//! on that capture's hosts, from a connection that detaches as soon as a
+//! page leaves them, and never with request bodies. A capture that watches
+//! nothing leaves every page untouched but for the expression.
 //!
 //! # Trust boundary
 //!
@@ -61,12 +101,21 @@
 //!
 //! # Secrets
 //!
-//! A captured value is a [`pk_cli_secrets::Secret`]: it never prints through
-//! `Debug` or `Display` and is zeroized when dropped. The crate never logs
-//! one, never passes one on a command line, and never writes one to disk
-//! (Chrome's own profile, deleted at the end, is the only place a session
-//! touches the filesystem). Status lines and errors name hosts, labels and
-//! cookie names only.
+//! A captured value is a [`pk_cli_secrets::Secret`]: an expression's answer,
+//! a cookie, each cookie of a jar and the header built from it, and each
+//! header value of a watched request. It never prints through `Debug` or
+//! `Display` and is zeroized when dropped. A request's URL comes back
+//! without its query, and a request log keeps no header, body or query, so
+//! neither carries a token. The crate never logs a value, never passes one
+//! on a command line, and never writes one to disk (Chrome's own profile,
+//! deleted at the end, is the only place a session touches the
+//! filesystem). Status lines and errors name hosts, labels, URLs without
+//! queries and cookie names only; a [`Confirm::NotYet`] reason is shown
+//! too, so a CLI writes it the same way.
+//!
+//! The [`Capture::confirm`] hook is the CLI's code, run in the CLI's
+//! process with the candidate session: the request it makes is the CLI's
+//! own, as any request the CLI makes after the capture is.
 
 mod capture;
 mod cdp;
@@ -74,12 +123,16 @@ mod chrome;
 mod error;
 mod host;
 mod interrupt;
+mod jar;
+mod watch;
 
-pub use capture::{capture, Capture, Captured, DEFAULT_TIMEOUT};
+pub use capture::{capture, Capture, Captured, Confirm, DEFAULT_TIMEOUT};
 pub use chrome::{Browser, Launch};
 pub use error::BrowserError;
 pub use host::HostRule;
 pub use interrupt::cancel;
+pub use jar::JarCookie;
+pub use watch::{CapturedRequest, LoggedRequest, RequestKind};
 
 /// The family's `auth login --browser` flag. Flatten it into the CLI's login
 /// arguments beside `pk_cli_auth::LoginArgs`, so every portal CLI spells and
