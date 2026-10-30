@@ -73,7 +73,7 @@ release:
 
 install: SIGN_TARGET = $${CARGO_INSTALL_ROOT:-$$HOME/.cargo}/bin/$(BIN)
 install:
-	$(CARGO) install --path . --force
+	$(CARGO) install --path . --force --locked
 	@$(SIGN)
 
 dev: SIGN_TARGET = target/debug/$(BIN)
@@ -92,6 +92,11 @@ Verify with `codesign -dv $(which <bin>)`: you want the stable
 `pk-cli-codesign` signature, not `Signature=adhoc`. Changing the identity
 invalidates the previous grant, so expect exactly one more prompt after
 adopting this.
+
+`install` passes `--locked`. Without it `cargo install` ignores Cargo.lock and
+resolves dependencies afresh, so the installed binary is built from newer
+crates than the ones the repo tests and audits. With it, the install uses the
+reviewed lockfile and fails when that lockfile is out of date.
 
 ## Self-view (desktop apps)
 
