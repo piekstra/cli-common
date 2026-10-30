@@ -19,6 +19,7 @@ status here.
 - [ ] Mutations prompt unless `--force`; exit 6 when non-interactive — decided **before** any keychain or network work (`pk_cli_core::confirm`)
 - [ ] Mutations report success from a read-back (or the write's echo only when it carries the values), never from the write's status code
 - [ ] A portal the CLI cannot sign in to by itself (bot check, OAuth single-page app) offers `auth login --browser` through `pk-cli-browser` (DESIGN.md §2.2), reports `method: "browser-session"`, and verifies the captured session before storing it
+- [ ] `make install` uses `--locked`, so the installed binary is built from the reviewed Cargo.lock
 
 ## Family status
 
