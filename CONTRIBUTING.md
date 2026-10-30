@@ -15,7 +15,7 @@ same behavior, it belongs here, not copied into each repo.
 ## Local checks (must pass)
 
 ```sh
-make verify   # format check, clippy -D warnings, tests: CI's `check` job
+make verify   # format check, clippy -D warnings, tests, feature checks, scripts: CI's `check` job
 make fmt      # apply formatting
 ```
 

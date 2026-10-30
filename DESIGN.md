@@ -555,8 +555,28 @@ narrow capability instead: one request's method, URL and headers, or a log
 of endpoints with no values in it. A CLI that needs something else from the
 window adds another such capability here, not a handle.
 
+**Testing the CLI's side.** Only the crate reads a `Captured` out of a
+browser, so a CLI's unit tests build one by hand through the crate's
+`test-util` feature, declared under `[dev-dependencies]` only (`pk-cli-browser
+= { git = "…", tag = "vX.Y.Z", features = ["test-util"] }`, the same tag as
+the dependency), which keeps it out of the binary the CLI ships.
+`Captured::for_test(label, host)` starts a builder whose steps (`value`,
+`cookie`, `jar`, `request`, `request_log`, `user_agent`) set what each getter
+answers, ended by `build()`; `JarCookie::for_test(name, value, domain,
+host_only, path)`, `CapturedRequest::for_test(method, url, headers)` and
+`LoggedRequest::for_test(method, host, path, kind, status, mime)` build the
+parts. Values go in as plain strings and come back as `Secret`s, normalized
+as read ones are (method and host case, a cookie domain's leading dot, the
+query cut), and an input no capture could hand over (a host that is not a
+host name, a watched request off `https`) panics. The CLI runs its confirm
+hook, and its mapping of a capture onto its own session, on these known
+values. Without the feature nothing of it is compiled, so the crate's API
+and behaviour are unchanged; `make test-util-check` builds, lints and tests
+the crate both ways.
+
 The crate needs Rust 1.85 (tungstenite 0.30). `example-cli auth login
---browser` shows the flag check and the capture. Its demo portal has no read
+--browser` shows the flag check and the capture, and its unit tests run the
+confirm hook on a built `Captured`. Its demo portal has no read
 to verify a session against, and its `auth status` and `info` stay those of
 its password login, so the verification, the `browser-session` method and
 the `--browser` hint above are what a real CLI adds.

@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+Additive: without the new feature nothing changes, in the API or in
+behaviour.
+
+- **`pk-cli-browser`: a `test-util` feature, so a CLI's unit tests can
+  build what a capture hands over** (DESIGN.md §2.2). Only the crate could
+  construct `Captured`, `JarCookie`, `CapturedRequest` and `LoggedRequest`,
+  so a CLI could not run its confirm hook, or its mapping of a capture onto
+  its session, on real values. With the feature on, for a CLI's
+  `[dev-dependencies]` only (`pk-cli-browser = { …, features =
+  ["test-util"] }`, the same tag as the dependency):
+  - `Captured::for_test(label, host)` starts a `CapturedBuilder` whose steps
+    `value`, `cookie`, `jar`, `request`, `request_log` and `user_agent` set
+    what each getter answers (a later step replaces an earlier one; `cookie`
+    adds one by name), ended by `build()`. `cookie_header()` is built from
+    the jar as for a read one.
+  - `JarCookie::for_test(name, value, domain, host_only, path)`,
+    `CapturedRequest::for_test(method, url, headers)` and
+    `LoggedRequest::for_test(method, host, path, kind, status, mime)` build
+    the parts.
+  - Values go in as plain strings and come back as `Secret`s, normalized as
+    read ones are: the method uppercased, hosts and a cookie domain
+    lowercased (its leading dot dropped), header names lowercased and
+    sorted, the query and fragment cut. An input no capture could hand over
+    (a host that is not a host name, a watched request off `https` or off
+    the default port, a logged path without its leading `/`) panics.
+- `example-cli`'s confirm hook is a named function, and its unit tests run
+  it on a built `Captured` through the feature as a dev-dependency.
+- `make test-util-check` (in `make verify` and CI) lints and tests
+  `pk-cli-browser` with the feature off and on, on the crate alone, since
+  the workspace runs build it with the feature on for example-cli's tests.
+
 ## v0.10.0 — 2026-10-30
 
 Additive: every v0.9.0 call compiles and behaves as before; a capture that

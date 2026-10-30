@@ -28,6 +28,8 @@ use serde_json::{json, Map, Value};
 
 use crate::capture::PageTarget;
 use crate::cdp::{Cdp, CdpError, Transport};
+#[cfg(feature = "test-util")]
+use crate::host::normalize_host;
 use crate::host::{parse_url, HostRule, UrlParts};
 use crate::jar::path_matches;
 
@@ -88,6 +90,31 @@ impl CapturedRequest {
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, value)| value)
+    }
+}
+
+#[cfg(feature = "test-util")]
+impl CapturedRequest {
+    /// A watched request as a capture hands it over, for a CLI's unit tests
+    /// (the `test-util` feature, a dev-dependency only; see the crate docs).
+    /// It goes through the constructor a request the crate saw does: the
+    /// method uppercased, `url` cut to `https://<host><path>`, header names
+    /// lowercased and sorted, and each value wrapped in a [`Secret`]. Of two
+    /// headers spelled exactly alike, the later is kept.
+    ///
+    /// # Panics
+    ///
+    /// If `url` is not an `https` URL on the default port, the only kind a
+    /// capture watches for.
+    pub fn for_test(method: &str, url: &str, headers: &[(&str, &str)]) -> Self {
+        let Some(parts) = parse_url(url).filter(UrlParts::is_https_default_port) else {
+            panic!("CapturedRequest::for_test: the URL is not https on the default port");
+        };
+        let headers: Map<String, Value> = headers
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), Value::from(*value)))
+            .collect();
+        CapturedRequest::new(method, &parts, &headers)
     }
 }
 
@@ -174,6 +201,44 @@ impl LoggedRequest {
     /// The first response's content type, if one arrived.
     pub fn mime(&self) -> Option<&str> {
         self.mime.as_deref()
+    }
+}
+
+#[cfg(feature = "test-util")]
+impl LoggedRequest {
+    /// A request-log entry as a capture hands it over, for a CLI's unit
+    /// tests (the `test-util` feature, a dev-dependency only; see the crate
+    /// docs). Normalized as a logged one is: the method uppercased, the host
+    /// lowercased, and the path cut at its query or fragment. `status` and
+    /// `mime` are the first response's, `None` for a request whose response
+    /// never came.
+    ///
+    /// # Panics
+    ///
+    /// If `host` is not a host name, or `path` does not start with `/`.
+    pub fn for_test(
+        method: &str,
+        host: &str,
+        path: &str,
+        kind: RequestKind,
+        status: Option<u16>,
+        mime: Option<&str>,
+    ) -> Self {
+        let Some(normalized) = normalize_host(host) else {
+            panic!("LoggedRequest::for_test: `{host}` is not a host name");
+        };
+        assert!(
+            path.starts_with('/'),
+            "LoggedRequest::for_test: the path `{path}` does not start with `/`"
+        );
+        LoggedRequest {
+            method: method.to_ascii_uppercase(),
+            host: normalized,
+            path: path.split(['?', '#']).next().unwrap_or("/").to_string(),
+            kind,
+            status,
+            mime: mime.map(str::to_string),
+        }
     }
 }
 
@@ -649,6 +714,64 @@ mod tests {
                 "GET app.example.com/api/x/ XHR Some(200) Some(\"application/json\")",
                 "POST app.example.com/api/x/ Fetch None None",
                 "GET www.example.com/home Document Some(200) None",
+            ]
+        );
+    }
+
+    /// A built request and log entry are the ones the watch makes of the
+    /// same request.
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn built_requests_are_the_ones_the_watch_makes() {
+        let seen = CapturedRequest::new(
+            "post",
+            &url("https://App.Example.com/bff/graphql?op=dummy-query"),
+            json!({"X-CSRF-Token": "dummy-csrf", "Accept": "*/*"})
+                .as_object()
+                .unwrap(),
+        );
+        let built = CapturedRequest::for_test(
+            "post",
+            "https://App.Example.com/bff/graphql?op=dummy-query",
+            &[("X-CSRF-Token", "dummy-csrf"), ("Accept", "*/*")],
+        );
+        let parts = |r: &CapturedRequest| {
+            let headers: Vec<(String, String)> = r
+                .headers()
+                .map(|(n, v)| (n.to_string(), v.expose().to_string()))
+                .collect();
+            (r.method().to_string(), r.url().to_string(), headers)
+        };
+        assert_eq!(parts(&seen), parts(&built));
+
+        let mut log = RequestLog::new(HostRule::domain("example.com").unwrap());
+        log.observe(
+            "1",
+            "get",
+            &url("https://API.example.com/v1/x?page=2#top"),
+            "Fetch",
+        );
+        log.respond("1", Some(200), Some("application/json".into()));
+        log.observe("2", "post", &url("https://example.com/v1/y"), "XHR");
+        assert_eq!(
+            log.entries(),
+            [
+                LoggedRequest::for_test(
+                    "get",
+                    "API.example.com",
+                    "/v1/x?page=2#top",
+                    RequestKind::Fetch,
+                    Some(200),
+                    Some("application/json"),
+                ),
+                LoggedRequest::for_test(
+                    "post",
+                    "example.com",
+                    "/v1/y",
+                    RequestKind::Xhr,
+                    None,
+                    None
+                ),
             ]
         );
     }

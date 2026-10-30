@@ -1674,5 +1674,10 @@ fn timed_out(
     ))
 }
 
+#[cfg(feature = "test-util")]
+mod test_util;
+#[cfg(feature = "test-util")]
+pub use test_util::CapturedBuilder;
+
 #[cfg(test)]
 mod tests;

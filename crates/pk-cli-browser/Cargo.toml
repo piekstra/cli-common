@@ -18,6 +18,15 @@ serde_json = { workspace = true }
 tungstenite = { workspace = true }
 ctrlc = { workspace = true }
 
+[features]
+# Constructors for what a capture hands over (`Captured::for_test` and its
+# builder, `JarCookie::for_test`, `CapturedRequest::for_test`,
+# `LoggedRequest::for_test`), so a CLI's unit tests can run its confirm hook
+# and its mappings on known values. For a CLI's `[dev-dependencies]` only:
+# off, nothing of it is compiled, and the crate's API and behaviour are
+# unchanged.
+test-util = []
+
 # The second Ctrl-C force-kills a live Chrome by pid from the handler thread.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
