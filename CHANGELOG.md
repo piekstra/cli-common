@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.11.0 — 2026-10-30
 
 Additive: without the new feature nothing changes, in the API or in
 behaviour.
