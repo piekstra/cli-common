@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.10.0 — 2026-10-30
 
 Additive: every v0.9.0 call compiles and behaves as before; a capture that
 asks for none of the new reads makes the same DevTools calls it did.
