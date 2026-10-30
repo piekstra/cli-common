@@ -18,7 +18,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use pk_cli_auth::{AuthStatus, LoginArgs, LogoutArgs, SetCredentialArgs};
-use pk_cli_browser::{BrowserArgs, Capture, Confirm, HostRule, Launch};
+use pk_cli_browser::{BrowserArgs, Capture, Captured, Confirm, HostRule, Launch};
 use pk_cli_config::ConfigStore;
 use pk_cli_core::info::{AuthInfo, CliInfo};
 use pk_cli_core::{confirm, output, resolve, CliError, CommonArgs};
@@ -105,18 +105,24 @@ struct LoginCmd {
 
 /// The demo portal's web session: its single-page app keeps it in
 /// `localStorage` once the owner is signed in. A real CLI names its
-/// provider's app host and storage key (DESIGN.md §2.2), and confirms the
-/// candidate with one provider read before the tab closes, answering
-/// `NotYet` on an auth error; the demo portal has no read, so it checks the
-/// session's shape.
+/// provider's app host and storage key (DESIGN.md §2.2).
 fn browser_session() -> Result<Capture, CliError> {
     Ok(Capture::new("Example", HostRule::exact("app.example.com")?)
         .expression("localStorage.getItem('session') || null")
         .hint("password and any code")
-        .confirm(|candidate| match candidate.value() {
-            Some(session) if session.expose().contains("access_token") => Confirm::Ready,
-            _ => Confirm::NotYet("the stored session holds no access token yet".into()),
-        }))
+        .confirm(confirm_session))
+}
+
+/// The capture's confirm hook. A real CLI confirms the candidate with one
+/// provider read before the tab closes, answering `NotYet` on an auth
+/// error; the demo portal has no read, so it checks the session's shape. A
+/// named function rather than a closure, so the unit tests below run it on
+/// a `Captured` built by hand.
+fn confirm_session(candidate: &Captured) -> Confirm {
+    match candidate.value() {
+        Some(session) if session.expose().contains("access_token") => Confirm::Ready,
+        _ => Confirm::NotYet("the stored session holds no access token yet".into()),
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -700,6 +706,45 @@ fn config(cli: &Cli, cmd: &ConfigCmd, store: &ConfigStore) -> Result<(), CliErro
                 }
             }
             store.save(&cfg)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The capture `pk-cli-browser` checks before Chrome starts, checked
+    /// offline.
+    #[test]
+    fn the_browser_capture_is_well_formed() {
+        let capture = browser_session().unwrap();
+        capture.validate().unwrap();
+        assert_eq!(capture.label(), "Example");
+    }
+
+    /// The confirm hook on a `Captured` built by hand, through
+    /// `pk-cli-browser`'s `test-util` feature (a dev-dependency in
+    /// Cargo.toml, so the binary is built without it).
+    #[test]
+    fn the_confirm_hook_waits_for_an_access_token() {
+        let candidate = |session: Option<&str>| {
+            let built = Captured::for_test("Example", "app.example.com");
+            match session {
+                Some(session) => built.value(session),
+                None => built,
+            }
+            .build()
+        };
+        let signed_in = candidate(Some(r#"{"access_token":"dummy-access"}"#));
+        assert!(matches!(confirm_session(&signed_in), Confirm::Ready));
+        for session in [Some(r#"{"refresh_token":"dummy-refresh"}"#), None] {
+            match confirm_session(&candidate(session)) {
+                Confirm::NotYet(reason) => {
+                    assert_eq!(reason, "the stored session holds no access token yet")
+                }
+                other => panic!("{session:?} must keep the wait going: {other:?}"),
+            }
         }
     }
 }

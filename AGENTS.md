@@ -105,10 +105,11 @@ README.md, "Self-view for family desktop apps". Its macOS effects live in
 
 ## Workflow
 
-- `make verify` (format check, clippy `-D warnings`, tests, and
-  `scripts-check`: shellcheck plus the self-view tests; the `Makefile`
-  defines them and CI runs the same targets) must be clean before
-  committing.
+- `make verify` (format check, clippy `-D warnings`, tests,
+  `test-util-check`: `pk-cli-browser` linted and tested with its
+  `test-util` feature off and on, and `scripts-check`: shellcheck plus the
+  self-view tests; the `Makefile` defines them and CI runs the same
+  targets) must be clean before committing.
 - `example-cli` must keep compiling and demonstrating the full surface — it is
   the template new CLIs copy.
 - Releases: bump `workspace.package.version`, update `CHANGELOG.md`, tag

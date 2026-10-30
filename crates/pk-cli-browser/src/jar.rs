@@ -64,6 +64,38 @@ impl JarCookie {
     }
 }
 
+#[cfg(feature = "test-util")]
+impl JarCookie {
+    /// A jar cookie as a capture hands it over, for a CLI's unit tests (the
+    /// `test-util` feature, a dev-dependency only; see the crate docs).
+    /// `value` is wrapped in a [`Secret`], as a read one is, and `domain` is
+    /// normalized as a read one is: lowercase, without the leading dot a
+    /// domain cookie is listed with, or a trailing dot. `host_only` and
+    /// `path` are kept as given.
+    ///
+    /// # Panics
+    ///
+    /// If `domain` is not a host name, which no cookie the crate reads has.
+    pub fn for_test(
+        name: impl Into<String>,
+        value: impl Into<String>,
+        domain: &str,
+        host_only: bool,
+        path: impl Into<String>,
+    ) -> Self {
+        let Some(normalized) = normalize_host(domain.trim_start_matches('.')) else {
+            panic!("JarCookie::for_test: the domain `{domain}` is not a host name");
+        };
+        JarCookie {
+            name: name.into(),
+            value: Secret::new(value),
+            domain: normalized,
+            host_only,
+            path: path.into(),
+        }
+    }
+}
+
 /// Whether a cookie scoped to `domain` reaches the host `jar` or a host
 /// under it: it sits on one of those hosts, or it is a domain cookie on a
 /// parent of `jar`. A parent that is a bare suffix (`com`) never holds a
@@ -353,6 +385,44 @@ mod tests {
         let debug = format!("{jar:?} {:?}", cookie_header(&jar));
         assert!(!debug.contains("dummy-secret"), "{debug}");
         assert_eq!(jar[0].value().expose(), "dummy-secret");
+    }
+
+    /// A built cookie is the one the jar reads from the same listing.
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn a_built_cookie_is_the_one_a_read_listing_gives() {
+        let all = json!([
+            {"name": "sid", "value": "dummy-sid", "domain": ".Example.COM", "path": "/api"},
+            {"name": "own", "value": "dummy-own", "domain": "www.example.com.", "path": "/"}
+        ]);
+        let read = jar_cookies(&all, &HostRule::domain("example.com").unwrap());
+        let built = [
+            JarCookie::for_test("sid", "dummy-sid", ".Example.COM", false, "/api"),
+            JarCookie::for_test("own", "dummy-own", "www.example.com.", true, "/"),
+        ];
+        assert_eq!(read.len(), built.len());
+        for (r, b) in read.iter().zip(&built) {
+            assert_eq!(
+                (
+                    r.name(),
+                    r.value().expose(),
+                    r.domain(),
+                    r.host_only(),
+                    r.path()
+                ),
+                (
+                    b.name(),
+                    b.value().expose(),
+                    b.domain(),
+                    b.host_only(),
+                    b.path()
+                )
+            );
+        }
+        assert_eq!(
+            cookie_header(&read).expose(),
+            cookie_header(&built).expose()
+        );
     }
 
     #[test]

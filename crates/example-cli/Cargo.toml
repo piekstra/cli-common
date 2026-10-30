@@ -30,3 +30,8 @@ clap = { workspace = true }
 clap_complete = "4"
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# The constructors the unit tests build a `Captured` with. A dev-dependency
+# only, so the binary is built without them.
+pk-cli-browser = { workspace = true, features = ["test-util"] }

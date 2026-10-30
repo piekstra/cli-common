@@ -116,6 +116,34 @@
 //! The [`Capture::confirm`] hook is the CLI's code, run in the CLI's
 //! process with the candidate session: the request it makes is the CLI's
 //! own, as any request the CLI makes after the capture is.
+//!
+//! # Testing a CLI's side
+//!
+//! Only the crate reads a [`Captured`] out of a browser, so a CLI's unit
+//! tests build one by hand, through the `test-util` feature:
+//! `Captured::for_test(label, host)` starts a builder whose steps (`value`,
+//! `cookie`, `jar`, `request`, `request_log`, `user_agent`) set what each
+//! getter answers, and `JarCookie::for_test`, `CapturedRequest::for_test`
+//! and `LoggedRequest::for_test` build the parts. Values go in as plain
+//! strings and come back as `Secret`s, normalized as read ones are (method
+//! and host case, a cookie domain's leading dot, the query cut). The CLI
+//! then runs its confirm hook, and its mapping of a capture onto its own
+//! session, on known values.
+//!
+//! The feature is for a CLI's `[dev-dependencies]` only, at the same tag as
+//! the dependency so both name one crate, which keeps the constructors out
+//! of the binary it ships:
+//!
+//! ```toml
+//! [dependencies]
+//! pk-cli-browser = { git = "https://github.com/piekstra/cli-common", tag = "vX.Y.Z" }
+//!
+//! [dev-dependencies]
+//! pk-cli-browser = { git = "https://github.com/piekstra/cli-common", tag = "vX.Y.Z", features = ["test-util"] }
+//! ```
+//!
+//! Without the feature none of it is compiled: the crate's API and
+//! behaviour are exactly those of a build that never had it.
 
 mod capture;
 mod cdp;
@@ -126,6 +154,8 @@ mod interrupt;
 mod jar;
 mod watch;
 
+#[cfg(feature = "test-util")]
+pub use capture::CapturedBuilder;
 pub use capture::{capture, Capture, Captured, Confirm, DEFAULT_TIMEOUT};
 pub use chrome::{Browser, Launch};
 pub use error::BrowserError;
