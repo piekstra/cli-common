@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased
+
+Additive: every v0.9.0 call compiles and behaves as before; a capture that
+asks for none of the new reads makes the same DevTools calls it did.
+
+- **`pk-cli-browser`: the reads `wfr`, `sfi` and `carta` need to drop their
+  embedded Chrome capture** (DESIGN.md §2.2).
+  - **The whole jar.** `Capture::cookie_jar(domain)` reads every cookie the
+    browser would send to `domain` or a host under it (host-only and domain
+    cookies on those hosts, a domain cookie on a parent, partitioned cookies
+    only in their own first-party site), `HttpOnly` included and at every
+    path, matched label for label so `notexample.com` and
+    `example.com.evil.example` never count. The domain must be one the
+    capture's hosts are on; it may be wider than them, so the login host's
+    cookies are read without its page being touched. The capture waits for
+    a non-empty jar. `Captured::jar()` hands over each `JarCookie` (name,
+    `Secret` value, domain, host-only, path) and `Captured::cookie_header()`
+    one `Cookie` header value, longer paths first. A timeout names the
+    jar's cookie names, never their values.
+  - **The CLI's check before the tab closes.** `Capture::confirm(hook)`
+    runs the CLI's own provider read on each poll once everything else is
+    ready, before any tab is closed, and acts on its `Confirm`: `NotYet(reason)`
+    leaves the tab open and asks again next poll (the timeout names the last
+    reason), `Ready` closes the tab and hands the capture over, `Fail(err)`
+    ends the wait as `BrowserError::Handler(err)`, after any capture already
+    read in that poll is handed over. It works in `wait`, `wait_each` and
+    `capture`. The crate only calls the hook; it sends no request itself.
+  - **Watching requests.** `Capture::request(url)` waits for the first
+    request the capture's pages make to an `https` URL on its hosts (that
+    path or one under it, any query) and hands over its method, its URL
+    without the query and the headers the page set, values as `Secret`s
+    (`Captured::request()`, `CapturedRequest`).
+    `Capture::optional_request(url, within)` holds the tab open at most
+    `within` for it once the rest is ready, then goes on without it.
+    `Capture::request_log(domain, during)` logs each page load, XHR and
+    fetch to `domain` once per method, host and path, with the first
+    response's status and content type and no header, body or query
+    (`Captured::request_log()`, `LoggedRequest`, `RequestKind`), holding the
+    tab open `during` once the rest is ready. Watching enables `Network` in
+    the capture's own pages only, never a login host's, from a separate
+    connection that stays open between polls, detaches from a page that
+    leaves those hosts and asks for no request bodies; only requests a
+    document on the capture's hosts made count. A window and the confirm
+    hook come before the read, so the session handed over is the one read
+    in the poll that closes the tab; a capture still in its window at the
+    timeout is read once more rather than lost.
+  - **The user agent.** `Capture::with_user_agent()` reads the browser's
+    `User-Agent` (`Browser.getVersion`, browser-level) into
+    `Captured::user_agent()`, for a session bound to the browser that
+    earned it.
+  - Status lines name a hold (`Example: keeping the tab open up to 25
+    seconds for the page to request www.example.com/bff/graphql before
+    capturing the session.`); durations under a second read in
+    milliseconds. `example-cli`'s browser capture shows a confirm hook.
+
 ## v0.9.0 — 2026-10-29
 
 Additive: no existing function, default or `/v1` shape changes.

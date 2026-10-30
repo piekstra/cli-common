@@ -3,8 +3,12 @@
 //! flattened target sessions (`sessionId`).
 //!
 //! Connections are short-lived (one per poll), so a stuck page or a closed
-//! window costs one poll, never the whole wait.
+//! window costs one poll, never the whole wait. The one exception is the
+//! watch (`watch.rs`), which stays open between polls to read the network
+//! events of the pages it is attached to, and so keeps the events a call
+//! reads past instead of dropping them.
 
+use std::collections::VecDeque;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -18,6 +22,8 @@ use tungstenite::{Message, WebSocket};
 const READ_SLICE: Duration = Duration::from_millis(250);
 /// Bound on the TCP connect and the websocket handshake to the debug port.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Events a connection that keeps them holds before dropping the newest.
+const MAX_QUEUED_EVENTS: usize = 10_000;
 
 /// What a CDP call can fail with. None of these carry a page value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +137,9 @@ pub(crate) struct Cdp<T: Transport> {
     next_id: u64,
     call_timeout: Duration,
     canceled: fn() -> bool,
+    /// Events read past while a call waited for its reply, when the
+    /// connection keeps them ([`Cdp::keeping_events`]).
+    events: Option<VecDeque<Value>>,
 }
 
 impl<T: Transport> Cdp<T> {
@@ -140,7 +149,38 @@ impl<T: Transport> Cdp<T> {
             next_id: 0,
             call_timeout,
             canceled,
+            events: None,
         }
+    }
+
+    /// Keep the events a call reads past, for [`Cdp::next_event`], instead
+    /// of dropping them.
+    pub fn keeping_events(mut self) -> Self {
+        self.events = Some(VecDeque::new());
+        self
+    }
+
+    /// The next event: one a call read past, else the next message on the
+    /// connection. `Ok(None)` when nothing arrived within one read slice,
+    /// or when what arrived is not an event (a late reply to a call that
+    /// timed out).
+    pub fn next_event(&mut self) -> Result<Option<Value>, CdpError> {
+        if let Some(event) = self.events.as_mut().and_then(VecDeque::pop_front) {
+            return Ok(Some(event));
+        }
+        if (self.canceled)() {
+            return Err(CdpError::Canceled);
+        }
+        Ok(self
+            .transport
+            .recv()
+            .map_err(CdpError::Transport)?
+            .and_then(|text| parse_event(&text)))
+    }
+
+    #[cfg(test)]
+    pub fn transport(&self) -> &T {
+        &self.transport
     }
 
     /// Send `method` and read past events and other replies to its result.
@@ -166,7 +206,13 @@ impl<T: Transport> Cdp<T> {
                     Reply::Error { code, message } => {
                         return Err(CdpError::Protocol { code, message })
                     }
-                    Reply::Other => {}
+                    Reply::Other => {
+                        if let Some(queue) = self.events.as_mut() {
+                            if queue.len() < MAX_QUEUED_EVENTS {
+                                queue.extend(parse_event(&text));
+                            }
+                        }
+                    }
                 }
             }
             if Instant::now() >= deadline {
@@ -197,6 +243,14 @@ pub(crate) enum Reply {
     Error { code: i64, message: String },
     /// An event, another call's reply, or something unparseable: skip it.
     Other,
+}
+
+/// An event (a message with a `method` and no `id`), parsed; `None` for a
+/// reply or anything unparseable.
+pub(crate) fn parse_event(text: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .filter(|v| v.get("method").is_some() && v.get("id").is_none())
 }
 
 pub(crate) fn parse_reply(text: &str, id: u64) -> Reply {
@@ -386,6 +440,55 @@ mod tests {
             cdp.call("Target.getTargets", Value::Null, None),
             Err(CdpError::Canceled)
         );
+    }
+
+    #[test]
+    fn only_events_are_parsed_as_events() {
+        assert_eq!(
+            parse_event(r#"{"method":"Network.requestWillBeSent","sessionId":"S","params":{}}"#),
+            Some(json!({"method": "Network.requestWillBeSent", "sessionId": "S", "params": {}}))
+        );
+        for text in [
+            r#"{"id":1,"result":{}}"#,
+            r#"{"id":1,"method":"x"}"#,
+            "{}",
+            "junk",
+            "",
+        ] {
+            assert_eq!(parse_event(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_connection_that_keeps_events_hands_them_over_in_order() {
+        let incoming = vec![
+            Ok(Some(r#"{"method":"A"}"#.into())),
+            Ok(Some(r#"{"id":5,"result":{}}"#.into())),
+            Ok(Some(r#"{"method":"B"}"#.into())),
+            Ok(Some(r#"{"id":1,"result":{}}"#.into())),
+            Ok(Some(r#"{"method":"C"}"#.into())),
+            Ok(Some(r#"{"id":9,"result":{}}"#.into())),
+        ];
+        let mut cdp =
+            Cdp::new(script(incoming.clone()), Duration::from_secs(5), never).keeping_events();
+        cdp.call("Target.getTargets", Value::Null, None).unwrap();
+        let method = |e: Option<Value>| e.map(|e| e["method"].as_str().unwrap().to_string());
+        // A and B were read past by the call; C is read from the wire; a
+        // stray reply reads as nothing; then the quiet slice.
+        assert_eq!(method(cdp.next_event().unwrap()).as_deref(), Some("A"));
+        assert_eq!(method(cdp.next_event().unwrap()).as_deref(), Some("B"));
+        assert_eq!(method(cdp.next_event().unwrap()).as_deref(), Some("C"));
+        assert_eq!(cdp.next_event().unwrap(), None);
+        assert_eq!(cdp.next_event().unwrap(), None);
+
+        // A connection that does not keep them drops them, as before.
+        let mut cdp = Cdp::new(script(incoming), Duration::from_secs(5), never);
+        cdp.call("Target.getTargets", Value::Null, None).unwrap();
+        assert_eq!(method(cdp.next_event().unwrap()).as_deref(), Some("C"));
+
+        // A cancel is noticed before reading.
+        let mut cdp = Cdp::new(script(vec![]), Duration::from_secs(5), always).keeping_events();
+        assert_eq!(cdp.next_event(), Err(CdpError::Canceled));
     }
 
     /// The real websocket path against a loopback server standing in for

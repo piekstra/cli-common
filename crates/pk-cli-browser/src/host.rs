@@ -71,11 +71,11 @@ impl HostRule {
         let Some(host) = normalize_host(host) else {
             return false;
         };
-        host == self.host
-            || (self.subdomains
-                && host.len() > self.host.len()
-                && host.ends_with(&self.host)
-                && host.as_bytes()[host.len() - self.host.len() - 1] == b'.')
+        if self.subdomains {
+            is_under(&host, &self.host)
+        } else {
+            host == self.host
+        }
     }
 
     /// Whether `url` is an `https` page on the default port whose host this
@@ -99,6 +99,17 @@ impl fmt::Display for HostRule {
             f.write_str(&self.host)
         }
     }
+}
+
+/// Whether `host` is `domain` or a host under it, label for label: a host
+/// that merely ends in the same characters (`notexample.com`) is not under
+/// `example.com`. Both are normalized hosts ([`normalize_host`]). Every host
+/// and cookie-domain match in the crate goes through here.
+pub(crate) fn is_under(host: &str, domain: &str) -> bool {
+    host == domain
+        || (host.len() > domain.len()
+            && host.ends_with(domain)
+            && host.as_bytes()[host.len() - domain.len() - 1] == b'.')
 }
 
 /// Lowercase ASCII DNS name, one trailing dot dropped; `None` for anything
@@ -367,6 +378,22 @@ mod tests {
         assert!(!e("app.example.com").overlaps(&e("www.example.com")));
         assert!(!d("example.com").overlaps(&d("example.org")));
         assert!(!e("example.com").overlaps(&e("app.example.com")));
+    }
+
+    #[test]
+    fn hosts_are_under_a_domain_label_for_label() {
+        let cases: &[(&str, &str, bool)] = &[
+            ("example.com", "example.com", true),
+            ("www.example.com", "example.com", true),
+            ("a.b.example.com", "example.com", true),
+            ("notexample.com", "example.com", false),
+            ("example.com", "www.example.com", false),
+            ("example.com.evil.example", "example.com", false),
+            ("xample.com", "example.com", false),
+        ];
+        for (host, domain, want) in cases {
+            assert_eq!(is_under(host, domain), *want, "{host} under {domain}");
+        }
     }
 
     #[test]

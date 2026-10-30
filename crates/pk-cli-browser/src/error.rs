@@ -10,8 +10,8 @@ use pk_cli_core::CliError;
 /// never a value. Converts into [`CliError`] with the family's exit codes:
 /// [`TimedOut`](BrowserError::TimedOut) and
 /// [`WindowClosed`](BrowserError::WindowClosed) are exit 3 (the owner did
-/// not finish signing in), [`Handler`](BrowserError::Handler) is the
-/// handler's own error, and everything else is exit 1.
+/// not finish signing in), [`Handler`](BrowserError::Handler) is the CLI's
+/// own error, and everything else is exit 1.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum BrowserError {
@@ -31,8 +31,10 @@ pub enum BrowserError {
     TimedOut(String),
     /// The owner closed the window before the sign-in finished.
     WindowClosed(String),
-    /// The error the [`Browser::wait_each`](crate::Browser::wait_each)
-    /// handler returned, passed through unchanged.
+    /// The CLI's own error, passed through unchanged: what the
+    /// [`Browser::wait_each`](crate::Browser::wait_each) handler returned,
+    /// or what a [`Capture::confirm`](crate::Capture::confirm) hook ended
+    /// the wait with ([`Confirm::Fail`](crate::Confirm::Fail)).
     Handler(CliError),
 }
 
