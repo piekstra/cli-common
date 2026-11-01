@@ -10,10 +10,12 @@
 //! - **Format.** [`ResponseFormat::Concise`] by default: the fields a person
 //!   reads, names rather than ids. `detailed` adds ids, timestamps and
 //!   provider detail.
-//! - **Size budget.** A page stops early, before [`SIZE_BUDGET`] bytes of
-//!   JSON, and says so: `truncated: true` plus a `hint` naming the cursor and
+//! - **Size budget.** A page stops early, before [`SIZE_BUDGET`] characters
+//!   of JSON, and says so: `truncated: true` plus a `hint` naming the cursor and
 //!   the tool's own ways to narrow. Claude Code warns above 10,000 tokens per
-//!   result; 32,000 bytes of JSON stays clear of that.
+//!   result; 32,000 characters of JSON stays clear of that. Sizes count
+//!   characters, not bytes, as the hosts' own caps do, so a page of
+//!   non-ASCII names is measured as the model sees it.
 //!
 //! [`ListArgs`] is the argument block a list tool flattens into its input;
 //! [`PageRequest`] resolves it, and [`PageRequest::page`] cuts the page.
@@ -27,12 +29,12 @@ use crate::error::ToolError;
 pub const DEFAULT_LIMIT: u32 = 25;
 /// The largest `limit` a call may ask for.
 pub const MAX_LIMIT: u32 = 200;
-/// Bytes of compact JSON a list page stays under.
+/// Characters of compact JSON a list page stays under.
 pub const SIZE_BUDGET: usize = 32_000;
-/// Bytes of compact JSON no result may exceed, list or not: a result over
+/// Characters of compact JSON no result may exceed, list or not: a result over
 /// it is replaced by an error telling the model to narrow the call.
 pub const HARD_LIMIT: usize = 64_000;
-/// Bytes of a page's budget set aside for everything beside `items`: the
+/// Characters of a page's budget set aside for everything beside `items`: the
 /// page fields and the tool's own top-level fields, which must stay under it.
 pub const ENVELOPE_RESERVE: usize = 1_500;
 
@@ -121,7 +123,7 @@ impl PageRequest {
                 "limit must be between 1 and {MAX_LIMIT}; got {limit}"
             )));
         }
-        let fingerprint = fingerprint(filters);
+        let fingerprint = fingerprint(filters)?;
         let offset = match args.cursor.as_deref().map(str::trim) {
             None | Some("") => 0,
             Some(c) => {
@@ -149,8 +151,8 @@ impl PageRequest {
     }
 
     /// A smaller budget, for tests that exercise truncation on small data.
-    pub fn with_budget(mut self, bytes: usize) -> Self {
-        self.budget = bytes;
+    pub fn with_budget(mut self, chars: usize) -> Self {
+        self.budget = chars;
         self
     }
 
@@ -167,7 +169,7 @@ impl PageRequest {
     /// for [`Self::page`] to know whether another page exists: the page's
     /// end plus one.
     pub fn wanted(&self) -> usize {
-        self.offset + self.limit + 1
+        self.offset.saturating_add(self.limit).saturating_add(1)
     }
 
     /// Cut this page out of `matched`, every record matching the filters in
@@ -193,7 +195,8 @@ impl PageRequest {
         for item in matched.into_iter().skip(self.offset).take(self.limit) {
             let size = serde_json::to_string(&item)
                 .map_err(|e| ToolError::other(format!("serializing a record: {e}")))?
-                .len()
+                .chars()
+                .count()
                 + 1; // its comma
             if used + size > item_budget {
                 break;
@@ -212,6 +215,7 @@ impl PageRequest {
         let truncated = kept < self.limit.min(available);
         let more = kept < available || more_upstream;
         let next_cursor = more.then(|| encode_cursor(self.offset + kept, self.fingerprint));
+        // `offset` is bounded by MAX_OFFSET on decode, so the sum is small.
         let hint = if truncated {
             Some(format!(
                 "Stopped at {kept} records to stay under the {}-character result budget. Pass \
@@ -241,18 +245,25 @@ impl PageRequest {
 
 /// FNV-1a over the filters' compact JSON. Not a security boundary (a cursor
 /// grants nothing a call could not ask for directly); it only catches a
-/// cursor replayed against a different query.
-fn fingerprint<F: Serialize + ?Sized>(filters: &F) -> u64 {
-    let bytes = serde_json::to_vec(filters).unwrap_or_default();
+/// cursor replayed against a different query. Filters that cannot be
+/// serialized are an error, not a shared constant fingerprint that would let
+/// any cursor through.
+fn fingerprint<F: Serialize + ?Sized>(filters: &F) -> Result<u64, ToolError> {
+    let bytes = serde_json::to_vec(filters)
+        .map_err(|e| ToolError::other(format!("serializing the list filters: {e}")))?;
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
         hash ^= u64::from(b);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
-    hash
+    Ok(hash)
 }
 
 const CURSOR_VERSION: &str = "c1";
+
+/// The largest offset a cursor may carry. Cursors come back from the client,
+/// which can hand-build one, and no real list pages this far.
+const MAX_OFFSET: usize = 10_000_000;
 
 /// Hex of `c1:<offset>:<fingerprint>`: opaque to a reader, cheap to check.
 fn encode_cursor(offset: usize, fingerprint: u64) -> String {
@@ -273,7 +284,10 @@ fn decode_cursor(cursor: &str) -> Option<(usize, u64)> {
     if parts.next()? != CURSOR_VERSION {
         return None;
     }
-    let offset = parts.next()?.parse().ok()?;
+    let offset: usize = parts.next()?.parse().ok()?;
+    if offset > MAX_OFFSET {
+        return None;
+    }
     let fp = u64::from_str_radix(parts.next()?, 16).ok()?;
     parts.next().is_none().then_some((offset, fp))
 }
@@ -338,6 +352,51 @@ mod tests {
             let e = PageRequest::new(&args(None, Some(junk)), &json!({"a": 1})).unwrap_err();
             assert!(e.message().contains("next_cursor exactly"), "{junk}: {e}");
         }
+    }
+
+    /// A client can hand-build a cursor with the right fingerprint (FNV is
+    /// unkeyed) and any offset. A huge one is refused, never added to.
+    #[test]
+    fn a_forged_cursor_with_a_huge_offset_is_refused_not_overflowed() {
+        let fp = fingerprint(&json!({"a": 1})).unwrap();
+        for offset in [usize::MAX, MAX_OFFSET + 1] {
+            let forged = encode_cursor(offset, fp);
+            let e = PageRequest::new(&args(None, Some(&forged)), &json!({"a": 1})).unwrap_err();
+            assert!(e.message().contains("next_cursor exactly"), "{offset}: {e}");
+        }
+        let edge = encode_cursor(MAX_OFFSET, fp);
+        let r = PageRequest::new(&args(Some(MAX_LIMIT), Some(&edge)), &json!({"a": 1})).unwrap();
+        assert_eq!(r.wanted(), MAX_OFFSET + MAX_LIMIT as usize + 1);
+        let page = r.page(vec![1, 2, 3], "a").unwrap();
+        assert!(page.items.is_empty() && page.info.next_cursor.is_none());
+    }
+
+    /// Filters that fail to serialize must not share one fingerprint.
+    #[test]
+    fn filters_that_cannot_be_serialized_are_an_error() {
+        struct Unserializable;
+        impl Serialize for Unserializable {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("no"))
+            }
+        }
+        let e = PageRequest::new(&args(None, None), &Unserializable).unwrap_err();
+        assert!(e.message().contains("serializing the list filters"), "{e}");
+    }
+
+    /// The budget counts characters, as the hosts do: a page of multi-byte
+    /// names is not cut short by its UTF-8 length.
+    #[test]
+    fn the_budget_counts_characters_not_bytes() {
+        let rows: Vec<String> = (0..10).map(|_| "é".repeat(90)).collect();
+        // Each record is 92 characters plus a comma but 182 bytes plus one.
+        let page = PageRequest::new(&args(Some(10), None), &())
+            .unwrap()
+            .with_budget(ENVELOPE_RESERVE + 2 + 93 * 10)
+            .page(rows, "x")
+            .unwrap();
+        assert_eq!(page.info.returned, 10, "{:?}", page.info);
+        assert!(!page.info.truncated);
     }
 
     #[test]

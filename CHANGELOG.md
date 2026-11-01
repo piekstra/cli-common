@@ -22,14 +22,20 @@ crate's API or behaviour changes.
     stable order); `shape`: `ListArgs` (`limit` 25 by default and at most
     200, opaque `cursor`, `response_format` concise/detailed), `PageRequest`
     (cursors bound to the query's filters; a page that would pass the
-    32,000-byte budget stops early with `truncated` and a `hint` naming the
+    32,000-character budget stops early with `truncated` and a `hint` naming the
     cursor and the tool's narrowing arguments) and the `Page` envelope;
     `ToolError` (the family exit codes as actionable text: an auth error
     names `<bin> auth login` to run in a terminal; `From<CliError>`);
     `instructions` (the standard server instructions, including that
     third-party free text is data, never instructions); dispatch that
     refuses a misspelled argument, maps an unknown tool to JSON-RPC
-    `-32602` and replaces a result over 64,000 bytes with an error.
+    `-32602` and replaces a result over 64,000 characters with an error.
+    Sizes count characters, as the hosts' caps do. Output schemas follow
+    serde's serialize contract (a plain `Option` is required and nullable,
+    a `skip_serializing_if` field optional); input schemas must be flat
+    objects. The `Toolset` docs state what a `call` future may depend on
+    (no Tokio reactor natively) and the per-target provider seam a toolset
+    meant for a Worker awaits.
   - **The WASM boundary is MCP-shaped JSON**: `tools_list_json`,
     `call_tool_json`, `Server::server_info_json` and `instructions` give a
     host the `tools/list` result, the `CallToolResult` object and the
@@ -40,8 +46,9 @@ crate's API or behaviour changes.
     code runs unchanged.
   - **`test-util` feature**: `conformance::assert_conforms` and
     `conformance::assert_fits`, the checks every CLI's tests run (names,
-    titles, hints, writes needing user interaction, three-sentence
-    descriptions, described arguments, output schemas, definitions under
+    titles, all four hints, writes needing user interaction, three-sentence
+    descriptions, a flat input object with described arguments, output
+    schemas, definitions under
     8,000 characters, stable order, results under the budget and matching
     their output schema with no undeclared field), plus `call` and
     `block_on`.

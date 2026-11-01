@@ -60,10 +60,24 @@ impl Server {
 
 /// A CLI's MCP tools.
 ///
-/// `call` is an `async fn` with **no `Send` bound**, so the same toolset runs
-/// on a single-threaded WebAssembly host. The native stdio server runs each
-/// call on a blocking thread, so a toolset may call blocking provider code
-/// from inside `call` today.
+/// `call` is an `async fn` with **no `Send` bound**, so a toolset can run on
+/// a single-threaded WebAssembly host as well as natively. What is shared
+/// across the two hosts is everything above the provider: definitions,
+/// argument parsing, filtering, shaping and errors. The provider itself is
+/// per target, because the two hosts accept different I/O:
+///
+/// - **stdio (native):** the future is polled by the crate's own `block_on`
+///   on a Tokio blocking thread, **with no Tokio reactor**. Blocking code
+///   (`reqwest::blocking`, the keychain) works; anything that needs a
+///   reactor (async `reqwest`, `tokio::time`) panics.
+/// - **WebAssembly (a Worker):** no threads and no blocking I/O; the host's
+///   own async `fetch` is the only way out.
+///
+/// So a toolset meant for both takes its provider as a collaborator that
+/// `call` awaits: a trait with async methods and no `Send` bound, given a
+/// blocking implementation natively and a `fetch` one in the Worker.
+/// coinbase-cli's `mcp::Source` is the pattern. A toolset that only ever
+/// runs natively may call blocking code from `call` directly.
 ///
 /// Contract:
 /// - [`Toolset::tools`] returns the same tools in the same order on every

@@ -58,7 +58,7 @@ pub fn run<T: Toolset + Send + Sync + 'static>(args: &McpArgs, toolset: T) -> Re
 }
 
 /// Serve `toolset` on stdin/stdout until the client disconnects.
-pub fn serve_stdio<T: Toolset + Send + Sync + 'static>(toolset: T) -> Result<(), CliError> {
+pub(crate) fn serve_stdio<T: Toolset + Send + Sync + 'static>(toolset: T) -> Result<(), CliError> {
     let adapter = Adapter::new(toolset)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

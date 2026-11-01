@@ -46,10 +46,10 @@ impl ToolOutput {
         &self.text
     }
 
-    /// Size of the compact JSON in bytes (never fewer than its characters):
-    /// the measure every size limit in this crate uses.
+    /// Size of the compact JSON in characters: the measure every size limit
+    /// in this crate uses, as the hosts' own result caps do.
     pub fn size(&self) -> usize {
-        self.text.len()
+        self.text.chars().count()
     }
 }
 
@@ -83,6 +83,17 @@ impl CallToolResult {
 
     pub fn is_error(&self) -> bool {
         self.is_error
+    }
+
+    /// Any combination, including inconsistent ones, for the conformance
+    /// checks' own tests.
+    #[cfg(test)]
+    pub(crate) fn from_parts(structured: Option<Value>, text: &str, is_error: bool) -> Self {
+        Self {
+            structured,
+            text: text.into(),
+            is_error,
+        }
     }
 
     pub fn structured(&self) -> Option<&Value> {
@@ -119,7 +130,7 @@ mod tests {
     fn text_is_the_structured_json_compacted() {
         let out = ToolOutput::new(&json!({"items": [1, 2], "returned": 2})).unwrap();
         assert_eq!(out.text(), r#"{"items":[1,2],"returned":2}"#);
-        assert_eq!(out.size(), out.text().len());
+        assert_eq!(out.size(), out.text().chars().count());
         let r = CallToolResult::success(out).to_json();
         assert_eq!(r["isError"], false);
         assert_eq!(r["content"][0]["type"], "text");

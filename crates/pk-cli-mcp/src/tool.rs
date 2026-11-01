@@ -178,25 +178,44 @@ fn empty_object_schema() -> Value {
     json!({"type": "object", "properties": {}})
 }
 
+/// Which side of the wire a schema describes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    /// What the tool accepts: schemars' deserialize contract, descriptions
+    /// kept, `null` folded out everywhere (an optional argument is simply
+    /// left out).
+    Input,
+    /// What the tool returns: the serialize contract, so a field with
+    /// `skip_serializing_if` is optional and a plain `Option` is a required,
+    /// nullable field, exactly as `serde_json` writes the value. Descriptions
+    /// are dropped (the tool description names the fields), and `null` is
+    /// folded out only where the field is optional and so absent rather than
+    /// `null`.
+    Output,
+}
+
 /// The compacted input schema for `T`.
 pub fn input_schema_for<T: JsonSchema>() -> Value {
-    let mut schema = raw_schema_for::<T>();
-    compact(&mut schema, false);
+    let mut schema = raw_schema_for::<T>(Side::Input);
+    compact(&mut schema, Side::Input, true);
     ensure_object(schema)
 }
 
-/// The compacted output schema for `T`, without descriptions.
+/// The compacted output schema for `T`: the shape `serde_json` gives a `T`.
 pub fn output_schema_for<T: JsonSchema>() -> Value {
-    let mut schema = raw_schema_for::<T>();
-    compact(&mut schema, true);
+    let mut schema = raw_schema_for::<T>(Side::Output);
+    compact(&mut schema, Side::Output, false);
     ensure_object(schema)
 }
 
-fn raw_schema_for<T: JsonSchema>() -> Value {
+fn raw_schema_for<T: JsonSchema>(side: Side) -> Value {
     SchemaSettings::draft2020_12()
         .with(|s| {
             s.inline_subschemas = true;
             s.meta_schema = None;
+            if side == Side::Output {
+                s.contract = schemars::generate::Contract::Serialize;
+            }
         })
         .into_generator()
         .into_root_schema_for::<T>()
@@ -204,10 +223,20 @@ fn raw_schema_for<T: JsonSchema>() -> Value {
 }
 
 /// MCP requires `type: object` at the root of both schemas. A unit struct or
-/// a struct with no fields still produces an object schema; anything else is
-/// a programming error in the CLI, caught by its conformance test.
+/// a struct with no fields still produces an object schema. A root
+/// `oneOf`/`anyOf`/`allOf` (an enum, or a struct flattening one) is left as
+/// it is: the profile takes flat structs only, and the conformance check
+/// reports anything else instead of this papering over it.
 fn ensure_object(mut schema: Value) -> Value {
     if let Some(obj) = schema.as_object_mut() {
+        // The root's description is the struct's doc comment, written for
+        // Rust readers (and, through `#[serde(flatten)]`, sometimes a
+        // flattened struct's). The tool's own description speaks to the
+        // model instead.
+        obj.remove("description");
+        if has_root_combinator(obj) {
+            return schema;
+        }
         obj.entry("type").or_insert_with(|| json!("object"));
         if obj.get("type") == Some(&json!("object")) {
             obj.entry("properties").or_insert_with(|| json!({}));
@@ -216,13 +245,25 @@ fn ensure_object(mut schema: Value) -> Value {
     schema
 }
 
+/// The schema's root combines alternatives (`oneOf`/`anyOf`/`allOf`), which
+/// the profile does not support: dispatch checks arguments against the root
+/// `properties` alone.
+pub(crate) fn has_root_combinator(obj: &Map<String, Value>) -> bool {
+    ["oneOf", "anyOf", "allOf"]
+        .iter()
+        .any(|k| obj.contains_key(*k))
+}
+
 const RUST_FORMATS: &[&str] = &[
     "int", "int8", "int16", "int32", "int64", "int128", "uint", "uint8", "uint16", "uint32",
     "uint64", "uint128", "float", "double",
 ];
 
-/// Shrink a schemars schema to what a model needs, recursively.
-fn compact(v: &mut Value, strip_descriptions: bool) {
+/// Shrink a schemars schema to what a model needs, recursively. `fold_null`
+/// says whether this schema may lose its `null` alternative: always for
+/// input, and for output only where the property is not `required`.
+fn compact(v: &mut Value, side: Side, fold_null: bool) {
+    let strip_descriptions = side == Side::Output;
     match v {
         Value::Object(obj) => {
             obj.remove("$schema");
@@ -249,8 +290,24 @@ fn compact(v: &mut Value, strip_descriptions: bool) {
             {
                 obj.remove("format");
             }
-            fold_nullable_type(obj);
-            fold_nullable_any_of(obj);
+            if fold_null {
+                fold_nullable_type(obj);
+                fold_nullable_any_of(obj);
+            }
+            let required: Vec<String> = obj
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|r| {
+                    r.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let fold_child = |name: Option<&str>| match side {
+                Side::Input => true,
+                Side::Output => name.is_some_and(|n| !required.iter().any(|r| r == n)),
+            };
             for (key, child) in obj.iter_mut() {
                 // Values, not schemas: never rewrite data.
                 if matches!(key.as_str(), "enum" | "const" | "default" | "examples") {
@@ -258,28 +315,34 @@ fn compact(v: &mut Value, strip_descriptions: bool) {
                 }
                 // Property names are data, not keywords: recurse into each
                 // property's schema without treating the map as a schema.
-                if key == "properties" || key == "$defs" {
+                if key == "properties" {
                     if let Value::Object(props) = child {
-                        for prop in props.values_mut() {
-                            compact(prop, strip_descriptions);
+                        for (name, prop) in props.iter_mut() {
+                            compact(prop, side, fold_child(Some(name)));
+                        }
+                    }
+                } else if key == "$defs" {
+                    if let Value::Object(defs) = child {
+                        for def in defs.values_mut() {
+                            compact(def, side, fold_child(None));
                         }
                     }
                 } else {
-                    compact(child, strip_descriptions);
+                    compact(child, side, fold_child(None));
                 }
             }
         }
         Value::Array(items) => {
             for item in items {
-                compact(item, strip_descriptions);
+                compact(item, side, fold_null);
             }
         }
         _ => {}
     }
 }
 
-/// `"type": ["integer", "null"]` → `"type": "integer"`. An optional field is
-/// already optional by being absent from `required`; the `null` only costs
+/// `"type": ["integer", "null"]` → `"type": "integer"`, for a field that is
+/// optional by being absent from `required`: there the `null` only costs
 /// characters.
 fn fold_nullable_type(obj: &mut Map<String, Value>) {
     let Some(Value::Array(types)) = obj.get("type") else {
@@ -330,6 +393,7 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
 
+    /// Rust-facing notes that must not reach the model.
     #[allow(dead_code)]
     #[derive(Deserialize, JsonSchema)]
     struct Args {
@@ -356,6 +420,7 @@ mod tests {
         assert_eq!(s["type"], "object");
         assert!(s.get("$schema").is_none());
         assert!(s.get("title").is_none());
+        assert!(s.get("description").is_none(), "the doc comment stays out");
         assert_eq!(s["required"], json!(["account"]));
         let limit = &s["properties"]["limit"];
         assert_eq!(limit["type"], "integer", "nullable folded: {limit}");
@@ -377,11 +442,83 @@ mod tests {
         assert!(s.to_string().find("$ref").is_none());
     }
 
+    /// A plain `Option` serializes as `null` and an empty `Vec` with
+    /// `skip_serializing_if` is left out: the output schema must accept both
+    /// exactly as `serde_json` writes them.
+    #[test]
+    fn output_schemas_describe_what_serde_writes() {
+        #[derive(Serialize, JsonSchema)]
+        struct Row {
+            name: String,
+            memo: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            note: Option<String>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            tags: Vec<String>,
+            kind: Option<crate::shape::ResponseFormat>,
+        }
+        let s = output_schema_for::<Row>();
+        let required: Vec<&str> = s["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(
+            required.contains(&"memo") && !required.contains(&"tags"),
+            "{s}"
+        );
+        assert!(!required.contains(&"note"), "{s}");
+        assert_eq!(
+            s["properties"]["note"]["type"], "string",
+            "optional: null folded"
+        );
+        for value in [
+            Row {
+                name: "n".into(),
+                memo: None,
+                note: None,
+                tags: vec![],
+                kind: None,
+            },
+            Row {
+                name: "n".into(),
+                memo: Some("m".into()),
+                note: Some("x".into()),
+                tags: vec!["t".into()],
+                kind: Some(crate::shape::ResponseFormat::Detailed),
+            },
+        ] {
+            let v = serde_json::to_value(&value).unwrap();
+            let violations = crate::conformance::schema_violations(&s, &v);
+            assert!(violations.is_empty(), "{v}: {violations:?}\n{s}");
+        }
+    }
+
+    /// An enum (or a struct flattening one) is not a flat object: the root
+    /// keeps its alternatives and gains no `type: object` to hide them.
+    #[test]
+    fn a_root_enum_is_left_for_conformance_to_report() {
+        #[allow(dead_code)]
+        #[derive(Deserialize, JsonSchema)]
+        #[serde(tag = "by", rename_all = "lowercase")]
+        enum Lookup {
+            /// By id.
+            Id { id: String },
+            /// By name.
+            Name { name: String },
+        }
+        let s = input_schema_for::<Lookup>();
+        assert!(s.get("oneOf").is_some(), "{s}");
+        assert!(s.get("type").is_none(), "{s}");
+    }
+
     #[test]
     fn output_schemas_lose_descriptions_but_keep_a_property_named_description() {
         let s = output_schema_for::<Inner>();
         let prop = &s["properties"]["description"];
-        assert_eq!(prop["type"], "string");
+        // A plain Option: serialized as null, so required and nullable.
+        assert_eq!(prop["type"], json!(["string", "null"]), "{s}");
         assert!(prop.get("description").is_none());
     }
 

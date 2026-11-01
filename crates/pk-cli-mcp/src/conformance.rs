@@ -16,9 +16,11 @@
 //! }
 //! ```
 //!
-//! [`assert_conforms`] checks the definitions: names, titles, annotations,
+//! [`assert_conforms`] checks the definitions: names, titles, all four
+//! annotation hints,
 //! `requiresUserInteraction` on every write, descriptions of at least three
-//! sentences, described arguments, output schemas, a total definition size
+//! sentences, a flat input object with every argument described, output
+//! schemas, a total definition size
 //! under [`MAX_DEFINITIONS_SIZE`], a stable order and the standard
 //! instructions. [`assert_fits`] checks one result: a success, under
 //! [`SIZE_BUDGET`], and matching the tool's output schema with no
@@ -32,7 +34,7 @@ use crate::shape::SIZE_BUDGET;
 use crate::tool::NAME_MAX;
 use crate::toolset::{call_tool, instructions, tools_list, Toolset};
 
-/// Bytes of compact JSON all of a CLI's tool definitions may take together:
+/// Characters of compact JSON all of a CLI's tool definitions may take together:
 /// they ride along in every prompt.
 pub const MAX_DEFINITIONS_SIZE: usize = 8_000;
 /// The shortest description a tool may have, in sentences.
@@ -103,15 +105,7 @@ pub fn violations<T: Toolset + ?Sized>(toolset: &T) -> Vec<String> {
                  what it does, when to use it, what it returns, how to narrow it"
             ));
         }
-        let ann = &json["annotations"];
-        for hint in ["readOnlyHint", "destructiveHint"] {
-            if !ann[hint].is_boolean() {
-                out.push(format!("{name}: annotations.{hint} not set"));
-            }
-        }
-        if !ann["title"].is_string() {
-            out.push(format!("{name}: annotations.title not set"));
-        }
+        out.extend(annotation_violations(name, &json["annotations"]));
         if tool.annotations.read_only && tool.annotations.destructive {
             out.push(format!("{name}: read-only and destructive at once"));
         }
@@ -121,7 +115,17 @@ pub fn violations<T: Toolset + ?Sized>(toolset: &T) -> Vec<String> {
                  anthropic/requiresUserInteraction: true (use ToolDef::write)"
             ));
         }
-        if tool.input_schema.get("type") != Some(&Value::from("object")) {
+        if tool
+            .input_schema
+            .as_object()
+            .is_some_and(crate::tool::has_root_combinator)
+        {
+            out.push(format!(
+                "{name}: inputSchema has a root oneOf/anyOf/allOf (an enum, or a flattened \
+                 one); take a flat struct with Option fields, since arguments are checked \
+                 against the root properties only"
+            ));
+        } else if tool.input_schema.get("type") != Some(&Value::from("object")) {
             out.push(format!("{name}: inputSchema is not type object"));
         }
         if let Some(props) = tool
@@ -162,12 +166,35 @@ pub fn violations<T: Toolset + ?Sized>(toolset: &T) -> Vec<String> {
     out
 }
 
-/// Bytes of compact JSON the `tools/list` entries take together.
-pub fn definitions_size<T: Toolset + ?Sized>(toolset: &T) -> usize {
-    Value::Array(tools_list(toolset)).to_string().len()
+/// Every hint set explicitly (the spec's defaults are the unsafe ones:
+/// `readOnlyHint: false`, `destructiveHint: true`), plus a title.
+fn annotation_violations(name: &str, ann: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for hint in [
+        "readOnlyHint",
+        "destructiveHint",
+        "idempotentHint",
+        "openWorldHint",
+    ] {
+        if !ann[hint].is_boolean() {
+            out.push(format!("{name}: annotations.{hint} not set"));
+        }
+    }
+    if !ann["title"].is_string() {
+        out.push(format!("{name}: annotations.title not set"));
+    }
+    out
 }
 
-/// Bytes of compact JSON one tool's definition takes.
+/// Characters of compact JSON the `tools/list` entries take together.
+pub fn definitions_size<T: Toolset + ?Sized>(toolset: &T) -> usize {
+    Value::Array(tools_list(toolset))
+        .to_string()
+        .chars()
+        .count()
+}
+
+/// Characters of compact JSON one tool's definition takes.
 pub fn definition_size<T: Toolset + ?Sized>(toolset: &T, name: &str) -> usize {
     toolset
         .tools()
@@ -176,7 +203,8 @@ pub fn definition_size<T: Toolset + ?Sized>(toolset: &T, name: &str) -> usize {
         .unwrap_or_else(|| panic!("no tool named {name}"))
         .to_json()
         .to_string()
-        .len()
+        .chars()
+        .count()
 }
 
 /// Call a tool synchronously, as a client would. Panics on an unknown name.
@@ -200,7 +228,7 @@ pub fn assert_fits<'r, T: Toolset + ?Sized>(
     let structured = result
         .structured()
         .unwrap_or_else(|| panic!("{name}: a success without structuredContent"));
-    let size = structured.to_string().len();
+    let size = structured.to_string().chars().count();
     assert!(
         size <= SIZE_BUDGET,
         "{name}: result is {size} characters, over the {SIZE_BUDGET}-character budget"
@@ -394,6 +422,251 @@ mod tests {
             v.iter().any(|m| m.contains("$.x: field not declared")),
             "{v:?}"
         );
+    }
+
+    use crate::result::ToolOutput;
+    use crate::tool::ToolDef;
+    use crate::toolset::Server;
+    use crate::ToolError;
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
+    use std::cell::Cell;
+
+    const GOOD_DESCRIPTION: &str =
+        "Lists the things. Use it to find a thing. Returns items with name.";
+
+    #[allow(dead_code)]
+    #[derive(Deserialize, JsonSchema)]
+    struct Args {
+        /// Which thing.
+        thing: Option<String>,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Deserialize, JsonSchema)]
+    struct Undescribed {
+        thing: Option<String>,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Deserialize, JsonSchema)]
+    #[serde(tag = "by", rename_all = "lowercase")]
+    enum Lookup {
+        /// By id.
+        Id {
+            /// The id.
+            id: String,
+        },
+    }
+
+    #[derive(Serialize, JsonSchema)]
+    struct Out {
+        name: String,
+    }
+
+    /// A toolset whose definitions are whatever the test hands it.
+    struct Fixed {
+        server: Server,
+        tools: Vec<ToolDef>,
+        output: Value,
+        /// When set, `tools()` reverses its order on every other call.
+        flip: Option<Cell<bool>>,
+    }
+
+    impl Fixed {
+        fn new(tools: Vec<ToolDef>) -> Self {
+            Self {
+                server: Server::new("svc", "0.0.0", "Svc", "svc"),
+                tools,
+                output: json!({"name": "a"}),
+                flip: None,
+            }
+        }
+    }
+
+    impl Toolset for Fixed {
+        fn server(&self) -> Server {
+            self.server.clone()
+        }
+        fn tools(&self) -> Vec<ToolDef> {
+            let mut tools = self.tools.clone();
+            if let Some(flip) = &self.flip {
+                if flip.replace(!flip.get()) {
+                    tools.reverse();
+                }
+            }
+            tools
+        }
+        async fn call(&self, _: &str, _: Value) -> Result<ToolOutput, ToolError> {
+            ToolOutput::from_value(self.output.clone())
+        }
+    }
+
+    fn good() -> ToolDef {
+        ToolDef::read("svc_things", "Things", GOOD_DESCRIPTION)
+            .input::<Args>()
+            .output::<Out>()
+    }
+
+    fn has(v: &[String], needle: &str) -> bool {
+        v.iter().any(|m| m.contains(needle))
+    }
+
+    #[test]
+    fn a_good_toolset_has_no_violations() {
+        let v = violations(&Fixed::new(vec![
+            good(),
+            ToolDef::write("svc_rename", "Rename", GOOD_DESCRIPTION, false)
+                .input::<Args>()
+                .output::<Out>(),
+        ]));
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn every_definition_check_fires() {
+        let mut no_meta = ToolDef::write("svc_write", "Write", GOOD_DESCRIPTION, false)
+            .input::<Args>()
+            .output::<Out>();
+        no_meta.meta.clear();
+        let mut both = good();
+        both.name = "svc_both".into();
+        both.annotations.destructive = true;
+        let mut untitled = good();
+        untitled.name = "svc_untitled".into();
+        untitled.title = " ".into();
+        let mut no_output = good();
+        no_output.name = "svc_no_output".into();
+        no_output.output_schema = None;
+        let mut list_output = good();
+        list_output.name = "svc_list_output".into();
+        list_output.output_schema = Some(json!({"type": "array"}));
+        let mut str_input = good();
+        str_input.name = "svc_str_input".into();
+        str_input.input_schema = json!({"type": "string"});
+        let tools = vec![
+            good(),
+            good(),
+            ToolDef::read("svc_short", "Short", "Lists things.").output::<Out>(),
+            ToolDef::read("Svc-Bad", "Bad", GOOD_DESCRIPTION).output::<Out>(),
+            ToolDef::read("other_tool", "Other", GOOD_DESCRIPTION).output::<Out>(),
+            ToolDef::read(format!("svc_{}", "x".repeat(70)), "Long", GOOD_DESCRIPTION)
+                .output::<Out>(),
+            ToolDef::read("svc_undescribed", "U", GOOD_DESCRIPTION)
+                .input::<Undescribed>()
+                .output::<Out>(),
+            ToolDef::read("svc_enum", "E", GOOD_DESCRIPTION)
+                .input::<Lookup>()
+                .output::<Out>(),
+            no_meta,
+            both,
+            untitled,
+            no_output,
+            list_output,
+            str_input,
+        ];
+        let v = violations(&Fixed::new(tools));
+        for needle in [
+            "svc_things: duplicate tool name",
+            "svc_short: description has 1 sentence(s)",
+            "Svc-Bad: name must be lowercase",
+            "other_tool: name must start with `svc_`",
+            "name longer than 64 characters",
+            "svc_undescribed: argument `thing` has no description",
+            "svc_enum: inputSchema has a root oneOf/anyOf/allOf",
+            "svc_write: a tool that is not read-only needs `_meta`",
+            "svc_both: read-only and destructive at once",
+            "svc_untitled: no title",
+            "svc_no_output: no outputSchema",
+            "svc_list_output: outputSchema is not type object",
+            "svc_str_input: inputSchema is not type object",
+        ] {
+            assert!(has(&v, needle), "missing `{needle}` in {v:#?}");
+        }
+    }
+
+    #[test]
+    fn server_level_checks_fire() {
+        let mut ts = Fixed::new(vec![]);
+        ts.server = Server::new(" ", "0", "Svc", "s_v");
+        let v = violations(&ts);
+        assert!(has(&v, "`bin` is empty"), "{v:?}");
+        assert!(has(&v, "tool prefix `s_v`"), "{v:?}");
+        assert!(has(&v, "has no tools"), "{v:?}");
+    }
+
+    #[test]
+    fn an_unstable_order_and_oversized_definitions_are_reported() {
+        let mut second = good();
+        second.name = "svc_second".into();
+        let mut ts = Fixed::new(vec![good(), second]);
+        ts.flip = Some(Cell::new(false));
+        assert!(has(&violations(&ts), "changed order"));
+
+        let long = format!("{GOOD_DESCRIPTION} {}.", "word ".repeat(2_000));
+        let ts = Fixed::new(vec![ToolDef::read("svc_big", "Big", long).output::<Out>()]);
+        assert!(has(&violations(&ts), "definitions take"));
+    }
+
+    /// `ToolDef::to_json` always writes every hint, so the check is run on
+    /// annotations with each one removed in turn.
+    #[test]
+    fn each_missing_hint_is_reported() {
+        let full = good().to_json()["annotations"].clone();
+        assert!(annotation_violations("svc_things", &full).is_empty());
+        for key in [
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+            "title",
+        ] {
+            let mut ann = full.clone();
+            ann.as_object_mut().unwrap().remove(key);
+            let v = annotation_violations("svc_things", &ann);
+            assert_eq!(v, [format!("svc_things: annotations.{key} not set")]);
+        }
+    }
+
+    #[test]
+    fn assert_fits_accepts_a_matching_result() {
+        let ts = Fixed::new(vec![good()]);
+        let r = call(&ts, "svc_things", json!({}));
+        assert_eq!(assert_fits(&ts, "svc_things", &r)["name"], "a");
+    }
+
+    #[test]
+    #[should_panic(expected = "returned an error")]
+    fn assert_fits_rejects_an_error_result() {
+        let ts = Fixed::new(vec![good()]);
+        let r = call(&ts, "svc_things", json!({"nope": 1}));
+        assert_fits(&ts, "svc_things", &r);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not match its outputSchema")]
+    fn assert_fits_rejects_an_undeclared_field() {
+        let mut ts = Fixed::new(vec![good()]);
+        ts.output = json!({"name": "a", "extra": 1});
+        let r = call(&ts, "svc_things", json!({}));
+        assert_fits(&ts, "svc_things", &r);
+    }
+
+    #[test]
+    #[should_panic(expected = "text and structuredContent differ")]
+    fn assert_fits_rejects_text_that_differs_from_the_structure() {
+        let ts = Fixed::new(vec![good()]);
+        let r = CallToolResult::from_parts(Some(json!({"name": "a"})), r#"{"name":"b"}"#, false);
+        assert_fits(&ts, "svc_things", &r);
+    }
+
+    #[test]
+    #[should_panic(expected = "over the 32000-character budget")]
+    fn assert_fits_rejects_a_result_over_budget() {
+        let mut ts = Fixed::new(vec![good()]);
+        ts.output = json!({"name": "x".repeat(SIZE_BUDGET)});
+        let r = call(&ts, "svc_things", json!({}));
+        assert_fits(&ts, "svc_things", &r);
     }
 
     #[test]

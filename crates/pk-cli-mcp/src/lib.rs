@@ -24,7 +24,9 @@
 //! - [`ToolOutput`] / [`CallToolResult`]: structured JSON plus the same JSON
 //!   as compact text.
 //! - [`Toolset`]: the trait a CLI implements: async calls with no `Send`
-//!   bound, tools in a stable order.
+//!   bound, tools in a stable order. The provider sits behind a per-target
+//!   seam the toolset awaits (blocking natively, `fetch` in a Worker); see
+//!   the trait's docs.
 //! - [`shape`]: limits (default 25, max 200), opaque cursors,
 //!   [`ResponseFormat`] and the per-result size budget that truncates a list
 //!   with a hint on how to narrow.
@@ -58,10 +60,10 @@
 //!
 //! # Features
 //!
-//! - `stdio` (native): [`run`] and [`McpArgs`], the `<bin> mcp` subcommand
+//! - `stdio` (native): `run` and `McpArgs`, the `<bin> mcp` subcommand
 //!   on the official Rust SDK (`rmcp`).
-//! - `test-util`: [`conformance`], the checks every CLI's tests run, and
-//!   [`block_on`] for calling a toolset synchronously.
+//! - `test-util`: `conformance`, the checks every CLI's tests run, and
+//!   `block_on` for calling a toolset synchronously.
 
 pub mod error;
 pub mod result;
@@ -71,18 +73,18 @@ pub mod toolset;
 
 #[cfg(any(feature = "stdio", feature = "test-util", test))]
 mod block_on;
-#[cfg(feature = "test-util")]
+#[cfg(any(feature = "test-util", test))]
 pub mod conformance;
 #[cfg(feature = "stdio")]
 mod stdio;
 
-#[cfg(any(feature = "stdio", feature = "test-util"))]
+#[cfg(feature = "test-util")]
 pub use block_on::block_on;
 pub use error::{ErrorKind, ToolError};
 pub use result::{CallToolResult, ToolOutput};
 pub use shape::{ListArgs, Page, PageInfo, PageRequest, ResponseFormat};
 #[cfg(feature = "stdio")]
-pub use stdio::{run, serve_stdio, McpArgs};
+pub use stdio::{run, McpArgs};
 pub use tool::{Annotations, ToolDef};
 pub use toolset::{
     call_tool, call_tool_json, instructions, parse_args, tools_list, tools_list_json, Server,

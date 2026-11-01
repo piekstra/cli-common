@@ -406,8 +406,11 @@ credentials never leave hardware or an account they control.
 | **B: deploy-your-own Worker** | a Cloudflare Worker in the user's own free account | claude.ai on the web and mobile, as a remote connector | the Worker's secrets, in the user's account. Official-API CLIs run inside the Worker as Rust compiled to WebAssembly; portal CLIs are forwarded through the user's own Cloudflare Tunnel to their computer, which runs path A |
 
 Path B is designed separately (`connector/`). It reuses this profile's core:
-the toolset a CLI writes for path A is the toolset B runs, which is why the
-core of `pk-cli-mcp` builds for `wasm32-unknown-unknown`.
+the definitions, argument handling, shaping and errors a CLI writes for path
+A are what B runs, which is why the core of `pk-cli-mcp` builds for
+`wasm32-unknown-unknown`. The provider underneath is per target (blocking
+HTTP and the keychain natively, the Worker's `fetch` in B), so a toolset
+meant for both reaches it through a seam it awaits (§2.3).
 
 #### Tools
 
@@ -427,10 +430,17 @@ core of `pk-cli-mcp` builds for `wasm32-unknown-unknown`.
   to use it, what it returns, how to narrow it. The description names the
   returned fields, because Claude Code forwards `structuredContent` to the
   model but does not show it the `outputSchema`. Every argument carries a
-  description (a doc comment).
+  description (a doc comment). The arguments are one flat object: a struct
+  with `Option` fields, never an enum or a flattened one, because the
+  dispatcher checks argument names against the schema's top-level
+  `properties`.
 - **Structured results.** Every tool declares an `outputSchema` and returns
   `structuredContent`, plus the same JSON as one compact text block for
-  clients that read only `content`. A result is a JSON object.
+  clients that read only `content`. A result is a JSON object, and its
+  schema is generated for serialization: a plain `Option` field is required
+  and nullable (`serde_json` writes `null`), a field with
+  `skip_serializing_if` is optional, so a client validating
+  `structuredContent` accepts every value the tool can return.
 - **Writes stand alone.** Each write is its own tool, never combined with a
   read, and no tool moves money: the connector directory rejects both. A
   write is not read-only, says whether it is destructive, and carries
@@ -453,11 +463,12 @@ core of `pk-cli-mcp` builds for `wasm32-unknown-unknown`.
 | Paging | an opaque `cursor`; a page returns `next_cursor` until the last. A cursor is bound to its query's filters, so one replayed with other filters is refused rather than paging a different list |
 | Format | `response_format`: `concise` (default) is the fields a person reads, names instead of ids; `detailed` adds ids, timestamps and provider detail |
 | Envelope | `items`, `returned`, `next_cursor`, `truncated`, `hint`, beside the tool's own top-level fields |
-| Size budget | a page stops before 32,000 bytes of JSON and says so: `truncated: true` and a `hint` naming the cursor and the tool's own narrowing arguments. Claude Code warns above 10,000 tokens per result and cuts at 25,000; Claude Desktop and claude.ai cut at about 150,000 characters and 240 s per call |
-| Hard limit | any result over 64,000 bytes, list or not, is replaced by an error telling the model to narrow the call |
+| Size budget | a page stops before 32,000 characters of JSON and says so: `truncated: true` and a `hint` naming the cursor and the tool's own narrowing arguments. Claude Code warns above 10,000 tokens per result and cuts at 25,000; Claude Desktop and claude.ai cut at about 150,000 characters and 240 s per call |
+| Hard limit | any result over 64,000 characters, list or not, is replaced by an error telling the model to narrow the call |
 
 `pk_cli_mcp::ListArgs` is the argument block, `PageRequest` resolves it and
-cuts the page, `Page<T>` is the envelope.
+cuts the page, `Page<T>` is the envelope. Sizes count characters, as the
+hosts' caps do, not UTF-8 bytes.
 
 #### Errors
 
@@ -724,7 +735,13 @@ conformance check.
 ```rust
 use pk_cli_mcp::{parse_args, ListArgs, Page, PageRequest, Server, ToolDef, ToolError, ToolOutput, Toolset};
 
-impl Toolset for MyTools {
+/// The provider seam: blocking HTTP natively, `fetch` in a Worker.
+#[allow(async_fn_in_trait)]
+pub trait Source {
+    async fn items(&self, wanted: usize) -> Result<Vec<serde_json::Value>, CliError>;
+}
+
+impl<S: Source> Toolset for MyTools<S> {
     fn server(&self) -> Server {
         Server::new("svc", env!("CARGO_PKG_VERSION"), "Service", "svc")
     }
@@ -736,7 +753,7 @@ impl Toolset for MyTools {
     async fn call(&self, name: &str, args: serde_json::Value) -> Result<ToolOutput, ToolError> {
         let args: ItemsArgs = parse_args(args)?;
         let page = PageRequest::new(&args.list, &args.filters)?;
-        let rows = self.provider_read(page.wanted())?;   // CliError converts
+        let rows = self.source.items(page.wanted()).await?;   // CliError converts
         ToolOutput::new(&page.page(rows, "since/until")?)
     }
 }
@@ -745,9 +762,10 @@ impl Toolset for MyTools {
 | Part | |
 |---|---|
 | Core (default features) | builds for `wasm32-unknown-unknown`: no Tokio, keyring, processes or blocking I/O (`make wasm-check`, in CI). `Toolset::call` is an `async fn` without a `Send` bound, so a single-threaded WebAssembly host awaits it directly |
+| The provider seam | what the two hosts share stops at the provider. Natively (`stdio`) the `call` future is polled with **no Tokio reactor**, so blocking code works and reactor-bound code (async `reqwest`, `tokio::time`) panics; a Worker has no blocking I/O at all. A toolset meant for both awaits a provider trait (async methods, no `Send` bound) with one implementation per target; one that only runs natively may block in `call` directly |
 | The WASM boundary | MCP-shaped JSON, so a host passes it through: `tools_list_json` is the `tools/list` result (`{"tools": [...]}`), `call_tool_json(&toolset, &params)` the `tools/call` result (`CallToolResult` JSON, or a JSON-RPC error object for an unknown tool), `Server::server_info_json` and `instructions` the rest of what a server announces. Protocol-version envelope fields (2026-07-28's `resultType`, `ttlMs`, `cacheScope`, `_meta` identity) are the host's. The crate docs hold the full contract |
-| `stdio` feature | the `mcp` subcommand: `McpArgs` (with `--list-tools`) and `run`, on the official Rust SDK (`rmcp` 3.8) over stdin/stdout. Each call runs on Tokio's blocking pool through the crate's own `block_on`, outside any Tokio context, so blocking provider code (`reqwest::blocking`) runs unchanged and parallel read-only calls run in parallel |
-| `test-util` feature | `conformance::assert_conforms` (names, titles, hints, `requiresUserInteraction` on writes, three-sentence descriptions, described arguments, output schemas, definitions under 8,000 characters, stable order, the standard instructions) and `conformance::assert_fits` (a fixture-driven result is a success, under the size budget, and matches its output schema with no undeclared field), plus `conformance::call` and `block_on`. A dev-dependency only |
+| `stdio` feature | the `mcp` subcommand: `McpArgs` (with `--list-tools`) and `run`, on the official Rust SDK (`rmcp` 3.8) over stdin/stdout. Each call runs on Tokio's blocking pool through the crate's own executor, outside any Tokio context, so blocking provider code (`reqwest::blocking`) runs unchanged and parallel read-only calls run in parallel |
+| `test-util` feature | `conformance::assert_conforms` (names, titles, all four hints, `requiresUserInteraction` on writes, three-sentence descriptions, a flat input object with every argument described, output schemas, definitions under 8,000 characters, stable order, the standard instructions) and `conformance::assert_fits` (a fixture-driven result is a success, under the size budget, and matches its output schema with no undeclared field), plus `conformance::call` and `block_on`. A dev-dependency only |
 
 The crate needs Rust 1.88 (`rmcp`). `example-cli mcp` is the worked example:
 a paged read (`example_devices`) and a write (`example_device_rename`), its
