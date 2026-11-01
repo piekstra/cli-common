@@ -48,7 +48,7 @@
 //! | `tools/list` result | [`tools_list_json`] | `{"tools": [Tool, …]}`, MCP `Tool` objects in a stable order |
 //! | `tools/call` | [`call_tool_json`]`(&toolset, &params).await` | `Ok(CallToolResult)` JSON: `{"content":[{"type":"text","text":…}],"structuredContent":{…},"isError":bool}`; `Err` a JSON-RPC error object (`-32602`) for an unknown tool or params without a name |
 //! | `serverInfo` | [`Server::server_info_json`] | `{"name", "title", "version"}` |
-//! | `instructions` | [`instructions`] | the server instructions string |
+//! | `instructions` | [`instructions`] | the server instructions string; its two host-specific sentences (where credentials live, how to sign in) come from [`Server`], local by default, replaced with [`Server::host_note`] and [`Server::sign_in_remedy`] |
 //!
 //! Tool failures (bad arguments, auth, not found, upstream, an oversized
 //! result) are `CallToolResult`s with `isError: true` and text saying how to

@@ -18,6 +18,8 @@ use std::fmt;
 
 use pk_cli_core::CliError;
 
+use crate::toolset::Server;
+
 /// What went wrong, by the family's exit codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -131,9 +133,13 @@ impl ToolError {
     }
 
     /// The `isError` result text: the kind's slug, the message, and what to
-    /// do next. `bin` names the CLI for the sign-in remedy.
-    pub fn render(&self, bin: &str) -> String {
-        let fix = self.fix.clone().unwrap_or_else(|| self.standard_fix(bin));
+    /// do next. `server` supplies the sign-in remedy (its host's) and the
+    /// CLI's name.
+    pub fn render(&self, server: &Server) -> String {
+        let fix = self
+            .fix
+            .clone()
+            .unwrap_or_else(|| self.standard_fix(server));
         format!(
             "{}: {} {}",
             self.kind.code(),
@@ -142,12 +148,14 @@ impl ToolError {
         )
     }
 
-    fn standard_fix(&self, bin: &str) -> String {
+    fn standard_fix(&self, server: &Server) -> String {
+        let bin = &server.bin;
         match self.kind {
             ErrorKind::Usage => "Fix the arguments as described and call the tool again".into(),
             ErrorKind::Auth => format!(
-                "Ask the user to run `{bin} auth login` in a terminal, then call the tool \
-                 again. Tools never sign in or create credentials themselves"
+                "{}, then call the tool again. Tools never sign in or create credentials \
+                 themselves",
+                capitalized(&server.sign_in())
             ),
             ErrorKind::NotFound => {
                 "Check the name or id against what the list tool returns, then call again".into()
@@ -158,11 +166,20 @@ impl ToolError {
             ErrorKind::ConfirmationRequired => {
                 "Nothing was changed: this needs the user's confirmation".into()
             }
-            ErrorKind::Other => format!(
+            ErrorKind::Other if server.is_local() => format!(
                 "If it persists, ask the user to check `{bin} auth status` and `{bin} --version` \
                  in a terminal"
             ),
+            ErrorKind::Other => "If it persists, tell the user what failed".into(),
         }
+    }
+}
+
+fn capitalized(s: &str) -> String {
+    let mut chars = s.trim().chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -204,6 +221,10 @@ impl From<CliError> for ToolError {
 mod tests {
     use super::*;
 
+    fn server(bin: &str) -> Server {
+        Server::new(bin, "0", "Svc", "svc")
+    }
+
     #[test]
     fn exit_codes_round_trip() {
         for code in 1..=6 {
@@ -226,17 +247,34 @@ mod tests {
 
     #[test]
     fn auth_errors_name_the_login_command_and_never_offer_to_sign_in() {
-        let text = ToolError::auth("the key was rejected (HTTP 401)").render("cbase");
+        let text = ToolError::auth("the key was rejected (HTTP 401)").render(&server("cbase"));
         assert!(text.starts_with("auth: the key was rejected (HTTP 401). "));
         assert!(text.contains("`cbase auth login` in a terminal"));
         assert!(text.contains("never sign in"));
+    }
+
+    /// A host where `auth login` fixes nothing (a Worker) supplies its own
+    /// remedy, and no CLI command is suggested anywhere.
+    #[test]
+    fn another_host_s_remedy_replaces_the_local_one() {
+        let worker = server("cbase")
+            .host_note("through code running in the user's own Cloudflare account")
+            .sign_in_remedy("ask the user to update the key in their Worker's secrets");
+        let text = ToolError::auth("the key was rejected").render(&worker);
+        assert!(
+            text.contains("Ask the user to update the key in their Worker's secrets, then call"),
+            "{text}"
+        );
+        assert!(!text.contains("auth login"), "{text}");
+        let text = ToolError::other("boom").render(&worker);
+        assert!(!text.contains("cbase"), "{text}");
     }
 
     #[test]
     fn a_tool_specific_fix_replaces_the_standard_one() {
         let text = ToolError::not_found("no account named `BTC`")
             .with_fix("Call coinbase_accounts to see the account names")
-            .render("cbase");
+            .render(&server("cbase"));
         assert_eq!(
             text,
             "not_found: no account named `BTC`. Call coinbase_accounts to see the account names."
@@ -245,7 +283,7 @@ mod tests {
 
     #[test]
     fn messages_get_exactly_one_full_stop() {
-        let text = ToolError::usage("limit must be 1 to 200.").render("x");
+        let text = ToolError::usage("limit must be 1 to 200.").render(&server("x"));
         assert!(text.starts_with("usage: limit must be 1 to 200. Fix"));
         assert!(!text.contains(".."));
     }
