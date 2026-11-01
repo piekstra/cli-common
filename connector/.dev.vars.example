@@ -1,0 +1,6 @@
+# Secrets the Worker needs. The Deploy to Cloudflare button prompts for each.
+# A long random passphrase you type on the connector's approval page,
+# e.g. the output of `openssl rand -base64 24`. 20 characters minimum.
+OWNER_PASSPHRASE=
+# The CDP API key JSON file Coinbase gave you, on one line (ECDSA key).
+CBASE_CDP_KEY=

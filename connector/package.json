@@ -1,0 +1,36 @@
+{
+  "name": "pk-cli-connector",
+  "private": true,
+  "type": "module",
+  "description": "Deploy-your-own Cloudflare Worker that serves piekstra-family CLI tools to claude.ai as a remote MCP connector (spike).",
+  "scripts": {
+    "build:wasm": "sh scripts/build-wasm.sh",
+    "keys": "node scripts/gen-dummy-key.mjs",
+    "mock": "node mock/coinbase-mock.mjs",
+    "dev": "wrangler dev --local --ip 127.0.0.1 --port 8787",
+    "smoke": "sh scripts/smoke.sh",
+    "bench": "node scripts/bench-node.mjs bench",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.4",
+    "@modelcontextprotocol/server": "2.4.0",
+    "agents": "0.32.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261101.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.156.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "OWNER_PASSPHRASE": {
+        "description": "A long random passphrase (20+ characters, e.g. `openssl rand -base64 24`). You type it on this connector's approval page when you connect Claude; nobody without it can connect."
+      },
+      "CBASE_CDP_KEY": {
+        "description": "Your Coinbase CDP API key JSON file, pasted whole. Create a read-only ECDSA key at https://portal.cdp.coinbase.com."
+      }
+    }
+  }
+}

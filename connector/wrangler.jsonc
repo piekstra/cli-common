@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pk-cli-connector",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-23",
+  // nodejs_compat: the agents SDK's MCP handler uses AsyncLocalStorage.
+  // global_fetch_strictly_public: required by workers-oauth-provider before it
+  // fetches Client ID Metadata Documents (claude.ai prefers CIMD over DCR when
+  // advertised). Local `wrangler dev` still reaches the 127.0.0.1 mock.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // No id: `wrangler deploy` and the Deploy to Cloudflare button provision it.
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  "vars": {
+    "COINBASE_BASE_URL": "https://api.coinbase.com"
+  },
+  "secrets": {
+    "required": ["OWNER_PASSPHRASE", "CBASE_CDP_KEY"]
+  },
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": true }],
+  "observability": { "enabled": true }
+}

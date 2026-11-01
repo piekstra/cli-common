@@ -1,0 +1,1309 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 166d271..3bc8944 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -437,6 +437,8 @@ dependencies = [
+  "clap",
+  "clap_complete",
+  "ed25519-dalek",
++ "getrandom 0.4.3",
++ "js-sys",
+  "p256",
+  "pk-cli-auth",
+  "pk-cli-config",
+diff --git a/Cargo.toml b/Cargo.toml
+index 2e2c561..4e77388 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -18,22 +18,42 @@ path = "src/lib.rs"
+ [[bin]]
+ name = "cbase"
+ path = "src/main.rs"
++required-features = ["native"]
++
++[features]
++default = ["native"]
++# Everything the terminal binary needs and a Cloudflare Worker cannot have: the
++# OS keychain, clap, self-update, and a blocking HTTP client. Build the library
++# with `--no-default-features` for wasm32-unknown-unknown and it keeps only the
++# signer, the request/response mapping, the parsers and the MCP tool table.
++native = [
++    "dep:clap",
++    "dep:clap_complete",
++    "dep:pk-cli-secrets",
++    "dep:pk-cli-config",
++    "dep:pk-cli-selfupdate",
++    "dep:pk-cli-auth",
++    "dep:pk-cli-http",
++    "dep:pk-cli-utility",
++    "dep:reqwest",
++    "pk-cli-core/reqwest",
++]
+ 
+ [dependencies]
+-clap = { version = "4", features = ["derive", "env"] }
+-clap_complete = "4"
++clap = { version = "4", features = ["derive", "env"], optional = true }
++clap_complete = { version = "4", optional = true }
+ serde = { version = "1", features = ["derive"] }
+ # preserve_order keeps DTO fields and table columns in the order the code builds
+ # them, rather than alphabetized by serde_json's default map ordering.
+ serde_json = { version = "1", features = ["preserve_order"] }
+-pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0", features = ["reqwest"] }
+-pk-cli-secrets = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0" }
+-pk-cli-config = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0" }
+-pk-cli-selfupdate = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0" }
+-pk-cli-auth = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0" }
+-pk-cli-http = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0" }
+-pk-cli-utility = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0" }
+-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
++pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0" }
++pk-cli-secrets = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0", optional = true }
++pk-cli-config = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0", optional = true }
++pk-cli-selfupdate = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0", optional = true }
++pk-cli-auth = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0", optional = true }
++pk-cli-http = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0", optional = true }
++pk-cli-utility = { git = "https://github.com/piekstra/cli-common", tag = "v0.4.0", optional = true }
++reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+ 
+ # --- CDP JWT signing -------------------------------------------------------
+ # Coinbase authenticates every request with a short-lived JWT signed by the CDP
+@@ -47,9 +67,19 @@ p256 = { version = "0.14", default-features = false, features = ["std", "ecdsa",
+ ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "fast", "pkcs8", "zeroize"] }
+ sha2 = "0.11"
+ base64 = "0.23"
+-rand = "0.10"
++# The JWT nonce comes straight from the OS CSPRNG (`getrandom::fill`). On
++# wasm32-unknown-unknown the `wasm_js` feature routes it to
++# `crypto.getRandomValues`, which workerd provides.
++getrandom = "0.4"
++
++[target.'cfg(target_arch = "wasm32")'.dependencies]
++getrandom = { version = "0.4", features = ["wasm_js"] }
++# `Date.now()` for the JWT's nbf/exp: `SystemTime::now()` panics on
++# wasm32-unknown-unknown.
++js-sys = "0.3"
+ 
+ [dev-dependencies]
++rand = "0.10"
+ assert_cmd = "2"
+ predicates = "3"
+ 
+diff --git a/src/client.rs b/src/client.rs
+index c4c173c..52e5c91 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -8,13 +8,15 @@
+ //!
+ //! Each request mints its own token ([`crate::jwt`]): tokens live ~2 minutes
+ //! and are bound to one method+path, so there is nothing worth caching.
++//!
++//! Generic over [`Transport`], so the terminal binary (blocking `reqwest`) and
++//! a Cloudflare Worker (`fetch`) run this same code; see [`crate::http`].
+ 
+ use pk_cli_core::CliError;
+-use pk_cli_secrets::CredentialStore;
+ use serde_json::Value;
+ 
+-use crate::config::Config;
+ use crate::credential::Credential;
++use crate::http::{HttpRequest, Transport};
+ use crate::jwt;
+ 
+ /// The v2 API is versioned by a `CB-VERSION: YYYY-MM-DD` header. Omit it and
+@@ -37,20 +39,25 @@ pub const CB_VERSION: &str = "2022-01-06";
+ /// default 25). Asking for the maximum minimizes round trips.
+ pub const MAX_PAGE: u32 = 100;
+ 
+-pub struct Coinbase {
+-    http: reqwest::blocking::Client,
++pub struct Coinbase<T> {
++    transport: T,
+     base_url: String,
+     host: String,
+     cred: Credential,
+     verbose: bool,
+ }
+ 
+-impl Coinbase {
++#[cfg(feature = "native")]
++impl Coinbase<crate::http::BlockingTransport> {
+     /// Build a client from the key in the OS keychain.
+     ///
+     /// A missing key is [`CliError::Auth`] (exit 3) with the command that fixes
+     /// it, so a driver can branch on the exit code instead of parsing prose.
+-    pub fn new(cfg: &Config, creds: &CredentialStore, verbose: bool) -> Result<Self, CliError> {
++    pub fn new(
++        cfg: &crate::config::Config,
++        creds: &pk_cli_secrets::CredentialStore,
++        verbose: bool,
++    ) -> Result<Self, CliError> {
+         let stored = crate::credential::read_stored_key(creds)?.ok_or_else(|| {
+             CliError::Auth(
+                 "no Coinbase CDP API key stored — create one at https://portal.cdp.coinbase.com \
+@@ -59,15 +66,34 @@ impl Coinbase {
+             )
+         })?;
+         let cred = Credential::parse(stored.expose())?;
+-        let base_url = cfg.base_url();
++        let http = pk_cli_http::client("cbase", env!("CARGO_PKG_VERSION"))?;
++        Ok(Self::with_transport(
++            cred,
++            &cfg.base_url(),
++            crate::http::BlockingTransport(http),
++            verbose,
++        ))
++    }
++}
++
++impl<T: Transport> Coinbase<T> {
++    /// A client over any transport. The Worker builds one per request from
++    /// the key in its secret binding; the binary goes through [`Self::new`].
++    pub fn with_transport(cred: Credential, base_url: &str, transport: T, verbose: bool) -> Self {
++        let base_url = base_url.trim_end_matches('/').to_string();
+         let host = host_of(&base_url);
+-        Ok(Self {
+-            http: pk_cli_http::client("cbase", env!("CARGO_PKG_VERSION"))?,
++        Self {
++            transport,
+             base_url,
+             host,
+             cred,
+             verbose,
+-        })
++        }
++    }
++
++    #[cfg(test)]
++    pub(crate) fn transport_for_tests(&self) -> &T {
++        &self.transport
+     }
+ 
+     pub fn key_id(&self) -> &str {
+@@ -82,38 +108,62 @@ impl Coinbase {
+         self.cred.signer().algorithm()
+     }
+ 
++    /// The signed request for a GET, without sending it. Separate from
++    /// [`Self::get`] so a test can see exactly what goes on the wire.
++    pub async fn request(
++        &self,
++        path: &str,
++        query: &[(&str, String)],
++    ) -> Result<HttpRequest, CliError> {
++        let token = self.token("GET", path).await?;
++        Ok(HttpRequest {
++            method: "GET",
++            url: format!("{}{path}", self.base_url),
++            query: query
++                .iter()
++                .map(|(k, v)| ((*k).to_string(), v.clone()))
++                .collect(),
++            headers: vec![
++                ("Authorization", format!("Bearer {token}")),
++                ("CB-VERSION", CB_VERSION.to_string()),
++                ("Accept", "application/json".to_string()),
++            ],
++        })
++    }
++
+     /// GET a path, with optional query parameters.
+     ///
+     /// `path` carries the leading slash and **no** query string: the JWT's
+     /// `uri` claim is built from the path alone, so query parameters must
+     /// arrive through `query` or the token will not validate.
+-    pub fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value, CliError> {
+-        let token = self.token("GET", path)?;
++    pub async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value, CliError> {
++        let req = self.request(path, query).await?;
+         if self.verbose {
+             // The path and parameters, never the token.
+             eprintln!("GET {}{path} {query:?}", self.base_url);
+         }
+-        let resp = self
+-            .http
+-            .get(format!("{}{path}", self.base_url))
+-            .query(query)
+-            .bearer_auth(token)
+-            .header("CB-VERSION", CB_VERSION)
+-            .header("Accept", "application/json")
+-            .send()?;
+-        response_json(resp)
++        let resp = self.transport.send(req).await?;
++        response_json(resp.status, &resp.body)
+     }
+ 
+-    fn token(&self, method: &str, path: &str) -> Result<String, CliError> {
+-        jwt::mint(
+-            self.cred.signer(),
++    /// Mint the per-request JWT, letting the transport sign when it has
++    /// faster native crypto than the pure-Rust signer.
++    async fn token(&self, method: &str, path: &str) -> Result<String, CliError> {
++        let signer = self.cred.signer();
++        let input = jwt::signing_input(
++            signer.algorithm(),
+             &self.cred.key_id,
+             method,
+             &self.host,
+             path,
+             jwt::now_secs(),
+-            &jwt::nonce(),
+-        )
++            &jwt::nonce()?,
++        )?;
++        let sig = match self.transport.sign(signer, input.as_bytes()).await {
++            Some(platform) => platform?,
++            None => signer.sign(input.as_bytes()),
++        };
++        Ok(jwt::assemble(&input, &sig))
+     }
+ 
+     /// Follow a v2 list endpoint's cursor until `limit` records are collected
+@@ -123,7 +173,7 @@ impl Coinbase {
+     /// transactions" and this decides how many round trips that costs. A page
+     /// that returns nothing terminates the walk even if the cursor is still
+     /// non-null, so a provider bug cannot spin this forever.
+-    pub fn get_all(
++    pub async fn get_all(
+         &self,
+         path: &str,
+         query: &[(&str, String)],
+@@ -139,7 +189,7 @@ impl Coinbase {
+             if let Some(c) = &cursor {
+                 q.push(("starting_after", c.clone()));
+             }
+-            let page = self.get(path, &q)?;
++            let page = self.get(path, &q).await?;
+             let rows = page
+                 .get("data")
+                 .and_then(Value::as_array)
+@@ -232,10 +282,8 @@ fn host_of(base_url: &str) -> String {
+ ///    the documented JSON error shape. Parsing that as JSON yields a confusing
+ ///    deserialization error instead of "your key was rejected". So the body is
+ ///    read as text first and JSON is only attempted opportunistically.
+-pub fn response_json(resp: reqwest::blocking::Response) -> Result<Value, CliError> {
+-    let status = resp.status().as_u16();
+-    let body = resp.text().unwrap_or_default();
+-    let parsed: Option<Value> = serde_json::from_str(&body).ok();
++pub fn response_json(status: u16, body: &str) -> Result<Value, CliError> {
++    let parsed: Option<Value> = serde_json::from_str(body).ok();
+ 
+     if (200..300).contains(&status) {
+         return parsed.ok_or_else(|| {
+diff --git a/src/commands/accounts.rs b/src/commands/accounts.rs
+index 0fc5e2b..fa6af75 100644
+--- a/src/commands/accounts.rs
++++ b/src/commands/accounts.rs
+@@ -8,8 +8,9 @@ use clap::Subcommand;
+ use pk_cli_core::CliError;
+ use pk_cli_utility::Paged;
+ 
+-use super::{Ctx, ACCOUNTS};
+-use crate::parse;
++use super::Ctx;
++use crate::http::block_on;
++use crate::queries;
+ 
+ #[derive(Subcommand, Debug)]
+ pub enum Cmd {
+@@ -40,60 +41,7 @@ pub struct ListArgs {
+ 
+ pub fn run(ctx: &Ctx, cmd: &Cmd) -> Result<(), CliError> {
+     let Cmd::List(args) = cmd;
+-
+-    let rows = ctx
+-        .client()?
+-        .get_all(ACCOUNTS, &[], zero_filtered_limit(args.all, args.limit))?;
+-    let mut accounts = parse::accounts(&rows);
+-    if !args.all {
+-        accounts.retain(|a| !is_zero(&a.balance.amount));
+-    }
+-    if let Some(n) = args.limit {
+-        accounts.truncate(n as usize);
+-    }
+-
++    let accounts = block_on(queries::accounts(&ctx.client()?, args.all, args.limit))?;
+     Paged::new("crypto-account", accounts).emit(ctx.common.json);
+     Ok(())
+ }
+-
+-/// `--limit` counts records the user will *see*, but the zero-balance filter
+-/// runs after paging — so when it is active the fetch must not stop at the
+-/// limit or a page of empty wallets would swallow the whole result.
+-fn zero_filtered_limit(all: bool, limit: Option<u32>) -> Option<u32> {
+-    if all {
+-        limit
+-    } else {
+-        None
+-    }
+-}
+-
+-/// True for `"0"`, `"0.00000000"`, `"-0.0"`, and friends — without parsing a
+-/// float, which would round a dust balance to zero and hide it.
+-fn is_zero(amount: &str) -> bool {
+-    let s = amount.trim().trim_start_matches(['+', '-']);
+-    !s.is_empty() && s.chars().all(|c| c == '0' || c == '.')
+-}
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    #[test]
+-    fn zero_detection_does_not_go_through_a_float() {
+-        for z in ["0", "0.0", "0.00000000", "-0.00000000", "+0", " 0.00 "] {
+-            assert!(is_zero(z), "{z} should read as zero");
+-        }
+-        for nz in ["0.00000001", "1", "-0.5", "10.00", ""] {
+-            assert!(!is_zero(nz), "{nz} should not read as zero");
+-        }
+-    }
+-
+-    #[test]
+-    fn the_fetch_limit_is_dropped_when_zero_balances_are_filtered_out() {
+-        // Filtering on: fetch everything, then trim.
+-        assert_eq!(zero_filtered_limit(false, Some(5)), None);
+-        // --all: the limit can be pushed down to the fetch.
+-        assert_eq!(zero_filtered_limit(true, Some(5)), Some(5));
+-        assert_eq!(zero_filtered_limit(true, None), None);
+-    }
+-}
+diff --git a/src/commands/api.rs b/src/commands/api.rs
+index 361fc33..198d7cf 100644
+--- a/src/commands/api.rs
++++ b/src/commands/api.rs
+@@ -32,7 +32,7 @@ pub fn run(ctx: &Ctx, args: &ApiArgs) -> Result<(), CliError> {
+     }
+     let (path, query) = split_query(&args.path)?;
+ 
+-    let payload = ctx.client()?.get(&path, &query)?;
++    let payload = crate::http::block_on(ctx.client()?.get(&path, &query))?;
+     output::json(&payload);
+     Ok(())
+ }
+diff --git a/src/commands/mod.rs b/src/commands/mod.rs
+index c0ef768..805e862 100644
+--- a/src/commands/mod.rs
++++ b/src/commands/mod.rs
+@@ -10,18 +10,13 @@ use pk_cli_secrets::CredentialStore;
+ 
+ use crate::client::Coinbase;
+ use crate::config::Config;
++use crate::http::BlockingTransport;
+ 
+ // The output contract lives in the shared crate; re-exported so the command
+ // modules keep their short `use super::{items, table_view}`.
+ pub use pk_cli_core::output::{rows_of as items, table_view};
+ 
+-/// Coinbase API paths the reads share.
+-pub const ACCOUNTS: &str = "/v2/accounts";
+-
+-/// The transactions path for one account.
+-pub fn account_transactions(account_id: &str) -> String {
+-    format!("/v2/accounts/{account_id}/transactions")
+-}
++pub use crate::queries::{account_transactions, ACCOUNTS};
+ 
+ pub struct Ctx<'a> {
+     pub common: &'a CommonArgs,
+@@ -35,7 +30,7 @@ impl Ctx<'_> {
+     /// There is no session to refresh and no re-auth ladder: a CDP key does
+     /// not expire mid-run, so a 401 means the key is wrong or revoked and
+     /// retrying it would only waste a round trip.
+-    pub fn client(&self) -> Result<Coinbase, CliError> {
++    pub fn client(&self) -> Result<Coinbase<BlockingTransport>, CliError> {
+         Coinbase::new(self.cfg, self.creds, self.common.verbose)
+     }
+ 
+@@ -52,16 +47,3 @@ impl Ctx<'_> {
+             })
+     }
+ }
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    #[test]
+-    fn transaction_paths_are_scoped_to_the_account() {
+-        assert_eq!(
+-            account_transactions("abc-123"),
+-            "/v2/accounts/abc-123/transactions"
+-        );
+-    }
+-}
+diff --git a/src/commands/transactions.rs b/src/commands/transactions.rs
+index b5b32e4..28d7c4a 100644
+--- a/src/commands/transactions.rs
++++ b/src/commands/transactions.rs
+@@ -13,8 +13,9 @@ use clap::Subcommand;
+ use pk_cli_core::CliError;
+ use pk_cli_utility::{Paged, RangeArgs};
+ 
+-use super::{account_transactions, Ctx};
+-use crate::parse;
++use super::Ctx;
++use crate::http::block_on;
++use crate::queries;
+ 
+ #[derive(Subcommand, Debug)]
+ pub enum Cmd {
+@@ -35,74 +36,15 @@ pub struct ListArgs {
+ 
+ pub fn run(ctx: &Ctx, cmd: &Cmd) -> Result<(), CliError> {
+     let Cmd::List(args) = cmd;
+-    // Everything that can fail on the user's input fails here, before the
+-    // keychain is opened or a request is signed.
+     args.range.validate()?;
+     let account = ctx.account(args.account.as_deref())?;
+-
+-    let path = account_transactions(&account);
+-    let rows = ctx
+-        .client()?
+-        .get_all(&path, &[], fetch_limit(&args.range))?;
+-
+-    let parsed = parse::transactions(&rows);
+-    let mut txns = parse::within(
+-        parsed,
++    let txns = block_on(queries::transactions(
++        &ctx.client()?,
++        &account,
++        args.range.limit,
+         args.range.since.as_deref(),
+         args.range.until.as_deref(),
+-        |t| t.date.as_str(),
+-    );
+-    if let Some(n) = args.range.limit {
+-        txns.truncate(n as usize);
+-    }
+-
++    ))?;
+     Paged::new("crypto-transaction", txns).emit(ctx.common.json);
+     Ok(())
+ }
+-
+-/// How many records to pull before filtering.
+-///
+-/// With no date bounds, `--limit N` is exactly N records off the front of a
+-/// newest-first list, so it can be pushed down to the fetch. With bounds, it
+-/// cannot: the wanted records may be anywhere in the history, and stopping at
+-/// N would silently return a prefix of the wrong range.
+-fn fetch_limit(range: &RangeArgs) -> Option<u32> {
+-    if range.since.is_none() && range.until.is_none() {
+-        range.limit
+-    } else {
+-        None
+-    }
+-}
+-
+-#[cfg(test)]
+-mod tests {
+-    use super::*;
+-
+-    fn range(limit: Option<u32>, since: Option<&str>, until: Option<&str>) -> RangeArgs {
+-        RangeArgs {
+-            limit,
+-            since: since.map(String::from),
+-            until: until.map(String::from),
+-        }
+-    }
+-
+-    #[test]
+-    fn a_bare_limit_is_pushed_down_to_the_fetch() {
+-        assert_eq!(fetch_limit(&range(Some(10), None, None)), Some(10));
+-        assert_eq!(fetch_limit(&range(None, None, None)), None);
+-    }
+-
+-    /// The trap this guards: `--since 2025-01-01 --limit 10` must not fetch
+-    /// only the 10 newest records and then filter them down to two.
+-    #[test]
+-    fn a_dated_query_must_not_stop_paging_at_the_limit() {
+-        assert_eq!(
+-            fetch_limit(&range(Some(10), Some("2025-01-01"), None)),
+-            None
+-        );
+-        assert_eq!(
+-            fetch_limit(&range(Some(10), None, Some("2025-12-31"))),
+-            None
+-        );
+-    }
+-}
+diff --git a/src/credential.rs b/src/credential.rs
+index 441c456..06ccc80 100644
+--- a/src/credential.rs
++++ b/src/credential.rs
+@@ -23,9 +23,11 @@
+ use std::fmt;
+ 
+ use pk_cli_core::CliError;
++#[cfg(feature = "native")]
+ use pk_cli_secrets::{CredentialStore, Secret};
+ use serde::Deserialize;
+ 
++#[cfg(feature = "native")]
+ use crate::config::KEYCHAIN_ACCOUNT;
+ use crate::jwt::Signer;
+ 
+@@ -39,6 +41,7 @@ use crate::jwt::Signer;
+ ///
+ /// The common way to hit this is a headless Linux host with no D-Bus secret
+ /// service running — which is exactly what CI is, and how this was found.
++#[cfg(feature = "native")]
+ pub fn read_stored_key(creds: &CredentialStore) -> Result<Option<Secret>, CliError> {
+     match creds.get(KEYCHAIN_ACCOUNT) {
+         Err(CliError::Keychain(msg)) => Err(CliError::Auth(keychain_unavailable(&msg))),
+@@ -50,6 +53,7 @@ pub fn read_stored_key(creds: &CredentialStore) -> Result<Option<Secret>, CliErr
+ /// even when logged out — and therefore even when the keychain itself is
+ /// unreachable. Returns the credential (if any) plus a diagnostic to print,
+ /// rather than failing.
++#[cfg(feature = "native")]
+ pub fn peek_stored_key(creds: &CredentialStore) -> (Option<Secret>, Option<String>) {
+     match creds.get(KEYCHAIN_ACCOUNT) {
+         Ok(v) => (v, None),
+@@ -61,6 +65,7 @@ pub fn peek_stored_key(creds: &CredentialStore) -> (Option<Secret>, Option<Strin
+ /// Every auth error names the command that fixes it — a driver branching on
+ /// exit 3 should never have to guess the next step. Here the remedy is two
+ /// parts: make a keychain available, then store the key.
++#[cfg(feature = "native")]
+ fn keychain_unavailable(msg: &str) -> String {
+     format!(
+         "the OS keychain is unavailable, so the API key could not be read ({msg}). \
+@@ -72,6 +77,7 @@ fn keychain_unavailable(msg: &str) -> String {
+ 
+ /// A parsed CDP API key: the id that goes in the JWT's `kid`/`sub`, and a
+ /// signer over the private half.
++#[derive(Clone)]
+ pub struct Credential {
+     /// The key identifier. Either the full
+     /// `organizations/{org}/apiKeys/{key}` resource name or a bare UUID,
+diff --git a/src/http.rs b/src/http.rs
+new file mode 100644
+index 0000000..b03578a
+--- /dev/null
++++ b/src/http.rs
+@@ -0,0 +1,100 @@
++//! The seam between the Coinbase client and whatever moves bytes.
++//!
++//! The terminal binary sends requests with a blocking `reqwest` client; a
++//! Cloudflare Worker has no threads and no sockets, only an async `fetch`. The
++//! client in [`crate::client`] is written once against [`Transport`], so the
++//! signing, URL building, pagination and error mapping are the same code on
++//! both, and only the ~20 lines that hand a request to the network differ.
++//!
++//! The trait is async because the Worker's side has to be. The native side
++//! implements it with a blocking call and drives it with [`block_on`], which
++//! never actually waits: a future whose body is a synchronous call is ready on
++//! its first poll.
++
++use pk_cli_core::CliError;
++
++use crate::jwt::Signer;
++
++/// One outgoing GET, fully described: the transport adds nothing but a
++/// connection. Query parameters stay separate from the URL so each transport
++/// percent-encodes them with its own (well-tested) encoder.
++#[derive(Debug, Clone)]
++pub struct HttpRequest {
++    pub method: &'static str,
++    pub url: String,
++    pub query: Vec<(String, String)>,
++    pub headers: Vec<(&'static str, String)>,
++}
++
++/// What the client needs back: the status and the body as text. The body is
++/// read as text, not JSON, because Coinbase answers some failures with a
++/// `text/plain` body (see [`crate::client::response_json`]).
++#[derive(Debug, Clone)]
++pub struct HttpResponse {
++    pub status: u16,
++    pub body: String,
++}
++
++/// Something that can send an [`HttpRequest`].
++///
++/// No `Send` bound: the Worker is single-threaded and the native binary polls
++/// on the calling thread, so neither side needs one, and requiring it would
++/// rule out `fetch`, whose futures hold JS values.
++#[allow(async_fn_in_trait)]
++pub trait Transport {
++    async fn send(&self, req: HttpRequest) -> Result<HttpResponse, CliError>;
++
++    /// Sign a JWT with the platform's own crypto, when it has faster crypto
++    /// than the pure-Rust signer. `None` (the default) means "use
++    /// [`Signer::sign`]".
++    ///
++    /// In a Worker, ES256 through WebCrypto runs in native code, which is the
++    /// difference between ~2 ms and well under 0.1 ms of CPU per request,
++    /// against a 10 ms free-plan budget per tool call. The output contract is
++    /// the same either way: the raw fixed-width JWS signature.
++    async fn sign(&self, _signer: &Signer, _input: &[u8]) -> Option<Result<Vec<u8>, CliError>> {
++        None
++    }
++}
++
++/// The native transport: the family's blocking `reqwest` client from
++/// `pk-cli-http`, with its user agent and timeouts.
++#[cfg(feature = "native")]
++pub struct BlockingTransport(pub reqwest::blocking::Client);
++
++#[cfg(feature = "native")]
++impl Transport for BlockingTransport {
++    async fn send(&self, req: HttpRequest) -> Result<HttpResponse, CliError> {
++        let mut rb = self.0.request(
++            reqwest::Method::from_bytes(req.method.as_bytes())
++                .map_err(|e| CliError::Other(format!("bad HTTP method: {e}")))?,
++            &req.url,
++        );
++        rb = rb.query(&req.query);
++        for (k, v) in &req.headers {
++            rb = rb.header(*k, v);
++        }
++        let resp = rb.send()?;
++        let status = resp.status().as_u16();
++        let body = resp.text().unwrap_or_default();
++        Ok(HttpResponse { status, body })
++    }
++}
++
++/// Run a future to completion on the current thread.
++///
++/// Only for futures that never wait on anything outside themselves — which is
++/// every future [`BlockingTransport`] produces. With a real async transport
++/// this would spin, so it is native-only.
++#[cfg(feature = "native")]
++pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
++    use std::task::{Context, Poll, Waker};
++    let mut fut = std::pin::pin!(fut);
++    let mut cx = Context::from_waker(Waker::noop());
++    loop {
++        if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
++            return v;
++        }
++        std::thread::yield_now();
++    }
++}
+diff --git a/src/jwt.rs b/src/jwt.rs
+index 42cbc63..aa8f2c5 100644
+--- a/src/jwt.rs
++++ b/src/jwt.rs
+@@ -48,6 +48,11 @@ const B64URL: base64::engine::general_purpose::GeneralPurpose =
+     base64::engine::general_purpose::URL_SAFE_NO_PAD;
+ 
+ /// The private half of a CDP API key, in whichever form Coinbase issued it.
++///
++/// `Clone` so a long-lived host (a Worker isolate) can parse the key once and
++/// hand each request a copy: loading a P-256 key derives its public point, a
++/// scalar multiplication as costly as a signature.
++#[derive(Clone)]
+ pub enum Signer {
+     /// ECDSA over NIST P-256, from a PEM key (`-----BEGIN EC PRIVATE KEY-----`
+     /// SEC1, or `-----BEGIN PRIVATE KEY-----` PKCS#8).
+@@ -137,9 +142,22 @@ impl Signer {
+         }
+     }
+ 
++    /// The EC key as PKCS#8 DER, for handing to a platform signer
++    /// (WebCrypto's `importKey("pkcs8", …)`). `None` for an Ed25519 key.
++    pub fn es256_pkcs8_der(&self) -> Option<Vec<u8>> {
++        use p256::pkcs8::EncodePrivateKey;
++        match self {
++            Signer::Es256(k) => p256::SecretKey::from(k.as_nonzero_scalar())
++                .to_pkcs8_der()
++                .ok()
++                .map(|d| d.as_bytes().to_vec()),
++            Signer::EdDsa(_) => None,
++        }
++    }
++
+     /// Raw JWS signature bytes over the signing input: fixed-width `r || s`
+     /// for ES256, the 64-byte Ed25519 signature for EdDSA.
+-    fn sign(&self, signing_input: &[u8]) -> Vec<u8> {
++    pub fn sign(&self, signing_input: &[u8]) -> Vec<u8> {
+         match self {
+             Signer::Es256(k) => {
+                 use p256::ecdsa::signature::Signer as _;
+@@ -168,10 +186,34 @@ pub fn mint(
+     path: &str,
+     now_secs: u64,
+     nonce: &str,
++) -> Result<String, CliError> {
++    let input = signing_input(
++        signer.algorithm(),
++        key_id,
++        method,
++        host,
++        path,
++        now_secs,
++        nonce,
++    )?;
++    let sig = signer.sign(input.as_bytes());
++    Ok(assemble(&input, &sig))
++}
++
++/// The JWS signing input, `base64url(header).base64url(claims)`: everything
++/// but the signature, so a platform signer can produce that part.
++pub fn signing_input(
++    alg: &str,
++    key_id: &str,
++    method: &str,
++    host: &str,
++    path: &str,
++    now_secs: u64,
++    nonce: &str,
+ ) -> Result<String, CliError> {
+     let uri = uri_claim(method, host, path);
+     let header = json!({
+-        "alg": signer.algorithm(),
++        "alg": alg,
+         "typ": "JWT",
+         "kid": key_id,
+         "nonce": nonce,
+@@ -183,14 +225,16 @@ pub fn mint(
+         "exp": now_secs + LIFETIME_SECS,
+         "uri": uri,
+     });
+-
+-    let signing_input = format!(
++    Ok(format!(
+         "{}.{}",
+         B64URL.encode(serde_json::to_vec(&header).map_err(encode_err)?),
+         B64URL.encode(serde_json::to_vec(&claims).map_err(encode_err)?),
+-    );
+-    let sig = signer.sign(signing_input.as_bytes());
+-    Ok(format!("{signing_input}.{}", B64URL.encode(sig)))
++    ))
++}
++
++/// The compact JWS: signing input, a dot, the base64url signature.
++pub fn assemble(signing_input: &str, signature: &[u8]) -> String {
++    format!("{signing_input}.{}", B64URL.encode(signature))
+ }
+ 
+ /// `"GET api.coinbase.com/v2/accounts"` — method, space, host, path. Any query
+@@ -206,16 +250,20 @@ pub fn uri_claim(method: &str, host: &str, path: &str) -> String {
+ }
+ 
+ /// A fresh 128-bit nonce as lower-case hex, from the OS CSPRNG.
+-pub fn nonce() -> String {
+-    use rand::Rng as _;
++///
++/// `getrandom` directly rather than through `rand`: it is the one crate here
++/// that knows how to reach `crypto.getRandomValues` in a Worker (its `wasm_js`
++/// feature), and a nonce needs nothing `rand` adds. Not a plain counter: the
++/// nonce is what stops a captured token being replayed within its window.
++pub fn nonce() -> Result<String, CliError> {
+     let mut bytes = [0u8; 16];
+-    // `rand::rng()` is a CSPRNG seeded from the OS. Not a plain counter: the
+-    // nonce is what stops a captured token being replayed within its window.
+-    rand::rng().fill_bytes(&mut bytes);
+-    bytes.iter().map(|b| format!("{b:02x}")).collect()
++    getrandom::fill(&mut bytes)
++        .map_err(|e| CliError::Other(format!("the system random source failed ({e})")))?;
++    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+ }
+ 
+ /// Seconds since the Unix epoch.
++#[cfg(not(target_arch = "wasm32"))]
+ pub fn now_secs() -> u64 {
+     std::time::SystemTime::now()
+         .duration_since(std::time::UNIX_EPOCH)
+@@ -223,6 +271,14 @@ pub fn now_secs() -> u64 {
+         .unwrap_or(0)
+ }
+ 
++/// Seconds since the Unix epoch, from the JS clock: `SystemTime::now()` panics
++/// on wasm32-unknown-unknown. In a Worker `Date.now()` only advances across
++/// I/O, which is fine at the one-second resolution a JWT carries.
++#[cfg(target_arch = "wasm32")]
++pub fn now_secs() -> u64 {
++    (js_sys::Date::now() / 1000.0) as u64
++}
++
+ fn bad_key(kind: &str, e: impl std::fmt::Display) -> CliError {
+     CliError::Auth(format!("the private key is not a valid {kind} key ({e})"))
+ }
+@@ -353,6 +409,22 @@ mod tests {
+         assert_eq!(sig.len(), 64);
+     }
+ 
++    /// What a platform signer is handed must be the same key: a signature
++    /// made by p256 from the exported DER verifies under the original.
++    #[test]
++    fn the_exported_pkcs8_der_is_the_same_key() {
++        use p256::pkcs8::DecodePrivateKey;
++        let pem = throwaway_ec_pem();
++        let signer = Signer::from_private_key(&pem).unwrap();
++        let der = signer.es256_pkcs8_der().expect("an EC key exports");
++        let round = p256::SecretKey::from_pkcs8_der(&der).unwrap();
++        assert_eq!(round, p256::SecretKey::from_sec1_pem(&pem).unwrap());
++        assert!(Signer::from_private_key(&ed25519_keypair_b64())
++            .unwrap()
++            .es256_pkcs8_der()
++            .is_none());
++    }
++
+     #[test]
+     fn pkcs8_pem_is_accepted_too() {
+         let signer = Signer::from_private_key(&throwaway_pkcs8_pem()).unwrap();
+@@ -422,8 +494,8 @@ mod tests {
+ 
+     #[test]
+     fn nonces_do_not_repeat() {
+-        let a = nonce();
+-        let b = nonce();
++        let a = nonce().unwrap();
++        let b = nonce().unwrap();
+         assert_eq!(a.len(), 32);
+         assert_ne!(a, b, "a repeated nonce defeats the point of having one");
+     }
+diff --git a/src/lib.rs b/src/lib.rs
+index be7b8a7..a763ec2 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -10,8 +10,12 @@
+ //! [`commands::api`] and must change in the same commit as any first write.
+ 
+ pub mod client;
++#[cfg(feature = "native")]
+ pub mod commands;
+ pub mod config;
+ pub mod credential;
++pub mod http;
+ pub mod jwt;
++pub mod mcp;
+ pub mod parse;
++pub mod queries;
+diff --git a/src/main.rs b/src/main.rs
+index b6ec6a7..72e4cf9 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -284,7 +284,7 @@ fn login(
+ /// One cheap authenticated read, to prove the key works.
+ fn verify(cfg: &Config, creds: &CredentialStore) -> Result<(), CliError> {
+     let client = Coinbase::new(cfg, creds, false)?;
+-    client.get(ACCOUNTS, &[("limit", "1".into())])?;
++    cbase::http::block_on(client.get(ACCOUNTS, &[("limit", "1".into())]))?;
+     Ok(())
+ }
+ 
+diff --git a/src/mcp.rs b/src/mcp.rs
+new file mode 100644
+index 0000000..c5d52d2
+--- /dev/null
++++ b/src/mcp.rs
+@@ -0,0 +1,246 @@
++//! `cbase`'s reads as MCP tools, at the agreed JSON boundary.
++//!
++//! [`tools`] returns the `tools/list` entries and [`call`] returns a
++//! `CallToolResult`, both as plain JSON, so any shell can serve them: a stdio
++//! adapter (`cbase mcp`), a local `--http` adapter, or the JS Worker that
++//! loads this crate compiled to WebAssembly. The tool names, schemas and
++//! results are defined once, here.
++//!
++//! Every tool is read-only, and says so in its annotations.
++
++use pk_cli_core::CliError;
++use serde_json::{json, Value};
++
++use crate::client::Coinbase;
++use crate::http::Transport;
++use crate::queries;
++
++/// The `tools/list` entries.
++pub fn tools() -> Value {
++    let read_only = json!({
++        "readOnlyHint": true,
++        "destructiveHint": false,
++        "idempotentHint": true,
++        "openWorldHint": true,
++    });
++    json!([
++        {
++            "name": "coinbase_accounts_list",
++            "title": "Coinbase wallets and balances",
++            "description": "List the Coinbase wallets on the connected CDP API key with their \
++                balances (crypto-account-list/v1). Zero-balance wallets are hidden unless \
++                `all` is true. Amounts are strings at Coinbase's precision.",
++            "inputSchema": {
++                "type": "object",
++                "properties": {
++                    "limit": {"type": "integer", "minimum": 1, "description": "Maximum wallets to return."},
++                    "all": {"type": "boolean", "description": "Include zero-balance wallets."}
++                },
++                "additionalProperties": false
++            },
++            "annotations": read_only,
++        },
++        {
++            "name": "coinbase_transactions_list",
++            "title": "Coinbase transaction history",
++            "description": "List one wallet's transactions (crypto-transaction-list/v1), newest \
++                first, optionally bounded by an inclusive ISO date range. `account` is an `id` \
++                from coinbase_accounts_list.",
++            "inputSchema": {
++                "type": "object",
++                "properties": {
++                    "account": {"type": "string", "description": "Wallet id from coinbase_accounts_list."},
++                    "limit": {"type": "integer", "minimum": 1, "description": "Maximum transactions to return."},
++                    "since": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "Only on or after this date (YYYY-MM-DD)."},
++                    "until": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "Only on or before this date (YYYY-MM-DD)."}
++                },
++                "required": ["account"],
++                "additionalProperties": false
++            },
++            "annotations": read_only,
++        }
++    ])
++}
++
++/// Run one tool and shape the answer as a `CallToolResult`.
++///
++/// Failures are tool results with `isError: true`, not protocol errors: the
++/// model should see "the key was rejected (exit 3)" and act on it. The
++/// family's error code and exit code ride along in `structuredContent`.
++pub async fn call<T: Transport>(client: &Coinbase<T>, name: &str, args: &Value) -> Value {
++    match dispatch(client, name, args).await {
++        Ok(payload) => json!({
++            "content": [{"type": "text", "text": payload.to_string()}],
++            "structuredContent": payload,
++            "isError": false,
++        }),
++        Err(e) => error_result(&e),
++    }
++}
++
++/// A `CallToolResult` for a failure that happened before any tool ran, such
++/// as a credential that does not parse.
++pub fn error_result(e: &CliError) -> Value {
++    let mut body = e.to_json();
++    body["error"]["exit_code"] = json!(e.exit_code());
++    json!({
++        "content": [{"type": "text", "text": format!("{e} (exit {})", e.exit_code())}],
++        "structuredContent": body,
++        "isError": true,
++    })
++}
++
++async fn dispatch<T: Transport>(
++    client: &Coinbase<T>,
++    name: &str,
++    args: &Value,
++) -> Result<Value, CliError> {
++    match name {
++        "coinbase_accounts_list" => {
++            let accounts =
++                queries::accounts(client, bool_arg(args, "all")?, u32_arg(args, "limit")?).await?;
++            Ok(json!({"schema": "crypto-account-list/v1", "items": accounts}))
++        }
++        "coinbase_transactions_list" => {
++            let account = str_arg(args, "account")?
++                .ok_or_else(|| CliError::Usage("`account` is required".into()))?;
++            let txns = queries::transactions(
++                client,
++                &account,
++                u32_arg(args, "limit")?,
++                str_arg(args, "since")?.as_deref(),
++                str_arg(args, "until")?.as_deref(),
++            )
++            .await?;
++            Ok(json!({"schema": "crypto-transaction-list/v1", "items": txns}))
++        }
++        other => Err(CliError::Usage(format!("unknown tool `{other}`"))),
++    }
++}
++
++fn str_arg(args: &Value, key: &str) -> Result<Option<String>, CliError> {
++    match args.get(key) {
++        None | Some(Value::Null) => Ok(None),
++        Some(Value::String(s)) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
++        Some(_) => Err(CliError::Usage(format!(
++            "`{key}` must be a non-empty string"
++        ))),
++    }
++}
++
++fn u32_arg(args: &Value, key: &str) -> Result<Option<u32>, CliError> {
++    match args.get(key) {
++        None | Some(Value::Null) => Ok(None),
++        Some(v) => v
++            .as_u64()
++            .filter(|n| *n >= 1)
++            .and_then(|n| u32::try_from(n).ok())
++            .map(Some)
++            .ok_or_else(|| CliError::Usage(format!("`{key}` must be a positive integer"))),
++    }
++}
++
++fn bool_arg(args: &Value, key: &str) -> Result<bool, CliError> {
++    match args.get(key) {
++        None | Some(Value::Null) => Ok(false),
++        Some(Value::Bool(b)) => Ok(*b),
++        Some(_) => Err(CliError::Usage(format!("`{key}` must be a boolean"))),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::credential::Credential;
++    use crate::http::{HttpRequest, HttpResponse};
++    use std::cell::RefCell;
++
++    /// Serves canned pages and records what it was asked for.
++    struct Canned {
++        pages: RefCell<Vec<Value>>,
++        seen: RefCell<Vec<HttpRequest>>,
++    }
++
++    impl Transport for Canned {
++        async fn send(&self, req: HttpRequest) -> Result<HttpResponse, CliError> {
++            self.seen.borrow_mut().push(req);
++            let page = self.pages.borrow_mut().remove(0);
++            Ok(HttpResponse {
++                status: 200,
++                body: page.to_string(),
++            })
++        }
++    }
++
++    fn client(pages: Vec<Value>) -> Coinbase<Canned> {
++        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
++        use base64::Engine as _;
++        let blob = json!({
++            "id": "test-key",
++            "privateKey": base64::engine::general_purpose::STANDARD.encode(key.to_keypair_bytes()),
++        });
++        let cred = Credential::parse(&blob.to_string()).unwrap();
++        Coinbase::with_transport(
++            cred,
++            "http://127.0.0.1:1",
++            Canned {
++                pages: RefCell::new(pages),
++                seen: RefCell::new(vec![]),
++            },
++            false,
++        )
++    }
++
++    fn run<F: std::future::Future>(f: F) -> F::Output {
++        use std::task::{Context, Poll, Waker};
++        let mut f = std::pin::pin!(f);
++        match f.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
++            Poll::Ready(v) => v,
++            Poll::Pending => panic!("the canned transport never waits"),
++        }
++    }
++
++    #[test]
++    fn every_tool_is_listed_read_only() {
++        let tools = tools();
++        let tools = tools.as_array().unwrap();
++        assert_eq!(tools.len(), 2);
++        for t in tools {
++            assert_eq!(t["annotations"]["readOnlyHint"], true, "{}", t["name"]);
++            assert_eq!(t["inputSchema"]["type"], "object");
++        }
++    }
++
++    #[test]
++    fn accounts_list_hides_zero_balances_and_signs_each_request() {
++        let page = json!({
++            "data": [
++                {"id": "a1", "name": "BTC Wallet", "currency": {"code": "BTC"},
++                 "balance": {"amount": "0.00100000", "currency": "BTC"}},
++                {"id": "a2", "name": "DOGE Wallet", "currency": {"code": "DOGE"},
++                 "balance": {"amount": "0.00000000", "currency": "DOGE"}}
++            ],
++            "pagination": {"next_uri": null}
++        });
++        let c = client(vec![page]);
++        let out = run(call(&c, "coinbase_accounts_list", &json!({})));
++        assert_eq!(out["isError"], false);
++        let items = out["structuredContent"]["items"].as_array().unwrap();
++        assert_eq!(items.len(), 1);
++        assert_eq!(items[0]["id"], "a1");
++        let seen = c.transport_for_tests().seen.borrow();
++        let auth = &seen[0].headers[0];
++        assert_eq!(auth.0, "Authorization");
++        assert!(auth.1.starts_with("Bearer ey"));
++    }
++
++    #[test]
++    fn bad_arguments_are_tool_errors_with_the_exit_code() {
++        let c = client(vec![]);
++        let out = run(call(&c, "coinbase_transactions_list", &json!({"limit": 0})));
++        assert_eq!(out["isError"], true);
++        assert_eq!(out["structuredContent"]["error"]["exit_code"], 2);
++        let out = run(call(&c, "nope", &json!({})));
++        assert_eq!(out["structuredContent"]["error"]["code"], "usage");
++    }
++}
+diff --git a/src/queries.rs b/src/queries.rs
+new file mode 100644
+index 0000000..e1d5fe4
+--- /dev/null
++++ b/src/queries.rs
+@@ -0,0 +1,163 @@
++//! The reads, independent of how they are asked for.
++//!
++//! `cbase accounts list` (clap, blocking) and the `coinbase_accounts_list` MCP
++//! tool (JSON, async in a Worker) are two front ends on the functions here, so
++//! a filter or paging rule changed in one place changes for both.
++
++use pk_cli_core::CliError;
++
++use crate::client::Coinbase;
++use crate::http::Transport;
++use crate::parse::{self, CryptoAccount, CryptoTransaction};
++
++/// Coinbase API paths the reads share.
++pub const ACCOUNTS: &str = "/v2/accounts";
++
++/// The transactions path for one account.
++pub fn account_transactions(account_id: &str) -> String {
++    format!("/v2/accounts/{account_id}/transactions")
++}
++
++/// Every wallet, zero balances hidden unless `all`.
++pub async fn accounts<T: Transport>(
++    client: &Coinbase<T>,
++    all: bool,
++    limit: Option<u32>,
++) -> Result<Vec<CryptoAccount>, CliError> {
++    let rows = client
++        .get_all(ACCOUNTS, &[], zero_filtered_limit(all, limit))
++        .await?;
++    let mut accounts = parse::accounts(&rows);
++    if !all {
++        accounts.retain(|a| !is_zero(&a.balance.amount));
++    }
++    if let Some(n) = limit {
++        accounts.truncate(n as usize);
++    }
++    Ok(accounts)
++}
++
++/// One account's ledger, bounded by an inclusive ISO date range.
++pub async fn transactions<T: Transport>(
++    client: &Coinbase<T>,
++    account: &str,
++    limit: Option<u32>,
++    since: Option<&str>,
++    until: Option<&str>,
++) -> Result<Vec<CryptoTransaction>, CliError> {
++    validate_range(since, until)?;
++    let path = account_transactions(account);
++    let rows = client
++        .get_all(&path, &[], fetch_limit(limit, since, until))
++        .await?;
++    let mut txns = parse::within(parse::transactions(&rows), since, until, |t| {
++        t.date.as_str()
++    });
++    if let Some(n) = limit {
++        txns.truncate(n as usize);
++    }
++    Ok(txns)
++}
++
++/// `--limit` counts records the user will *see*, but the zero-balance filter
++/// runs after paging — so when it is active the fetch must not stop at the
++/// limit or a page of empty wallets would swallow the whole result.
++fn zero_filtered_limit(all: bool, limit: Option<u32>) -> Option<u32> {
++    if all {
++        limit
++    } else {
++        None
++    }
++}
++
++/// The page walk can stop at `limit` only when nothing filters afterwards.
++/// With a date bound, the newest `limit` rows may all fall outside it.
++fn fetch_limit(limit: Option<u32>, since: Option<&str>, until: Option<&str>) -> Option<u32> {
++    if since.is_none() && until.is_none() {
++        limit
++    } else {
++        None
++    }
++}
++
++/// The same checks `RangeArgs::validate` makes, without clap: both bounds
++/// ISO `YYYY-MM-DD`, and `since` not after `until`.
++pub fn validate_range(since: Option<&str>, until: Option<&str>) -> Result<(), CliError> {
++    for (flag, v) in [("since", since), ("until", until)] {
++        if let Some(d) = v {
++            if parse::iso_date(&format!("{d}T00:00:00Z")).as_deref() != Some(d) {
++                return Err(CliError::Usage(format!(
++                    "{flag} must be an ISO date (YYYY-MM-DD), got `{d}`"
++                )));
++            }
++        }
++    }
++    if let (Some(s), Some(u)) = (since, until) {
++        if s > u {
++            return Err(CliError::Usage(format!("since ({s}) is after until ({u})")));
++        }
++    }
++    Ok(())
++}
++
++/// True for `"0"`, `"0.00000000"`, `"-0.0"`, and friends — without parsing a
++/// float, which would round a dust balance to zero and hide it.
++pub fn is_zero(amount: &str) -> bool {
++    let s = amount.trim().trim_start_matches(['+', '-']);
++    !s.is_empty() && s.chars().all(|c| c == '0' || c == '.')
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn transaction_paths_are_scoped_to_the_account() {
++        assert_eq!(
++            account_transactions("abc-123"),
++            "/v2/accounts/abc-123/transactions"
++        );
++    }
++
++    #[test]
++    fn zero_detection_does_not_go_through_a_float() {
++        for z in ["0", "0.0", "0.00000000", "-0.00000000", "+0", " 0.00 "] {
++            assert!(is_zero(z), "{z} should read as zero");
++        }
++        for nz in ["0.00000001", "1", "-0.5", "10.00", ""] {
++            assert!(!is_zero(nz), "{nz} should not read as zero");
++        }
++    }
++
++    #[test]
++    fn the_fetch_limit_is_dropped_when_zero_balances_are_filtered_out() {
++        assert_eq!(zero_filtered_limit(false, Some(5)), None);
++        assert_eq!(zero_filtered_limit(true, Some(5)), Some(5));
++        assert_eq!(zero_filtered_limit(true, None), None);
++    }
++
++    #[test]
++    fn a_bare_limit_is_pushed_down_to_the_fetch() {
++        assert_eq!(fetch_limit(Some(10), None, None), Some(10));
++        assert_eq!(fetch_limit(None, None, None), None);
++    }
++
++    #[test]
++    fn a_dated_query_must_not_stop_paging_at_the_limit() {
++        assert_eq!(fetch_limit(Some(10), Some("2025-01-01"), None), None);
++        assert_eq!(fetch_limit(Some(10), None, Some("2025-12-31")), None);
++    }
++
++    #[test]
++    fn a_malformed_or_inverted_range_is_a_usage_error() {
++        assert!(validate_range(Some("2025-01-01"), Some("2025-12-31")).is_ok());
++        assert!(matches!(
++            validate_range(Some("01/02/2025"), None),
++            Err(CliError::Usage(_))
++        ));
++        assert!(matches!(
++            validate_range(Some("2025-12-31"), Some("2025-01-01")),
++            Err(CliError::Usage(_))
++        ));
++    }
++}
