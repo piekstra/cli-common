@@ -24,15 +24,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          # pk-cli-mcp's core must build for WebAssembly (make wasm-check).
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux keyring build deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
       # The Makefile is the one definition of the gate; `make verify` runs
-      # these five locally.
+      # these seven locally.
       - run: make fmt-check
       - run: make lint
       - run: make test
       - run: make test-util-check
+      - run: make mcp-check
+      - run: make wasm-check
       - run: make scripts-check
 
   # The platform-specific slivers are the apple-native keyring backend in
@@ -78,6 +82,10 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
       - name: gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:

@@ -15,9 +15,13 @@ same behavior, it belongs here, not copied into each repo.
 ## Local checks (must pass)
 
 ```sh
-make verify   # format check, clippy -D warnings, tests, feature checks, scripts: CI's `check` job
-make fmt      # apply formatting
+make verify      # format check, clippy -D warnings, tests, feature checks, the WebAssembly check, scripts: CI's `check` job
+cargo deny check # licenses, advisories, sources (deny.toml): CI's `security` job
+make fmt         # apply formatting
 ```
+
+`make verify`'s `wasm-check` needs the WebAssembly target once:
+`rustup target add wasm32-unknown-unknown`.
 
 The `Makefile` is the one definition of these steps; CI runs its targets.
 
