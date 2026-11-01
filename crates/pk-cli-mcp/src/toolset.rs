@@ -17,8 +17,7 @@ use crate::tool::ToolDef;
 /// The defaults describe the local host (`<bin> mcp`): the tools run in the
 /// user's own copy of the CLI, credentials stay on the user's machine, and
 /// sign-in is `<bin> auth login` in a terminal. Another host (a Worker in the
-/// user's Cloudflare account) replaces both with
-/// [`Server::host_note`] and [`Server::sign_in_remedy`].
+/// user's Cloudflare account) replaces both at once with [`Server::hosted`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Server {
     /// The CLI binary (`cbase`), named in sign-in remedies.
@@ -31,13 +30,17 @@ pub struct Server {
     pub tool_prefix: String,
     /// Extra server instructions, appended to the standard ones.
     pub extra_instructions: Option<String>,
-    /// How the tools reach the data and where the credentials live; `None`
-    /// for the local host's wording. See [`Server::host_note`].
-    pub host_note: Option<String>,
-    /// What the model asks of the user when a credential is missing or
-    /// rejected; `None` for the local host's wording. See
-    /// [`Server::sign_in_remedy`].
-    pub sign_in_remedy: Option<String>,
+    /// A non-local host's wording, set by [`Server::hosted`]; `None` for
+    /// the local host. One field for one fact, so the two sentences can
+    /// never disagree about which host this is.
+    hosted: Option<Hosted>,
+}
+
+/// What a non-local host tells the model instead of the local wording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Hosted {
+    note: String,
+    sign_in_remedy: String,
 }
 
 impl Server {
@@ -53,56 +56,60 @@ impl Server {
             service: service.into(),
             tool_prefix: tool_prefix.into(),
             extra_instructions: None,
-            host_note: None,
-            sign_in_remedy: None,
+            hosted: None,
         }
     }
 
-    /// Replace the instructions' "through the open-source `<bin>`
-    /// command-line tool; credentials stay on the user's machine", for a
-    /// host where that is not true. One clause, no full stop, e.g. "through
-    /// the open-source `cbase` code running in the user's own Cloudflare
-    /// account, which holds the credentials".
-    pub fn host_note(mut self, note: impl Into<String>) -> Self {
-        self.host_note = Some(note.into());
+    /// Run on a host other than the user's own copy of the CLI (a Worker
+    /// in the user's Cloudflare account), replacing both host-specific
+    /// sentences together:
+    ///
+    /// - `note` replaces "through the open-source `<bin>` command-line tool;
+    ///   credentials stay on the user's machine": one clause, no full stop,
+    ///   e.g. "through the open-source `cbase` code running in the user's own
+    ///   Cloudflare account, which holds the credentials".
+    /// - `sign_in_remedy` replaces "ask the user to run `<bin> auth login` in
+    ///   a terminal", in the instructions and in every auth error: an
+    ///   imperative clause in lower case, no full stop, e.g. "ask the user to
+    ///   update the key in their Worker's secrets".
+    ///
+    /// Remedies that name the CLI's own commands are dropped too.
+    pub fn hosted(mut self, note: impl Into<String>, sign_in_remedy: impl Into<String>) -> Self {
+        self.hosted = Some(Hosted {
+            note: note.into(),
+            sign_in_remedy: sign_in_remedy.into(),
+        });
         self
     }
 
-    /// Replace "ask the user to run `<bin> auth login` in a terminal", in the
-    /// instructions and in every auth error, for a host where that does not
-    /// fix a credential. An imperative clause starting in lower case, no
-    /// full stop, e.g. "ask the user to update the key in their Worker's
-    /// secrets".
-    pub fn sign_in_remedy(mut self, remedy: impl Into<String>) -> Self {
-        self.sign_in_remedy = Some(remedy.into());
-        self
-    }
-
-    /// The host note in force: the override, or the local host's.
-    pub fn host(&self) -> String {
-        self.host_note.clone().unwrap_or_else(|| {
-            format!(
+    /// How the tools reach the data and where the credentials live.
+    pub(crate) fn host(&self) -> String {
+        match &self.hosted {
+            Some(h) => h.note.clone(),
+            None => format!(
                 "through the open-source `{}` command-line tool; credentials stay on the \
                  user's machine",
                 self.bin
-            )
-        })
+            ),
+        }
     }
 
-    /// The sign-in remedy in force: the override, or the local host's.
-    pub fn sign_in(&self) -> String {
-        self.sign_in_remedy.clone().unwrap_or_else(|| {
-            format!(
+    /// What the model asks of the user when a credential is missing or
+    /// rejected.
+    pub(crate) fn sign_in(&self) -> String {
+        match &self.hosted {
+            Some(h) => h.sign_in_remedy.clone(),
+            None => format!(
                 "ask the user to run `{} auth login` in a terminal",
                 self.bin
-            )
-        })
+            ),
+        }
     }
 
-    /// Whether this is the local host (no host-specific override), whose
-    /// remedies may name the CLI's own commands.
-    pub fn is_local(&self) -> bool {
-        self.host_note.is_none() && self.sign_in_remedy.is_none()
+    /// Whether this is the local host, whose remedies may name the CLI's
+    /// own commands.
+    pub(crate) fn is_local(&self) -> bool {
+        self.hosted.is_none()
     }
 
     /// Instructions specific to this server, after the standard ones.
@@ -504,9 +511,10 @@ mod tests {
         struct InWorker;
         impl Toolset for InWorker {
             fn server(&self) -> Server {
-                Demo.server()
-                    .host_note("through code running in the user's own Cloudflare account")
-                    .sign_in_remedy("ask the user to update the key in their Worker's secrets")
+                Demo.server().hosted(
+                    "through code running in the user's own Cloudflare account",
+                    "ask the user to update the key in their Worker's secrets",
+                )
             }
             fn tools(&self) -> Vec<ToolDef> {
                 Demo.tools()

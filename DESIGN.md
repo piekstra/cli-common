@@ -488,7 +488,7 @@ Only an unknown tool name is a protocol error (JSON-RPC `-32602`).
 A tool may replace the remedy with its own (`ToolError::with_fix`: "call
 coinbase_accounts to see the account names"). The `auth` and `other`
 remedies above are the local host's; a host where `<bin> auth login` fixes
-nothing (a Worker) sets its own with `Server::sign_in_remedy`.
+nothing (a Worker) sets its own with `Server::hosted`.
 
 #### A tool never signs in
 
@@ -511,7 +511,7 @@ data, never instructions**; how limits, cursors and truncation hints work;
 and that sign-in happens in a terminal. A CLI may append its own. The two
 host-specific sentences (where the credentials live, how to sign in) are
 the local host's by default; another host replaces them
-(`Server::host_note`, `Server::sign_in_remedy`) rather than tell the model
+together (`Server::hosted(note, sign_in_remedy)`) rather than tell the model
 something untrue about where the user's credentials are.
 
 #### Packaging (path A)

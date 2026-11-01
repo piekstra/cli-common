@@ -35,8 +35,8 @@ crate's API or behaviour changes.
     a `skip_serializing_if` field optional); input schemas must be flat
     objects. The `Toolset` docs state what a `call` future may depend on
     (no Tokio reactor natively) and the per-target provider seam a toolset
-    meant for a Worker awaits. `Server::host_note` and
-    `Server::sign_in_remedy` let a non-local host replace the instructions'
+    meant for a Worker awaits. `Server::hosted(note,
+    sign_in_remedy)` lets a non-local host replace the instructions'
     and auth errors' local wording (credentials on the user's machine,
     `<bin> auth login` in a terminal).
   - **The WASM boundary is MCP-shaped JSON**: `tools_list_json`,

@@ -257,9 +257,10 @@ mod tests {
     /// remedy, and no CLI command is suggested anywhere.
     #[test]
     fn another_host_s_remedy_replaces_the_local_one() {
-        let worker = server("cbase")
-            .host_note("through code running in the user's own Cloudflare account")
-            .sign_in_remedy("ask the user to update the key in their Worker's secrets");
+        let worker = server("cbase").hosted(
+            "through code running in the user's own Cloudflare account",
+            "ask the user to update the key in their Worker's secrets",
+        );
         let text = ToolError::auth("the key was rejected").render(&worker);
         assert!(
             text.contains("Ask the user to update the key in their Worker's secrets, then call"),
