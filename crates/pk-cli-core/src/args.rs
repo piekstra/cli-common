@@ -28,7 +28,12 @@ pub struct CommonArgs {
 /// `env`, because `env` parses the variable as a boolean, and the
 /// conventional `NO_COLOR=1` then fails every command with a usage error.
 fn no_color_env() -> bool {
-    std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
+    no_color_from(std::env::var_os("NO_COLOR"))
+}
+
+/// Whether a `NO_COLOR` value (absent: `None`) disables color.
+fn no_color_from(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some_and(|v| !v.is_empty())
 }
 
 impl CommonArgs {
@@ -49,6 +54,18 @@ mod tests {
     struct Probe {
         #[command(flatten)]
         common: CommonArgs,
+    }
+
+    #[test]
+    fn any_non_empty_no_color_value_disables_color() {
+        for v in ["1", "0", "true", "false", "yes", "please"] {
+            assert!(no_color_from(Some(v.into())), "NO_COLOR={v:?}");
+        }
+        assert!(
+            !no_color_from(Some("".into())),
+            "an empty NO_COLOR is unset"
+        );
+        assert!(!no_color_from(None));
     }
 
     #[test]
