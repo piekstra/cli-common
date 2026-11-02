@@ -4,7 +4,8 @@
 // tests. The ABI itself is documented in `src/wasm/mod.rs`.
 //
 // A Worker that runs modules copies this file rather than reimplementing
-// the ABI.
+// the ABI: connector/src/pk-host.ts is that copy, and CI checks the two are
+// identical.
 //
 // Plain TypeScript with erasable syntax only, so Node runs it directly
 // (type stripping) and wrangler bundles it unchanged.

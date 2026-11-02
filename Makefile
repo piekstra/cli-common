@@ -3,7 +3,7 @@
 
 CARGO ?= cargo
 
-.PHONY: verify fmt fmt-check lint test test-util-check mcp-check wasm-check wasm-host-check scripts-check
+.PHONY: verify fmt fmt-check lint test test-util-check mcp-check wasm-check wasm-host-check scripts-check connector-check
 
 verify: fmt-check lint test test-util-check mcp-check wasm-check wasm-host-check scripts-check
 
@@ -70,3 +70,13 @@ scripts-check:
 		shellcheck scripts/*.sh scripts/test/*.sh; \
 	else echo "shellcheck not installed; skipping the lint half of scripts-check"; fi
 	bash scripts/test/self-view.test.sh
+
+# The deploy-your-own connector (connector/), CI's `connector` job. Not part
+# of `verify`: it needs npm and fetches the pinned module from its release.
+# Its host must be the reference host byte for byte; then the typecheck, the
+# owner gate's unit tests, and the OAuth and MCP flow end to end under
+# `wrangler dev --local` against the JWT-checking mock (scripts/e2e.sh).
+# Localhost only: no Cloudflare account, nothing deployed.
+connector-check:
+	cmp connector/src/pk-host.ts crates/pk-cli-mcp/js/pk-host.ts
+	cd connector && npm ci && npm run typecheck && npm test && npm run e2e

@@ -1,0 +1,10 @@
+{
+  "modules": [
+    {
+      "name": "coinbase",
+      "file": "cbase-mcp.wasm",
+      "url": "https://github.com/piekstra/coinbase-cli/releases/download/v0.3.0/cbase-mcp-0.3.0.wasm",
+      "sha256": "6da589c87072b92eaf68c3efa72154b205c5403f20b947df24861e7ac8c81c25"
+    }
+  ]
+}

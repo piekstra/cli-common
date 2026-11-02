@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- `connector/`: the deploy-your-own Cloudflare Worker that serves
+  official-API CLIs' MCP tools to Claude on the web and mobile, replacing
+  the spike in #36. Each user deploys it into their own Cloudflare account
+  with the Deploy to Cloudflare button; their provider keys are the Worker's
+  secrets. It pins each CLI's released module by URL and SHA-256
+  (`modules.json`) and its build fetches and verifies them; no binary is
+  committed. Only the owner's passphrase (20 characters or more; ten wrong
+  tries an hour lock the page) connects a client, over OAuth with dynamic
+  registration and PKCE, and authorization codes go only to Claude's
+  callback, loopback, or `EXTRA_REDIRECT_URIS`. `/revoke` disconnects every
+  client. Serves coinbase-cli's two tools from its v0.3.0 module. README:
+  walkthrough and threat model.
+- `make connector-check` and CI's `connector` job: the host copy matches
+  `js/pk-host.ts`, typecheck, unit tests, and the OAuth and MCP flow end to
+  end under `wrangler dev --local` against a JWT-checking mock.
+
 ## v0.14.0 — 2026-11-02
 
 Additive: new modules, a new feature and a new example crate. One move:

@@ -130,8 +130,18 @@ README.md, "Self-view for family desktop apps". Its macOS effects live in
 - **The WebAssembly ABI and its host change together.** The ABI is
   documented in `crates/pk-cli-mcp/src/wasm/mod.rs`; the reference host is
   `crates/pk-cli-mcp/js/pk-host.ts`, and a Worker copies that file rather
-  than reimplementing it. A change that breaks an existing module bumps
-  `ABI_VERSION`.
+  than reimplementing it. `connector/src/pk-host.ts` is that copy: change
+  both in the same commit (CI `cmp`s them). A change that breaks an
+  existing module bumps `ABI_VERSION`.
+- **`connector/` is a template users deploy, not a service we run.** It
+  must stay self-contained (the Deploy to Cloudflare button copies only
+  that folder), commits no module binary (`modules.json` pins each by
+  release URL and SHA-256; the build fetches and verifies), and holds no
+  real key anywhere: its tests generate dummy keys and run against the
+  localhost mock. Nothing here logs in to Cloudflare or deploys. Its gate
+  is `make connector-check` (`npm ci`, typecheck, unit tests, then
+  `scripts/e2e.sh`: the OAuth and MCP flow under `wrangler dev --local`),
+  which CI's `connector` job runs.
 - `example-cli` must keep compiling and demonstrating the full surface — it is
   the template new CLIs copy.
 - Releases: bump `workspace.package.version`, update `CHANGELOG.md`, tag

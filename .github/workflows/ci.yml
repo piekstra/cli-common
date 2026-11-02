@@ -45,6 +45,22 @@ jobs:
       - run: make wasm-host-check
       - run: make scripts-check
 
+  # The deploy-your-own connector: `make connector-check` fetches and
+  # verifies the pinned module as a deploy does, then runs the OAuth and MCP
+  # flow under `wrangler dev --local` against the localhost mock. No
+  # Cloudflare account, nothing deployed.
+  connector:
+    name: connector (typecheck, tests, local e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: connector/package-lock.json
+      - run: make connector-check
+
   # The platform-specific slivers are the apple-native keyring backend in
   # pk-cli-secrets and the codesign re-sign step in pk-cli-selfupdate
   # (`#[cfg(target_os = "macos")]`), so macOS builds the workspace and runs
