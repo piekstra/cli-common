@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- **`pk-cli-mcp` feature `http`** (includes `stdio`): `<bin> mcp --http
+  --port <PORT>` serves the CLI's tools over stateless Streamable HTTP
+  (rmcp's service on a hyper HTTP/1.1 listener, JSON answers, no sessions)
+  for the connector's "home" modules, which reach a portal CLI on the
+  user's own computer through their Cloudflare Tunnel. It binds 127.0.0.1
+  only; refuses to start without a bearer token (32 or more visible ASCII
+  characters, from `<BIN>_MCP_TOKEN` or the keychain item `mcp-http-token`
+  under `piekstra.<bin>`); checks the token in constant time, `Host`
+  (127.0.0.1 or localhost, its own port if one is named) and refuses any
+  request with an `Origin`; answers only `POST /mcp`, with no CORS headers;
+  serves only read-only tools unless `--allow-writes`; and answers a call
+  still running after 120 s with an error (a read may be retried; a
+  write's outcome is reported as unknown, to be checked before any retry).
+  `<bin> mcp --new-token` saves 256 random bits as the token, reads them
+  back, and prints them once for the Worker's secret; it will not replace
+  a saved token without `--overwrite`. A CLI turns the feature on;
+  `McpArgs` and `run` carry the rest. `example-cli` serves it, and
+  `tests/mcp_http.rs` drives the binary over HTTP through every refusal.
+- `pk-cli-secrets`: `SecretSpec::remedy` names how to store a secret again,
+  for the error when its keychain item is empty (default `auth login
+  --overwrite`, right for a sign-in credential; `mcp --http`'s token names
+  `mcp --new-token --overwrite`).
+- `pk-cli-mcp`: `McpArgs` is `#[non_exhaustive]`, so its shape no longer
+  depends on a feature: build it with clap or `McpArgs::default()`, not a
+  struct literal. (Breaking for a struct literal; no family CLI uses one.)
 - `connector/`: the deploy-your-own Cloudflare Worker that serves
   official-API CLIs' MCP tools to Claude on the web and mobile, replacing
   the spike in #36. Each user deploys it into their own Cloudflare account

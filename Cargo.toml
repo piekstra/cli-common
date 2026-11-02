@@ -68,6 +68,15 @@ ctrlc = "3.5"
 schemars = "1"
 rmcp = { version = "3.8", default-features = false, features = ["server", "transport-io"] }
 tokio = { version = "1", default-features = false, features = ["rt"] }
+# pk-cli-mcp's `http` feature: rmcp's stateless Streamable HTTP service on a
+# hyper HTTP/1.1 listener bound to 127.0.0.1, and the OS CSPRNG for a new
+# bearer token. The same majors rmcp and reqwest already bring.
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+getrandom = "0.4"
 
 [profile.release]
 strip = true

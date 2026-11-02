@@ -62,6 +62,16 @@
 //!
 //! - `stdio` (native): `run` and `McpArgs`, the `<bin> mcp` subcommand
 //!   on the official Rust SDK (`rmcp`).
+//! - `http` (native, includes `stdio`): `<bin> mcp --http --port <PORT>`,
+//!   the same tools over stateless Streamable HTTP on 127.0.0.1 behind a
+//!   bearer token, read-only unless `--allow-writes`, for a tunnel from the
+//!   user's own Cloudflare Worker (the connector's "home" modules); and
+//!   `<bin> mcp --new-token`, which makes that token. The server binds
+//!   127.0.0.1 only, refuses to start without a token of at least 32
+//!   visible characters (`<BIN>_MCP_TOKEN`, else the keychain item
+//!   `mcp-http-token`), refuses any `Host` but loopback and any request
+//!   with an `Origin`, sends no CORS headers, and answers a call still
+//!   running after 120 s with an error.
 //! - `wasm`: [`wasm`] and [`export_wasm!`], the toolset as a WebAssembly
 //!   module for the deploy-your-own Worker on a raw ABI (one `.wasm`, no
 //!   JavaScript glue; the reference host is `js/pk-host.ts`), and
@@ -78,21 +88,27 @@ pub mod shape;
 pub mod tool;
 pub mod toolset;
 
+#[cfg(feature = "stdio")]
+mod adapter;
+#[cfg(feature = "stdio")]
+mod command;
 #[cfg(any(feature = "test-util", test))]
 pub mod conformance;
+#[cfg(feature = "http")]
+mod http;
 #[cfg(feature = "stdio")]
 mod stdio;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
+#[cfg(feature = "stdio")]
+pub use command::{run, McpArgs};
 pub use error::{ErrorKind, ToolError};
 /// `pk_cli_core::block_on`, re-exported for a CLI's tests.
 #[cfg(feature = "test-util")]
 pub use pk_cli_core::block_on;
 pub use result::{CallToolResult, ToolOutput};
 pub use shape::{ListArgs, Page, PageInfo, PageRequest, ResponseFormat};
-#[cfg(feature = "stdio")]
-pub use stdio::{run, McpArgs};
 pub use tool::{Annotations, ToolDef};
 pub use toolset::{
     call_tool, call_tool_json, instructions, parse_args, tools_list, tools_list_json, Server,

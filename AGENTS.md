@@ -122,11 +122,17 @@ README.md, "Self-view for family desktop apps". Its macOS effects live in
   `Makefile` defines them and CI runs the same targets) and
   `cargo deny check` must be clean before committing.
 - **`pk-cli-mcp`'s default features stay WebAssembly-clean**: no Tokio,
-  keyring, processes or blocking I/O outside its `stdio` and `test-util`
-  features, so a CLI's toolset can run in a deploy-your-own Worker
+  keyring, processes or blocking I/O outside its `stdio`, `http` and
+  `test-util` features, so a CLI's toolset can run in a deploy-your-own Worker
   (DESIGN.md §1.9, §2.3). Its `wasm` feature has no dependencies at all:
   a module's only imports are the five `pk_host` functions, so nothing
   that pulls in `wasm-bindgen` may join it.
+- **`mcp --http` never listens beyond loopback and never starts open.**
+  `crates/pk-cli-mcp/src/http.rs` binds 127.0.0.1 with no flag for another
+  address, refuses to start without a bearer token, and checks the token,
+  `Host` and `Origin` before rmcp sees a request; `example-cli`'s
+  `tests/mcp_http.rs` holds each refusal. A change that loosens any of
+  them belongs in the connector README's threat model in the same PR.
 - **The WebAssembly ABI and its host change together.** The ABI is
   documented in `crates/pk-cli-mcp/src/wasm/mod.rs`; the reference host is
   `crates/pk-cli-mcp/js/pk-host.ts`, and a Worker copies that file rather

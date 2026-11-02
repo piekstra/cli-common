@@ -26,7 +26,7 @@ pk-cli-utility = { workspace = true }
 pk-cli-documents = { workspace = true }
 pk-cli-drive = { workspace = true }
 pk-cli-browser = { workspace = true }
-pk-cli-mcp = { workspace = true, features = ["stdio"] }
+pk-cli-mcp = { workspace = true, features = ["stdio", "http"] }
 clap = { workspace = true }
 clap_complete = "4"
 serde = { workspace = true }
