@@ -17,8 +17,9 @@
 //   One is on when its HOME_<NAME>_TOKEN secret is set.
 //
 // This file never interprets a tool: `tools/list` is what the modules
-// describe, a `tools/call` goes to the module that owns the tool, and its
-// CallToolResult comes back unchanged.
+// describe, a `tools/call` goes to the module that owns the tool
+// (src/routing.ts decides which), and its CallToolResult comes back
+// unchanged.
 
 import { OAuthProvider, AuthorizationError, OAuthError } from "@cloudflare/workers-oauth-provider";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
@@ -29,7 +30,9 @@ import { WasmToolset } from "./pk-host.ts";
 import { MODULES } from "./modules.ts";
 import type { ToolModule } from "./modules.ts";
 import { isSet, moduleEnabled } from "./settings.ts";
-import { callHome, homeInstructions, homeModules, knownListing, listing, problemResult } from "./home.ts";
+import { HomeCache, callHome, homeInstructions, homeModules, knownListing, listing, problemResult } from "./home.ts";
+import { mergeTools, route } from "./routing.ts";
+import { CONNECTOR_VERSION } from "./version.ts";
 import { PAGE_CSP, authorizePage, messagePage, revokePage } from "./pages.ts";
 import {
   MIN_PASSPHRASE,
@@ -55,7 +58,6 @@ export interface Env {
   [moduleConfig: string]: unknown;
 }
 
-const CONNECTOR_VERSION = "0.2.0";
 /** The one user: whoever knows the passphrase. */
 const OWNER = "owner";
 const INVALID_PARAMS = -32602;
@@ -74,6 +76,8 @@ interface Described {
 interface Catalog {
   modules: Described[];
   owner: Map<string, Loaded>;
+  /** The same, as module names, for src/routing.ts. */
+  owners: Map<string, string>;
 }
 
 // One instance of each module per isolate, made on first use. Every module
@@ -97,9 +101,13 @@ function tools(): Catalog {
     }
     modules.push({ loaded, tools: list, instructions: description.instructions });
   }
-  catalog = { modules, owner };
+  const owners = new Map([...owner].map(([tool, loaded]) => [tool, loaded.module.name]));
+  catalog = { modules, owner, owners };
   return catalog;
 }
+
+/** What this isolate has learned about the home modules (src/home.ts). */
+const homeCache = new HomeCache();
 
 /** The secrets and vars a module reads, by name; unset ones left out. */
 function configFor(module: ToolModule, env: Env): Record<string, string> {
@@ -118,19 +126,18 @@ const NOTHING_SET_UP =
 /** A fresh low-level MCP server per request, wired straight to the modules
  * the owner set up. */
 async function mcpServer(env: Env): Promise<Server> {
-  const { modules, owner } = tools();
+  const { modules, owner, owners } = tools();
   const enabled = modules.filter((m) => moduleEnabled(m.loaded.module, env));
   const on = new Set(enabled.map((m) => m.loaded.module.name));
-  const local = new Set(enabled.flatMap((m) => m.tools.map((t) => t.name)));
   const home = homeModules(env);
 
   // Each home CLI's own instructions, from the last list it gave; asking
   // the computer here would cost every request a round trip.
-  const known = await Promise.all(home.modules.map((m) => knownListing(env, m)));
+  const known = await Promise.all(home.modules.map((m) => knownListing(env, m, homeCache)));
   const instructions = [
     ...enabled.map((m) => m.instructions),
     ...known.flatMap((l) => (l?.instructions ? [l.instructions] : [])),
-    homeInstructions(home.modules, home.problems),
+    homeInstructions(home.modules, home.problems, homeCache),
   ].filter((text) => text !== "");
   if (enabled.length === 0 && home.modules.length === 0) instructions.unshift(NOTHING_SET_UP);
 
@@ -139,36 +146,29 @@ async function mcpServer(env: Env): Promise<Server> {
     { capabilities: { tools: {} }, instructions: instructions.join("\n\n") },
   );
   server.setRequestHandler("tools/list", async () => {
-    const list = enabled.flatMap((m) => m.tools);
-    const listings = await Promise.all(home.modules.map((m) => listing(env, m)));
-    const seen = new Set(local);
-    for (const l of listings) {
-      for (const tool of l?.tools ?? []) {
-        // An in-Worker tool keeps its name; a home server cannot shadow it.
-        if (seen.has(tool.name)) continue;
-        seen.add(tool.name);
-        list.push(tool);
-      }
-    }
-    return { tools: list };
+    const listings = await Promise.all(home.modules.map((m) => listing(env, m, homeCache)));
+    const local: Tool[] = enabled.flatMap((m) => m.tools);
+    return { tools: mergeTools(local, listings.map((l) => l?.tools ?? [])) };
   });
   server.setRequestHandler("tools/call", async (request) => {
-    const name = request.params.name;
-    const loaded = owner.get(name);
-    if (loaded && on.has(loaded.module.name)) {
-      const answer = await loaded.toolset.call(request.params, configFor(loaded.module, env));
-      if ("error" in answer) throw new ProtocolError(answer.error.code, answer.error.message);
-      return answer.result as CallToolResult;
+    const to = route(request.params.name, { owners, on, home: home.modules, problems: home.problems });
+    switch (to.kind) {
+      case "local": {
+        const loaded = owner.get(request.params.name)!;
+        const answer = await loaded.toolset.call(request.params, configFor(loaded.module, env));
+        if ("error" in answer) throw new ProtocolError(answer.error.code, answer.error.message);
+        return answer.result as CallToolResult;
+      }
+      case "home": {
+        const answer = await callHome(to.module, request.params, homeCache);
+        if ("rpcError" in answer) throw new ProtocolError(answer.rpcError.code, answer.rpcError.message);
+        return answer.result;
+      }
+      case "problem":
+        return problemResult(to.problem);
+      case "unknown":
+        throw new ProtocolError(INVALID_PARAMS, `Unknown tool: ${request.params.name}`);
     }
-    const module = local.has(name) ? undefined : home.modules.find((m) => name.startsWith(m.prefix));
-    if (module) {
-      const answer = await callHome(module, request.params);
-      if ("rpcError" in answer) throw new ProtocolError(answer.rpcError.code, answer.rpcError.message);
-      return answer.result;
-    }
-    const problem = home.problems.find((p) => name.startsWith(p.prefix));
-    if (problem) return problemResult(problem);
-    throw new ProtocolError(INVALID_PARAMS, `Unknown tool: ${name}`);
   });
   return server;
 }

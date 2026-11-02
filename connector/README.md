@@ -409,7 +409,8 @@ WebAssembly file (pk-cli-mcp's `export_wasm!`) and attached to that CLI's
 GitHub release. The Worker never interprets a tool: `tools/list` is what the
 modules describe, a `tools/call` goes to the module that owns the tool (with
 the Worker secrets it reads, or through the tunnel), and the result comes back
-unchanged. `src/pk-host.ts` runs the WebAssembly modules; it is an exact copy
+unchanged. An in-Worker module that is on keeps its tools' names: a home
+server cannot list or answer them. `src/pk-host.ts` runs the WebAssembly modules; it is an exact copy
 of cli-common's `crates/pk-cli-mcp/js/pk-host.ts`, checked identical in CI.
 
 A home module's tool list is read from the computer at most every five
@@ -423,14 +424,16 @@ than after the call's 150 s limit.
 | `src/index.ts` | The Worker: OAuth provider, MCP server, the pages |
 | `src/modules.ts` | The in-Worker modules and the secrets each one reads |
 | `src/home.ts` | Home modules: settings, the tunnel, the cached list, offline answers |
+| `src/routing.ts` | Which module answers a tool, and the merged tool list |
 | `src/settings.ts` | What counts as set (`none` and empty do not) |
+| `src/version.ts` | The version MCP clients see; a test holds it to `package.json` |
 | `modules.json` | Each module's release URL and SHA-256 |
 | `scripts/fetch-modules.mjs` | The build step: download and verify the modules |
 | `src/pk-host.ts` | Runs a module (copy of cli-common's reference host) |
 | `src/owner.ts`, `src/pages.ts` | Passphrase check and lockout, the callback allowlist, the HTML pages |
 | `mock/` | Localhost Coinbase (checks each JWT) and Alpaca (checks the key headers) with invented data, and the stand-in for a VPC binding |
 | `scripts/e2e.sh`, `scripts/smoke.sh` | The end-to-end check CI runs |
-| `test/` | Unit tests for the owner gate, the pages' policy and home modules |
+| `test/` | Unit tests for the owner gate, the pages' policy, home modules and routing |
 
 ### Adding another CLI
 
@@ -481,9 +484,10 @@ module: the CLI on 127.0.0.1:8790 with a fresh token, bound through
 `wrangler dev` cannot run), a call through it, a write tool refused, then the
 CLI stopped and its tools answering `offline:`. `make connector-check` in
 cli-common passes example-cli. With a real CLI, keep it away from your
-keychain, for example
-`M1F_KEYCHAIN_SERVICE=piekstra.m1f-e2e E2E_HOME_BIN=$(which m1f) npm run e2e`:
-its tools then answer their own `auth:` error, which the check accepts.
+keychain: for m1f, set `E2E_HOME_BIN` to `$(which m1f)` and
+`M1F_KEYCHAIN_SERVICE` to a service that holds nothing (such as
+`piekstra.m1f-e2e`), then `npm run e2e`. Its tools then answer their own
+`auth:` error, which the check accepts.
 
 To try a module that is not released yet, point the build at a local file:
 `CONNECTOR_MODULE_ALPACA=/path/to/alp.wasm npm run e2e` (the build log says

@@ -33,6 +33,7 @@
 
 import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
 import { isSet } from "./settings.ts";
+import { CONNECTOR_VERSION } from "./version.ts";
 
 /** What a home module needs of the Worker's environment. */
 export interface HomeEnv {
@@ -69,7 +70,7 @@ export interface HomeProblem {
 export const HOME_PROTOCOL = "2025-11-25";
 /** A home server's tools are re-read at most this often while it answers. */
 export const FRESH_MS = 5 * 60_000;
-/** After the computer did not answer, it is asked again no sooner than this. */
+/** After the computer failed to answer, it is asked again no sooner than this. */
 export const OFFLINE_RETRY_MS = 30_000;
 /** A list or a liveness check waits this long before calling it offline. */
 export const PROBE_TIMEOUT_MS = 4_000;
@@ -162,35 +163,8 @@ export interface Listing {
   at: number;
 }
 
-interface State {
-  listing?: Listing;
-  /** When the server was last asked, answered or not. */
-  checkedAt: number;
-  /** When it last failed to answer, if it has not answered since. */
-  offlineSince?: number;
-  /** The last failure, for the instructions and the logs. */
-  lastError?: string;
-}
-
-/** Per isolate. Keyed by module name. */
-const states = new Map<string, State>();
-
-/** For tests: forget everything this isolate learned. */
-export function resetHomeState(): void {
-  states.clear();
-}
-
-function state(name: string): State {
-  let s = states.get(name);
-  if (!s) {
-    s = { checkedAt: 0 };
-    states.set(name, s);
-  }
-  return s;
-}
-
 /** Why a request to the computer failed, in the owner's terms. */
-class HomeError extends Error {
+export class HomeError extends Error {
   readonly kind: "offline" | "auth" | "refused" | "upstream" | "timeout";
   constructor(kind: HomeError["kind"], message: string) {
     super(message);
@@ -198,14 +172,63 @@ class HomeError extends Error {
   }
 }
 
-/** One JSON-RPC request to the computer's server; the `result`, or a
- * HomeError, or the server's own JSON-RPC error as `{ rpcError }`. */
+/** Why the computer last failed to answer. */
+export interface Failure {
+  kind: HomeError["kind"];
+  message: string;
+  /** When it first failed since it last answered. */
+  since: number;
+}
+
+interface State {
+  listing?: Listing;
+  /** When the server was last asked for its list, answered or not. */
+  checkedAt: number;
+  /** Set while it has not answered since it last failed to. */
+  failure?: Failure;
+}
+
+/** What one isolate has learned about each home module: its last list and
+ * its last failure. The Worker keeps one for the isolate's life (asking the
+ * computer on every request would cost each a round trip); a test makes its
+ * own. */
+export class HomeCache {
+  readonly #states = new Map<string, State>();
+
+  /** The module's state, created empty on first use. */
+  state(name: string): State {
+    let s = this.#states.get(name);
+    if (!s) {
+      s = { checkedAt: 0 };
+      this.#states.set(name, s);
+    }
+    return s;
+  }
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isTimeout(error: unknown): boolean {
+  const name = error instanceof Error ? error.name : "";
+  return name === "TimeoutError" || name === "AbortError";
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** One JSON-RPC request to the computer's server: its `result` (an object),
+ * or its own JSON-RPC error as `{ rpcError }`. Anything else, from a lost
+ * tunnel to an answer that is not MCP JSON, throws a HomeError. */
 async function rpc(
   module: HomeModule,
   method: string,
   params: unknown,
   timeoutMs: number,
-): Promise<{ result: unknown } | { rpcError: { code: number; message: string } }> {
+): Promise<{ result: Record<string, unknown> } | { rpcError: { code: number; message: string } }> {
+  const late = () => new HomeError("timeout", `no answer within ${Math.round(timeoutMs / 1000)} s`);
   let response: Response;
   try {
     response = await module.fetch(module.endpoint, {
@@ -221,13 +244,10 @@ async function rpc(
       redirect: "manual",
     });
   } catch (error) {
-    const name = error instanceof Error ? error.name : "";
-    if (name === "TimeoutError" || name === "AbortError") {
-      throw new HomeError("timeout", `no answer within ${Math.round(timeoutMs / 1000)} s`);
-    }
+    if (isTimeout(error)) throw late();
     // Workers VPC throws when the tunnel has no connector (the computer is
     // asleep or offline) or the server refuses the connection.
-    throw new HomeError("offline", error instanceof Error ? error.message : String(error));
+    throw new HomeError("offline", describe(error));
   }
   if (response.status === 401) {
     throw new HomeError("auth", "the computer's server did not accept the Worker's bearer token");
@@ -243,7 +263,14 @@ async function rpc(
   if (response.status !== 200) {
     throw new HomeError("upstream", `HTTP ${response.status} from the computer's server`);
   }
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    // The timeout covers the body too, and a tunnel can drop mid-answer.
+    if (isTimeout(error)) throw late();
+    throw new HomeError("upstream", `the answer was cut off (${describe(error)})`);
+  }
   // JSON, as `mcp --http` answers; an SSE stream's data lines otherwise.
   const json = text.trimStart().startsWith("{")
     ? text
@@ -252,22 +279,49 @@ async function rpc(
         .filter((l) => l.startsWith("data:"))
         .map((l) => l.slice(5).trim())
         .at(-1);
-  let message: { result?: unknown; error?: { code: number; message: string } };
+  const notMcp = () => new HomeError("upstream", "the computer's server answered with something other than MCP JSON");
+  let message: unknown;
   try {
     message = JSON.parse(json ?? "");
   } catch {
-    throw new HomeError("upstream", "the computer's server answered with something other than MCP JSON");
+    throw notMcp();
   }
-  if (message.error) return { rpcError: message.error };
+  if (!isObject(message)) throw notMcp();
+  if (message.error !== undefined) {
+    const e = message.error;
+    if (isObject(e) && typeof e.code === "number" && typeof e.message === "string") {
+      return { rpcError: { code: e.code, message: e.message } };
+    }
+    throw notMcp();
+  }
+  if (!isObject(message.result)) throw notMcp();
   return { result: message.result };
+}
+
+/** A failure as a HomeError. Anything else thrown is a fault in this code:
+ * logged as one, reported as upstream. */
+function asHomeError(module: HomeModule, error: unknown): HomeError {
+  if (error instanceof HomeError) return error;
+  console.error(`[home ${module.name}] internal error:`, error);
+  return new HomeError("upstream", `the connector could not read the answer (${describe(error)})`);
+}
+
+/** Remember that the computer failed to answer, and why. */
+function record(s: State, e: HomeError, now: number): void {
+  s.failure = { kind: e.kind, message: e.message, since: s.failure?.since ?? now };
 }
 
 /** The module's tools, from the computer when it is due a re-read and
  * answers, else from the last list kept. Never throws. */
-export async function listing(env: HomeEnv, module: HomeModule, now = Date.now()): Promise<Listing | undefined> {
-  const s = state(module.name);
+export async function listing(
+  env: HomeEnv,
+  module: HomeModule,
+  cache: HomeCache,
+  now = Date.now(),
+): Promise<Listing | undefined> {
+  const s = cache.state(module.name);
   if (!s.listing) s.listing = await fromKv(env, module.name);
-  const due = s.offlineSince !== undefined ? now - s.checkedAt >= OFFLINE_RETRY_MS : now - s.checkedAt >= FRESH_MS;
+  const due = now - s.checkedAt >= (s.failure ? OFFLINE_RETRY_MS : FRESH_MS);
   if (!due && s.checkedAt !== 0) return s.listing;
   s.checkedAt = now;
   try {
@@ -278,18 +332,19 @@ export async function listing(env: HomeEnv, module: HomeModule, now = Date.now()
         {
           protocolVersion: HOME_PROTOCOL,
           capabilities: {},
-          clientInfo: { name: "pk-cli-connector", version: "0.2.0" },
+          clientInfo: { name: "pk-cli-connector", version: CONNECTOR_VERSION },
         },
         PROBE_TIMEOUT_MS,
       ),
       rpc(module, "tools/list", {}, PROBE_TIMEOUT_MS),
     ]);
-    if ("rpcError" in init || "rpcError" in list) {
-      const e = "rpcError" in init ? init.rpcError : (list as { rpcError: { message: string } }).rpcError;
-      throw new HomeError("upstream", e.message);
+    if ("rpcError" in init) throw new HomeError("upstream", init.rpcError.message);
+    if ("rpcError" in list) throw new HomeError("upstream", list.rpcError.message);
+    const listed = list.result.tools;
+    if (!Array.isArray(listed)) {
+      throw new HomeError("upstream", "the computer's server answered tools/list without a list of tools");
     }
-    const info = init.result as { instructions?: string; serverInfo?: { name?: string } };
-    const all = ((list.result as { tools?: Tool[] }).tools ?? []).filter((t) => typeof t?.name === "string");
+    const all = listed.filter((t): t is Tool => isObject(t) && typeof t.name === "string");
     const tools = all.filter((t) => t.name.startsWith(module.prefix));
     if (tools.length < all.length) {
       console.warn(
@@ -299,28 +354,32 @@ export async function listing(env: HomeEnv, module: HomeModule, now = Date.now()
           .join(", ")}`,
       );
     }
+    const info = init.result as { instructions?: unknown; serverInfo?: { name?: unknown } };
     const fresh: Listing = {
       tools,
-      instructions: typeof info?.instructions === "string" ? info.instructions : "",
-      bin: typeof info?.serverInfo?.name === "string" ? info.serverInfo.name : "",
+      instructions: typeof info.instructions === "string" ? info.instructions : "",
+      bin: typeof info.serverInfo?.name === "string" ? info.serverInfo.name : "",
       at: now,
     };
     await toKv(env, module.name, s.listing, fresh);
     s.listing = fresh;
-    s.offlineSince = undefined;
-    s.lastError = undefined;
+    s.failure = undefined;
   } catch (error) {
-    s.offlineSince ??= now;
-    s.lastError = error instanceof Error ? error.message : String(error);
-    console.warn(`[home ${module.name}] not reachable: ${s.lastError}`);
+    const e = asHomeError(module, error);
+    record(s, e, now);
+    console.warn(`[home ${module.name}] no tool list (${e.kind}): ${e.message}`);
   }
   return s.listing;
 }
 
 /** The last list this isolate or KV holds, without asking the computer:
  * for the instructions, which every request builds. */
-export async function knownListing(env: HomeEnv, module: HomeModule): Promise<Listing | undefined> {
-  const s = state(module.name);
+export async function knownListing(
+  env: HomeEnv,
+  module: HomeModule,
+  cache: HomeCache,
+): Promise<Listing | undefined> {
+  const s = cache.state(module.name);
   if (!s.listing) s.listing = await fromKv(env, module.name);
   return s.listing;
 }
@@ -347,7 +406,7 @@ async function toKv(env: HomeEnv, name: string, before: Listing | undefined, aft
   try {
     await env.OAUTH_KV?.put(`${KV_PREFIX}${name}`, JSON.stringify(after));
   } catch (error) {
-    console.warn(`[home ${name}] could not keep the tool list: ${error instanceof Error ? error.message : error}`);
+    console.warn(`[home ${name}] could not keep the tool list: ${describe(error)}`);
   }
 }
 
@@ -355,57 +414,63 @@ function toolError(text: string): CallToolResult {
   return { content: [{ type: "text", text }], isError: true };
 }
 
-/** How the model should name the computer's server: `m1f mcp --http`. */
-function server(module: HomeModule): string {
-  const bin = state(module.name).listing?.bin;
+/** How the model should name the computer's server: `m1f mcp --http` once a
+ * list has said which CLI it is. */
+function server(module: HomeModule, bin: string | undefined): string {
   return bin ? `\`${bin} mcp --http\`` : `the server for the ${module.prefix}… tools`;
 }
 
-function explain(module: HomeModule, error: HomeError): string {
-  switch (error.kind) {
+/** A failure as the model is told it: what happened and what to do. */
+function explain(module: HomeModule, bin: string | undefined, failure: Pick<Failure, "kind" | "message">): string {
+  const named = server(module, bin);
+  switch (failure.kind) {
     case "offline":
       return (
-        `offline: the user's computer, which runs ${server(module)} for these tools, is not reachable ` +
+        `offline: the user's computer, which runs ${named} for these tools, is not reachable ` +
         `(it is asleep or offline, or the server or its tunnel is not running). Nothing was read. ` +
         `Tell the user to wake the computer, or start the server, and ask again.`
       );
     case "timeout":
       return (
-        `upstream: ${server(module)} on the user's computer did not answer in time (${error.message}). ` +
+        `upstream: ${named} on the user's computer did not answer in time (${failure.message}). ` +
         `Try again later, or narrow the call.`
       );
     case "auth":
       return (
-        `auth: ${error.message}. The token in the Worker's HOME_${module.name}_TOKEN secret and the one ` +
-        `${server(module)} uses must be the same; ask the user to set them again.`
+        `auth: ${failure.message}. The token in the Worker's HOME_${module.name}_TOKEN secret and the one ` +
+        `${named} uses must be the same; ask the user to set them again.`
       );
     case "refused":
       return (
-        `other: ${error.message}. On the HOME_${module.name}_URL path, the tunnel route's HTTP Host Header ` +
+        `other: ${failure.message}. On the HOME_${module.name}_URL path, the tunnel route's HTTP Host Header ` +
         `must be localhost; ask the user to check it.`
       );
     default:
-      return `upstream: ${server(module)} failed: ${error.message}.`;
+      return `upstream: ${named} failed: ${failure.message}.`;
   }
 }
 
 /** Forward one `tools/call`. A liveness check comes first, so a sleeping
- * computer is reported in seconds, not after the call's whole timeout. */
+ * computer is reported in seconds, not after the call's whole timeout. Every
+ * failure is a tool error; the server's own JSON-RPC error comes back as
+ * `{ rpcError }`. */
 export async function callHome(
   module: HomeModule,
   params: { name: string; arguments?: unknown },
+  cache: HomeCache,
   now = Date.now(),
 ): Promise<{ result: CallToolResult } | { rpcError: { code: number; message: string } }> {
-  const s = state(module.name);
+  const s = cache.state(module.name);
   try {
     await rpc(module, "ping", undefined, PROBE_TIMEOUT_MS);
   } catch (error) {
-    if (!(error instanceof HomeError)) throw error;
-    s.offlineSince ??= now;
-    s.lastError = error.message;
-    return { result: toolError(explain(module, error.kind === "timeout" ? new HomeError("offline", error.message) : error)) };
+    const e = asHomeError(module, error);
+    record(s, e, now);
+    // No answer to a ping within seconds: as good as offline.
+    const shown = e.kind === "timeout" ? { kind: "offline" as const, message: e.message } : e;
+    return { result: toolError(explain(module, s.listing?.bin, shown)) };
   }
-  s.offlineSince = undefined;
+  s.failure = undefined;
   try {
     const answer = await rpc(
       module,
@@ -414,11 +479,16 @@ export async function callHome(
       CALL_TIMEOUT_MS,
     );
     if ("rpcError" in answer) return answer;
+    if (!Array.isArray(answer.result.content)) {
+      throw new HomeError("upstream", "the computer's server answered tools/call without a tool result");
+    }
     return { result: answer.result as CallToolResult };
   } catch (error) {
-    if (!(error instanceof HomeError)) throw error;
-    if (error.kind === "offline") s.offlineSince ??= now;
-    return { result: toolError(explain(module, error)) };
+    // The ping got through, so only a lost tunnel counts against the
+    // computer; a slow or malformed answer is this call's alone.
+    const e = asHomeError(module, error);
+    if (e.kind === "offline") record(s, e, now);
+    return { result: toolError(explain(module, s.listing?.bin, e)) };
   }
 }
 
@@ -431,8 +501,9 @@ export function problemResult(problem: HomeProblem): CallToolResult {
 }
 
 /** What the model is told about the home modules, after the modules' own
- * instructions. */
-export function homeInstructions(modules: HomeModule[], problems: HomeProblem[]): string {
+ * instructions: how they work, and for each module that has failed to give
+ * a list and has none kept, why, with the remedy a call would give. */
+export function homeInstructions(modules: HomeModule[], problems: HomeProblem[], cache: HomeCache): string {
   const parts: string[] = [];
   if (modules.length > 0) {
     const names = modules.map((m) => `${m.prefix}…`).join(", ");
@@ -442,9 +513,15 @@ export function homeInstructions(modules: HomeModule[], problems: HomeProblem[])
         `at once; the other tools still work.`,
     );
     for (const m of modules) {
-      const s = states.get(m.name);
-      if (s?.offlineSince !== undefined && !s.listing) {
-        parts.push(`The ${m.prefix}… tools are not listed because the user's computer has not answered yet.`);
+      const s = cache.state(m.name);
+      if (s.listing || !s.failure) continue;
+      if (s.failure.kind === "offline" || s.failure.kind === "timeout") {
+        parts.push(
+          `The ${m.prefix}… tools are not listed because the user's computer has not answered yet ` +
+            `(it is asleep or offline, or the server or its tunnel is not running).`,
+        );
+      } else {
+        parts.push(`The ${m.prefix}… tools are not listed. ${explain(m, undefined, s.failure)}`);
       }
     }
   }

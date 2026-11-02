@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 
 import {
   FRESH_MS,
+  HomeCache,
   OFFLINE_RETRY_MS,
   callHome,
   endpointFor,
@@ -14,12 +15,12 @@ import {
   knownListing,
   listing,
   problemResult,
-  resetHomeState,
 } from "../src/home.ts";
 import type { HomeEnv, HomeModule } from "../src/home.ts";
 import { isSet, moduleEnabled } from "../src/settings.ts";
 
-const TOKEN = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/** A dummy bearer token, as long as `mcp --new-token` makes. */
+const TOKEN = "t".repeat(64);
 
 interface Seen {
   url: string;
@@ -79,7 +80,11 @@ function only(env: HomeEnv): HomeModule {
   return modules[0];
 }
 
-beforeEach(() => resetHomeState());
+/** A fresh isolate's view, per test. */
+let cache = new HomeCache();
+beforeEach(() => {
+  cache = new HomeCache();
+});
 
 test("a setting is set unless it is empty or the Deploy form's `none`", () => {
   for (const off of [undefined, "", "  ", "none", "NONE", " None "]) assert.equal(isSet(off), false, String(off));
@@ -133,7 +138,7 @@ test("a half-set home module is reported, never served", () => {
     const result = problemResult(problems[0]);
     assert.equal(result.isError, true);
     assert.match(String(result.content[0].type === "text" && result.content[0].text), /^other: .*not set up/);
-    assert.match(homeInstructions([], problems), /m1_… tools are not set up yet/);
+    assert.match(homeInstructions([], problems, cache), /m1_… tools are not set up yet/);
   }
 });
 
@@ -151,7 +156,7 @@ test("the list keeps the module's own tools, is cached, and is written to KV onl
   const store = kv();
   const env: HomeEnv = { HOME_M1_TOKEN: TOKEN, HOME_M1: fetcher, OAUTH_KV: store.store };
   const module = only(env);
-  const first = await listing(env, module, 1_000_000);
+  const first = await listing(env, module, cache, 1_000_000);
   assert.deepEqual(first?.tools.map((t) => t.name), ["m1_portfolio"], "coinbase_accounts is not m1's to serve");
   assert.equal(first?.bin, "m1f");
   assert.equal(first?.instructions, "M1 instructions.");
@@ -163,15 +168,14 @@ test("the list keeps the module's own tools, is cached, and is written to KV onl
   }
 
   const asked = seen.length;
-  await listing(env, module, 1_000_000 + FRESH_MS - 1);
+  await listing(env, module, cache, 1_000_000 + FRESH_MS - 1);
   assert.equal(seen.length, asked, "fresh: not asked again");
-  await listing(env, module, 1_000_000 + FRESH_MS);
+  await listing(env, module, cache, 1_000_000 + FRESH_MS);
   assert.equal(seen.length, asked + 2, "stale: asked again (initialize and tools/list)");
   assert.equal(store.puts(), 1, "the same list is not written again");
 
   // A new isolate finds the list in KV without asking the computer.
-  resetHomeState();
-  const known = await knownListing(env, module);
+  const known = await knownListing(env, module, new HomeCache());
   assert.deepEqual(known?.tools.map((t) => t.name), ["m1_portfolio"]);
   assert.equal(seen.length, asked + 2);
 });
@@ -181,15 +185,15 @@ test("an offline computer keeps the last list, and is asked again only after a p
   const { seen, fetcher } = computer(() => (offline ? new Error("destination_unavailable") : undefined));
   const env: HomeEnv = { HOME_M1_TOKEN: TOKEN, HOME_M1: fetcher };
   const module = only(env);
-  await listing(env, module, 0);
+  await listing(env, module, cache, 0);
   offline = true;
   const t = FRESH_MS;
-  const kept = await listing(env, module, t);
+  const kept = await listing(env, module, cache, t);
   assert.deepEqual(kept?.tools.map((x) => x.name), ["m1_portfolio"]);
   const asked = seen.length;
-  await listing(env, module, t + OFFLINE_RETRY_MS - 1);
+  await listing(env, module, cache, t + OFFLINE_RETRY_MS - 1);
   assert.equal(seen.length, asked, "not asked again inside the pause");
-  await listing(env, module, t + OFFLINE_RETRY_MS);
+  await listing(env, module, cache, t + OFFLINE_RETRY_MS);
   assert.ok(seen.length > asked, "asked again after it");
 });
 
@@ -197,14 +201,44 @@ test("a computer never seen lists nothing, and the instructions say why", async 
   const { fetcher } = computer(() => new Error("connection_refused"));
   const env: HomeEnv = { HOME_M1_TOKEN: TOKEN, HOME_M1: fetcher };
   const module = only(env);
-  assert.equal(await listing(env, module), undefined);
-  assert.match(homeInstructions([module], []), /m1_… tools are not listed because the user's computer has not answered/);
+  assert.equal(await listing(env, module, cache), undefined);
+  assert.match(
+    homeInstructions([module], [], cache),
+    /m1_… tools are not listed because the user's computer has not answered/,
+  );
+});
+
+test("a computer that answers but refuses the Worker lists nothing, and the instructions give the remedy", async () => {
+  const cases: [number, RegExp][] = [
+    [401, /m1_… tools are not listed\. auth: .*HOME_M1_TOKEN.*set them again/],
+    [403, /m1_… tools are not listed\. other: .*Host Header must be localhost/],
+  ];
+  for (const [status, why] of cases) {
+    const own = new HomeCache();
+    const { fetcher } = computer(() => new Response("", { status }));
+    const env: HomeEnv = { HOME_M1_TOKEN: TOKEN, HOME_M1: fetcher };
+    const module = only(env);
+    assert.equal(await listing(env, module, own), undefined);
+    const said = homeInstructions([module], [], own);
+    assert.match(said, why, String(status));
+    assert.doesNotMatch(said, /has not answered/, "an awake computer is not called asleep");
+  }
+});
+
+test("a list without a tools array is a failure, not an empty list", async () => {
+  const { fetcher } = computer((s) =>
+    s.body.method === "tools/list" ? Response.json({ jsonrpc: "2.0", id: 1, result: { tools: "m1_portfolio" } }) : undefined,
+  );
+  const env: HomeEnv = { HOME_M1_TOKEN: TOKEN, HOME_M1: fetcher };
+  const module = only(env);
+  assert.equal(await listing(env, module, cache), undefined);
+  assert.match(homeInstructions([module], [], cache), /upstream: .*without a list of tools/);
 });
 
 test("a call is forwarded as it came, after a ping", async () => {
   const { seen, fetcher } = computer();
   const module = only({ HOME_M1_TOKEN: TOKEN, HOME_M1: fetcher });
-  const answer = await callHome(module, { name: "m1_portfolio", arguments: { limit: 5 } });
+  const answer = await callHome(module, { name: "m1_portfolio", arguments: { limit: 5 } }, cache);
   assert.ok("result" in answer);
   assert.equal(answer.result.isError, false);
   assert.deepEqual(
@@ -216,10 +250,9 @@ test("a call is forwarded as it came, after a ping", async () => {
 
 test("every failure is a tool error that says what to do", async () => {
   const text = async (fail: (s: Seen) => Response | Error | undefined) => {
-    resetHomeState();
     const { fetcher } = computer(fail);
     const module = only({ HOME_M1_TOKEN: TOKEN, HOME_M1: fetcher });
-    const answer = await callHome(module, { name: "m1_portfolio" });
+    const answer = await callHome(module, { name: "m1_portfolio" }, new HomeCache());
     assert.ok("result" in answer);
     assert.equal(answer.result.isError, true);
     const block = answer.result.content[0];
@@ -249,6 +282,34 @@ test("every failure is a tool error that says what to do", async () => {
     await text((s) => (s.body.method === "tools/call" ? new Response("<html>", { status: 200 }) : undefined)),
     /^upstream: .*other than MCP JSON/,
   );
+  // JSON that is not a JSON-RPC answer: from another service on the port,
+  // it fails the ping; an SSE `data: null`, the call.
+  assert.match(await text(() => Response.json({ status: "ok" })), /^upstream: .*other than MCP JSON/);
+  assert.match(
+    await text((s) =>
+      s.body.method === "tools/call"
+        ? new Response("event: message\ndata: null\n\n", { headers: { "content-type": "text/event-stream" } })
+        : undefined,
+    ),
+    /^upstream: .*other than MCP JSON/,
+  );
+  assert.match(
+    await text((s) => (s.body.method === "tools/call" ? Response.json({ jsonrpc: "2.0", id: 1, result: {} }) : undefined)),
+    /^upstream: .*without a tool result/,
+  );
+  // The body breaks off after the headers: the tunnel dropped, or the time
+  // ran out while it was read.
+  const broken = (error: Error) =>
+    new Response(new ReadableStream({ start: (c) => c.error(error) }), { status: 200 });
+  assert.match(
+    await text((s) => (s.body.method === "tools/call" ? broken(new TypeError("Network connection lost.")) : undefined)),
+    /^upstream: .*cut off \(Network connection lost\.\)/,
+  );
+  assert.match(
+    await text((s) => (s.body.method === "tools/call" ? broken(timeout) : undefined)),
+    /^upstream: .*did not answer in time/,
+  );
+  assert.match(await text(() => broken(timeout)), /^offline: /, "a ping whose answer does not finish in time");
 });
 
 test("the computer's own JSON-RPC error comes back as one", async () => {
@@ -258,7 +319,7 @@ test("the computer's own JSON-RPC error comes back as one", async () => {
       : undefined,
   );
   const module = only({ HOME_M1_TOKEN: TOKEN, HOME_M1: fetcher });
-  const answer = await callHome(module, { name: "m1_nope" });
+  const answer = await callHome(module, { name: "m1_nope" }, cache);
   assert.deepEqual(answer, { rpcError: { code: -32602, message: "unknown tool `m1_nope`" } });
 });
 
@@ -272,6 +333,6 @@ test("an SSE answer is read as well as a JSON one", async () => {
       : undefined,
   );
   const module = only({ HOME_M1_TOKEN: TOKEN, HOME_M1: fetcher });
-  const answer = await callHome(module, { name: "m1_portfolio" });
+  const answer = await callHome(module, { name: "m1_portfolio" }, cache);
   assert.deepEqual(answer, { result: { content: [], isError: false } });
 });
