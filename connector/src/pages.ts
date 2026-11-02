@@ -5,8 +5,11 @@ import type { ConsentDescription } from "@cloudflare/workers-oauth-provider";
 
 const esc = (v: string) => v.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-/** No scripts, no outside resources, posts only to this Worker, no framing. */
-export const PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'";
+/** No scripts, no outside resources, no framing. No `form-action`: Chromium
+ * applies it to where a form's answer redirects too, and approving answers
+ * with a redirect to Claude's callback. The forms post to fixed paths on this
+ * Worker, and with no script nothing on the page can change that. */
+export const PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'";
 
 const HEADERS = {
   "Content-Type": "text/html; charset=utf-8",

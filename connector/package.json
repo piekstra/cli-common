@@ -12,7 +12,7 @@
     "mock": "node mock/coinbase-mock.mjs",
     "smoke": "sh scripts/smoke.sh",
     "e2e": "sh scripts/e2e.sh",
-    "test": "node --test test/",
+    "test": "node --test 'test/*.test.ts'",
     "typecheck": "tsc"
   },
   "dependencies": {

@@ -87,17 +87,34 @@ Claude asks you to connect again.
 holds a copy of `modules.json`. Change the coinbase entry's `url` to the new
 release's `cbase-mcp-<version>.wasm` and its `sha256` to the value in the
 release's `cbase-mcp-<version>.wasm.sha256`, then commit. Cloudflare rebuilds
-and redeploys. To take this folder's own changes too, merge them from
-[piekstra/cli-common](https://github.com/piekstra/cli-common/tree/main/connector).
+and redeploys.
+
+**A new version of this connector.** Your repository is a copy of this
+folder, at its root, with no shared history, so an update is a copy rather
+than a merge. From a clone of your repository:
+
+```sh
+git clone --depth 1 https://github.com/piekstra/cli-common /tmp/cli-common
+rsync -a --delete --exclude .git --exclude modules.json /tmp/cli-common/connector/ ./
+git add -A && git commit -m "connector: update from cli-common"
+git push
+```
+
+That makes your repository match this folder except for `modules.json`,
+which keeps your pins: compare it with
+`/tmp/cli-common/connector/modules.json` and take the newer pins.
 
 **A new Coinbase key.** Create the new key (step 1), then in the Cloudflare
 dashboard open the Worker's **Settings → Variables and Secrets** and replace
 `CBASE_API_KEY_NAME` and `CBASE_API_PRIVATE_KEY`. Delete the old key in the
 Coinbase Developer Platform.
 
-**A new passphrase.** Replace `OWNER_PASSPHRASE` the same way, then open
-`https://<your-worker>/revoke` and enter the new passphrase. That disconnects
-every client, so only someone who knows the new passphrase can connect again.
+**A new passphrase.** Replace `OWNER_PASSPHRASE` the same way. Every
+connection made under the old one ends at once: each grant records which
+passphrase approved it, and the Worker refuses its tokens once that has
+changed. Connect Claude again with the new passphrase. To disconnect every
+client without changing the passphrase, open `https://<your-worker>/revoke`
+and enter it.
 
 **Removing it.** Remove the connector in Claude's settings, delete the Worker
 in Cloudflare, and delete the API key in the Coinbase Developer Platform.
@@ -114,7 +131,7 @@ Who holds what:
 | Claude (Anthropic) | an access token (1 hour) and a refresh token for your Worker | call the read-only tools while connected; sees the results in your conversation |
 | Coinbase | the key's public half | check the Worker's signed requests |
 | The authors of this code | nothing: no service, no telemetry | publish new versions, which reach your Worker only when you update `modules.json` or merge them |
-| Anyone else | your Worker's URL | open the passphrase page; ten wrong passphrases in an hour lock it until the hour ends |
+| Anyone else | your Worker's URL | open the passphrase page; ten wrong passphrases in an hour lock it and `/revoke` until the hour ends |
 
 **The key is read-only twice over.** Coinbase refuses any trade or transfer
 made with a View-only key, and the module never asks: its client sends `GET`
@@ -131,7 +148,16 @@ with those callbacks. To allow another client, set `EXTRA_REDIRECT_URIS`
 **A leaked passphrase** lets whoever has it connect a client of their own,
 from their own computer, and read what the tools return: your Coinbase
 balances and transaction history. It does not let them trade, move funds or
-see the key. Change the passphrase, then open `/revoke` (above).
+see the key. Change the passphrase in the Cloudflare dashboard (above): that
+ends every connection at once, theirs included, and needs no page that a
+guesser could lock.
+
+**A guesser can lock the pages, not your Worker.** Ten wrong passphrases in a
+clock hour close `/authorize` and `/revoke` until the hour ends. Connections
+that already exist keep working. Changing the passphrase still ends them all.
+To reopen the pages at once, delete the `owner-auth-failures:…` key in the
+Worker's `OAUTH_KV` namespace (Cloudflare dashboard, **Storage & databases →
+Workers KV**).
 
 **A leaked Coinbase key** lets whoever has it read your Coinbase account
 directly, without this Worker. Delete the key in the Coinbase Developer
@@ -175,7 +201,7 @@ modules; it is an exact copy of cli-common's
 | `src/owner.ts`, `src/pages.ts` | Passphrase check and lockout, the callback allowlist, the HTML pages |
 | `mock/` | A localhost Coinbase that verifies each request's JWT, with invented data |
 | `scripts/e2e.sh`, `scripts/smoke.sh` | The end-to-end check CI runs |
-| `test/` | Unit tests for the owner gate |
+| `test/` | Unit tests for the owner gate and the pages' policy |
 
 ### Adding another CLI
 
@@ -199,7 +225,7 @@ Needs Node 22.18 or later (it runs the TypeScript tests directly), `curl`,
 ```sh
 npm ci
 npm run typecheck
-npm test               # the owner gate
+npm test               # the owner gate and the pages' policy
 npm run e2e            # dummy key, mock, `wrangler dev --local`, then the smoke test
 ```
 
@@ -207,7 +233,9 @@ npm run e2e            # dummy key, mock, `wrangler dev --local`, then the smoke
 registration (a foreign callback refused), the passphrase page (a wrong
 passphrase refused), PKCE token exchange, `initialize`, `tools/list`, both
 tools against the mock, the error paths, refresh-token rotation and
-`/revoke`. Each run starts from empty local storage.
+`/revoke`. It then restarts the Worker under a new passphrase and checks that
+the earlier connection's tokens are refused and the new passphrase connects.
+Each run starts from empty local storage.
 
 To try a module that is not released yet, point the build at a local file:
 `CONNECTOR_MODULE_COINBASE=/path/to/cbase.wasm npm run e2e` (the build log

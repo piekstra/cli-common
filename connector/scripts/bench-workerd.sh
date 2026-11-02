@@ -6,7 +6,8 @@
 # and MCP framing as tools/call, so the difference between the two is the
 # WebAssembly tool itself plus its fetches to the mock.
 #
-#   sh scripts/bench-workerd.sh <access_token> [N] [base]
+#   SMOKE_TOKEN_OUT=.e2e/tokens.json sh scripts/smoke.sh   # a live token
+#   sh scripts/bench-workerd.sh "$(jq -r .access .e2e/tokens.json)" [N] [base]
 set -eu
 ACCESS="$1"
 N="${2:-200}"

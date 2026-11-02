@@ -51,11 +51,33 @@ export async function checkPassphrase(typed: string, secret: string | undefined)
   return diff === 0;
 }
 
+/**
+ * What a grant records of the passphrase it was approved under (in its props,
+ * which the provider stores encrypted): a domain-separated SHA-256, cut to
+ * 16 bytes. A grant whose tag is not the current passphrase's is dead, so
+ * changing OWNER_PASSPHRASE in the dashboard ends every connection at once,
+ * through nothing a guesser can lock.
+ */
+export async function passphraseTag(secret: string | undefined): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`pk-connector grant\0${secret ?? ""}`));
+  return btoa(String.fromCharCode(...new Uint8Array(digest).subarray(0, 16)));
+}
+
+/** Whether a grant's props were approved under the current passphrase. */
+export async function grantIsCurrent(props: unknown, secret: string | undefined): Promise<boolean> {
+  const tag = (props as { passphrase?: unknown } | null | undefined)?.passphrase;
+  return typeof tag === "string" && tag === (await passphraseTag(secret));
+}
+
 // A coarse lockout: ten wrong passphrases in a clock hour closes /authorize
-// until the hour ends. KV is eventually consistent, so a burst can get a few
-// more tries than ten; the passphrase's length is the real defence, and this
-// only blunts a guesser working through a weak one. One KV write per failure
-// keeps it well inside the free plan's 1,000 writes a day.
+// and /revoke until the hour ends. KV is eventually consistent and this
+// read-then-write is not atomic, so a burst can get a few more tries than
+// ten; the passphrase's length is the real defence, and this only blunts a
+// guesser working through a weak one. A guesser can keep the pages locked,
+// but not existing connections or the dashboard, where changing the
+// passphrase ends every connection (passphraseTag) and deleting this key
+// reopens the pages. One KV write per failure keeps it well inside the free
+// plan's 1,000 writes a day.
 const MAX_FAILURES_PER_HOUR = 10;
 const failureKey = () => `owner-auth-failures:${Math.floor(Date.now() / 3_600_000)}`;
 

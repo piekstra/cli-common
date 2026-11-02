@@ -11,12 +11,14 @@
   committed. Only the owner's passphrase (20 characters or more; ten wrong
   tries an hour lock the page) connects a client, over OAuth with dynamic
   registration and PKCE, and authorization codes go only to Claude's
-  callback, loopback, or `EXTRA_REDIRECT_URIS`. `/revoke` disconnects every
-  client. Serves coinbase-cli's two tools from its v0.3.0 module. README:
+  callback, loopback, or `EXTRA_REDIRECT_URIS`. Each grant records which
+  passphrase approved it, so changing the passphrase ends every connection;
+  `/revoke` disconnects every client without changing it. Serves coinbase-cli's two tools from its v0.3.0 module. README:
   walkthrough and threat model.
 - `make connector-check` and CI's `connector` job: the host copy matches
   `js/pk-host.ts`, typecheck, unit tests, and the OAuth and MCP flow end to
-  end under `wrangler dev --local` against a JWT-checking mock.
+  end under `wrangler dev --local` against a JWT-checking mock, including a
+  passphrase change.
 
 ## v0.14.0 — 2026-11-02
 

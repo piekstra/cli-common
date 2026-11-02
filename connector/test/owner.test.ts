@@ -3,7 +3,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { checkPassphrase, lockedOut, recordFailure, redirectAllowed } from "../src/owner.ts";
+import {
+  checkPassphrase,
+  grantIsCurrent,
+  lockedOut,
+  passphraseTag,
+  recordFailure,
+  redirectAllowed,
+} from "../src/owner.ts";
 
 test("codes go to Claude's callback, loopback clients and the owner's extras only", () => {
   for (const ok of [
@@ -53,4 +60,18 @@ test("ten failures in an hour lock the approval page", async () => {
   assert.equal(await lockedOut(env), false);
   await recordFailure(env);
   assert.equal(await lockedOut(env), true);
+});
+
+test("a grant stands only under the passphrase it was approved with", async () => {
+  const before = "correct horse battery staple, twice over";
+  const after = "a different passphrase entirely, 2026";
+  const tag = await passphraseTag(before);
+  assert.equal(tag, await passphraseTag(before), "the tag is stable");
+  assert.notEqual(tag, await passphraseTag(after));
+  assert.ok(!tag.includes(before) && tag.length < before.length, "the tag is not the passphrase");
+  assert.ok(await grantIsCurrent({ sub: "owner", passphrase: tag }, before));
+  assert.ok(!(await grantIsCurrent({ sub: "owner", passphrase: tag }, after)), "a changed passphrase ends it");
+  for (const props of [{ sub: "owner" }, null, undefined, "x", { passphrase: 1 }]) {
+    assert.ok(!(await grantIsCurrent(props, before)), JSON.stringify(props));
+  }
 });

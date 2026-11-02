@@ -130,11 +130,13 @@ NEW="$(curl -sf "$BASE/oauth/token" -d grant_type=refresh_token --data-urlencode
 ACCESS="$(echo "$NEW" | jq -r .access_token)"
 rpc '{"jsonrpc":"2.0","id":6,"method":"tools/list"}' | jq -c '{tools_after_refresh: (.result.tools | length)}'
 
-# For scripts/bench-workerd.sh: hand the live access token on instead of
-# revoking it.
+# For scripts/e2e.sh's passphrase change and scripts/bench-workerd.sh: hand
+# the live tokens on, as {access, refresh, client_id}, instead of revoking
+# them.
 if [ -n "${SMOKE_TOKEN_OUT:-}" ]; then
-  (umask 077; printf %s "$ACCESS" > "$SMOKE_TOKEN_OUT")
-  printf '\nOK (the /revoke step is skipped: the token goes to the benchmark)\n'
+  (umask 077; jq -n --arg access "$ACCESS" --arg refresh "$(echo "$NEW" | jq -r .refresh_token)" \
+    --arg client_id "$CLIENT_ID" '{$access, $refresh, $client_id}' > "$SMOKE_TOKEN_OUT")
+  printf '\nOK (the /revoke step is skipped: the tokens are handed on)\n'
   exit 0
 fi
 

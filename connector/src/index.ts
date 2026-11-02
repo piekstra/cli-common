@@ -13,7 +13,7 @@
 // module's CallToolResult comes back unchanged. src/pk-host.ts runs the
 // modules; it is a copy of cli-common's reference host.
 
-import { OAuthProvider, AuthorizationError } from "@cloudflare/workers-oauth-provider";
+import { OAuthProvider, AuthorizationError, OAuthError } from "@cloudflare/workers-oauth-provider";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp/server";
 import { ProtocolError, Server } from "@modelcontextprotocol/server";
@@ -22,7 +22,15 @@ import { WasmToolset } from "./pk-host.ts";
 import { MODULES } from "./modules.ts";
 import type { ToolModule } from "./modules.ts";
 import { PAGE_CSP, authorizePage, messagePage, revokePage } from "./pages.ts";
-import { MIN_PASSPHRASE, checkPassphrase, lockedOut, recordFailure, redirectAllowed } from "./owner.ts";
+import {
+  MIN_PASSPHRASE,
+  checkPassphrase,
+  grantIsCurrent,
+  lockedOut,
+  passphraseTag,
+  recordFailure,
+  redirectAllowed,
+} from "./owner.ts";
 
 export interface Env {
   OAUTH_KV: KVNamespace;
@@ -105,8 +113,27 @@ function mcpServer(env: Env): Server {
   return server;
 }
 
+const PASSPHRASE_CHANGED = "The connector's passphrase has changed since this client connected. Connect again.";
+
 const mcpApi = {
-  fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // The provider has checked the token; this checks the grant behind it
+    // still stands under today's passphrase.
+    if (!(await grantIsCurrent((ctx as ExecutionContext & { props?: unknown }).props, env.OWNER_PASSPHRASE))) {
+      const metadata = `${new URL(request.url).origin}/.well-known/oauth-protected-resource/mcp`;
+      return Response.json(
+        { error: "invalid_token", error_description: PASSPHRASE_CHANGED },
+        {
+          status: 401,
+          // The provider's own challenge for a dead token, so a client
+          // starts the authorization flow again.
+          headers: {
+            "Cache-Control": "no-store",
+            "WWW-Authenticate": `Bearer realm="OAuth", resource_metadata="${metadata}", error="invalid_token", scope="mcp:read"`,
+          },
+        },
+      );
+    }
     return createMcpHandler(() => mcpServer(env), { route: "/mcp" })(request, env, ctx);
   },
 };
@@ -179,7 +206,8 @@ async function approve(request: Request, env: Env): Promise<Response> {
     userId: OWNER,
     metadata: {},
     scope: approved.request.scope,
-    props: { sub: OWNER },
+    // The passphrase's tag: changing the passphrase ends this grant.
+    props: { sub: OWNER, passphrase: await passphraseTag(env.OWNER_PASSPHRASE) },
   });
   approved.headers.set("Location", redirectTo);
   return new Response(null, { status: 302, headers: approved.headers });
@@ -242,6 +270,13 @@ function providerFor(origin: string, env: Env): OAuthProvider<Env> {
       // days unused; /revoke ends them all at once.
       refreshTokenTTL: 30 * 86_400,
       refreshTokenIdleTTL: 30 * 86_400,
+      // A grant approved under an earlier passphrase cannot be refreshed:
+      // invalid_grant also revokes it.
+      tokenExchangeCallback: async ({ grantType, props, env: current }) => {
+        if (grantType === "refresh_token" && !(await grantIsCurrent(props, current.OWNER_PASSPHRASE))) {
+          throw new OAuthError("invalid_grant", { description: PASSPHRASE_CHANGED });
+        }
+      },
       // Registration stays open (claude.ai registers itself), but only for
       // clients whose callbacks are all allowed; /authorize re-checks the
       // redirect URI of every request.
