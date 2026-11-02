@@ -119,7 +119,7 @@ impl<T: Toolset> Toolset for InWorker<T> {
     }
 }
 
-/// The functions behind [`export_wasm!`]'s exports. Not for direct use.
+/// The functions behind [`export_wasm!`](crate::export_wasm)'s exports. Not for direct use.
 #[doc(hidden)]
 pub mod abi {
     use super::*;

@@ -11,7 +11,7 @@
 //!
 //! The traits are async because the Worker's side has to be. A blocking
 //! implementation's futures are ready on their first poll, so native code
-//! drives them with [`crate::block_on`] at no cost.
+//! drives them with [`crate::block_on()`] at no cost.
 
 use std::fmt;
 
