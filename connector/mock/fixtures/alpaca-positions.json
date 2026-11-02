@@ -1,0 +1,42 @@
+[
+  {
+    "asset_id": "00000000-0000-4000-8000-000000000020",
+    "symbol": "SMPL",
+    "exchange": "NYSE",
+    "asset_class": "us_equity",
+    "asset_marginable": true,
+    "qty": "10.5",
+    "qty_available": "10.5",
+    "avg_entry_price": "100.25",
+    "side": "long",
+    "market_value": "1103.55",
+    "cost_basis": "1052.63",
+    "unrealized_pl": "50.92",
+    "unrealized_plpc": "0.0483729039",
+    "unrealized_intraday_pl": "10.50",
+    "unrealized_intraday_plpc": "0.0096069869",
+    "current_price": "105.10",
+    "lastday_price": "104.10",
+    "change_today": "0.0096061479"
+  },
+  {
+    "asset_id": "00000000-0000-4000-8000-000000000021",
+    "symbol": "ETFX",
+    "exchange": "ARCA",
+    "asset_class": "us_equity",
+    "asset_marginable": true,
+    "qty": "-5",
+    "qty_available": "-5",
+    "avg_entry_price": "50.00",
+    "side": "short",
+    "market_value": "-240.00",
+    "cost_basis": "-250.00",
+    "unrealized_pl": "10.00",
+    "unrealized_plpc": "0.04",
+    "unrealized_intraday_pl": "2.00",
+    "unrealized_intraday_plpc": "0.008",
+    "current_price": "48.00",
+    "lastday_price": "48.40",
+    "change_today": "-0.0082644628"
+  }
+]

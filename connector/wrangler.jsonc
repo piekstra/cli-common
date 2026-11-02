@@ -19,6 +19,9 @@
   // The secrets are listed in .dev.vars.example, which the Deploy button
   // reads. A missing one is reported at run time (the approval page, a tool's
   // auth error), not by failing a deploy.
+  // Home modules (README, "Tools from your computer"): one Workers VPC
+  // service binding per CLI on your computer, named HOME_<NAME>, e.g.
+  //   "vpc_services": [{ "binding": "HOME_M1", "service_id": "<SERVICE_ID>" }],
   "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": true }],
   "observability": { "enabled": true }
 }

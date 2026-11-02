@@ -1,0 +1,6 @@
+# False positives of gitleaks' generic-api-key rule in e2d7c3c (PR #45),
+# a commit that stays in that PR's history. Neither is a secret: the README
+# named an unused keychain service (M1F_KEYCHAIN_SERVICE), and the test a
+# dummy bearer token. Later commits word both so the rule does not match.
+e2d7c3c1a90f5d63d8cf4e10992e984078d8565f:connector/README.md:generic-api-key:485
+e2d7c3c1a90f5d63d8cf4e10992e984078d8565f:connector/test/home.test.ts:generic-api-key:22

@@ -58,6 +58,7 @@ wasm-check:
 # (crates/pk-cli-mcp/js) in Node, which strips the TypeScript types itself
 # (Node 22.18 or later).
 WASM_DEMO := $(or $(CARGO_TARGET_DIR),target)/wasm32-unknown-unknown/release/pk_cli_mcp_wasm_demo.wasm
+EXAMPLE_CLI := $(or $(CARGO_TARGET_DIR),target)/debug/example-cli
 wasm-host-check:
 	@command -v node >/dev/null 2>&1 || { echo "wasm-host-check needs Node 22.18 or later"; exit 1; }
 	$(CARGO) rustc -p pk-cli-mcp-wasm-demo --lib --crate-type cdylib --release --target wasm32-unknown-unknown
@@ -73,11 +74,14 @@ scripts-check:
 	bash scripts/test/self-view.test.sh
 
 # The deploy-your-own connector (connector/), CI's `connector` job. Not part
-# of `verify`: it needs npm and fetches the pinned module from its release.
-# Its host must be the reference host byte for byte; then the typecheck, the
-# owner gate's unit tests, and the OAuth and MCP flow end to end under
-# `wrangler dev --local` against the JWT-checking mock (scripts/e2e.sh).
-# Localhost only: no Cloudflare account, nothing deployed.
+# of `verify`: it needs npm and fetches the pinned modules from their
+# releases. Its host must be the reference host byte for byte; then the
+# typecheck, the unit tests, and the OAuth and MCP flow end to end under
+# `wrangler dev --local` against the Coinbase and Alpaca mocks, with
+# example-cli's `mcp --http` as a home module (scripts/e2e.sh). Localhost
+# only: no Cloudflare account, no tunnel, nothing deployed.
 connector-check:
 	cmp connector/src/pk-host.ts crates/pk-cli-mcp/js/pk-host.ts
-	cd connector && npm ci && npm run typecheck && npm test && npm run e2e
+	$(CARGO) build -p example-cli
+	cd connector && npm ci && npm run typecheck && npm test && \
+		E2E_HOME_BIN="$(abspath $(EXAMPLE_CLI))" npm run e2e

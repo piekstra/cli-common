@@ -5,6 +5,12 @@
       "file": "cbase-mcp.wasm",
       "url": "https://github.com/piekstra/coinbase-cli/releases/download/v0.3.0/cbase-mcp-0.3.0.wasm",
       "sha256": "6da589c87072b92eaf68c3efa72154b205c5403f20b947df24861e7ac8c81c25"
+    },
+    {
+      "name": "alpaca",
+      "file": "alp-mcp.wasm",
+      "url": "https://github.com/piekstra/alpaca-cli/releases/download/v0.3.0/alp-mcp-0.3.0.wasm",
+      "sha256": "e66c9402a2f92e4dd87dcd4aaa1c0a6576999ae642c9bc400361b1a84abd5ca5"
     }
   ]
 }

@@ -1,6 +1,7 @@
-// Generate a throwaway CDP-shaped API key for the localhost Coinbase mock and
-// write .dev.vars for `wrangler dev`. Nothing here is a real Coinbase key: the
-// mock is the only party that ever sees it, and both files are gitignored.
+// Generate a throwaway CDP-shaped API key for the localhost Coinbase mock, a
+// dummy Alpaca key pair for the Alpaca mock, and write .dev.vars for
+// `wrangler dev`. Nothing here is a real key: the mocks are the only parties
+// that ever see them, and every file written is gitignored.
 //
 //   node scripts/gen-dummy-key.mjs            # ES256 (EC P-256, SEC1 PEM)
 //   node scripts/gen-dummy-key.mjs --ed25519  # EdDSA (base64 seed‖public)
@@ -45,6 +46,11 @@ if (ed) {
 }
 writeFileSync(join(keysDir, "public.pem"), publicPem);
 
+// Alpaca's keys are a plain ID and secret, sent as headers; the mock
+// checks both.
+const alpaca = { key_id: `PK${randomBytes(9).toString("hex").toUpperCase()}`, secret_key: randomBytes(30).toString("base64url") };
+writeFileSync(join(keysDir, "alpaca.json"), JSON.stringify(alpaca), { mode: 0o600 });
+
 // The PEM goes in with literal `\n` escapes, the way it reads in the key
 // file's JSON: the module repairs that, as it does a one-line paste.
 const lines = [
@@ -53,7 +59,10 @@ const lines = [
   `CBASE_API_KEY_NAME=${name}`,
   `CBASE_API_PRIVATE_KEY='${privateKey.trim().replaceAll("\n", "\\n")}'`,
   "CBASE_BASE_URL=http://127.0.0.1:8788",
+  `ALP_API_KEY_ID=${alpaca.key_id}`,
+  `ALP_API_SECRET_KEY=${alpaca.secret_key}`,
+  "ALP_BASE_URL=http://127.0.0.1:8789",
   "",
 ];
 writeFileSync(devVars, lines.join("\n"), { mode: 0o600 });
-console.log(`wrote mock/.keys/public.pem and .dev.vars (${ed ? "EdDSA" : "ES256"} dummy key)`);
+console.log(`wrote mock/.keys/public.pem, mock/.keys/alpaca.json and .dev.vars (${ed ? "EdDSA" : "ES256"} dummy Coinbase key)`);

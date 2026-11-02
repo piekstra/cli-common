@@ -46,14 +46,19 @@ jobs:
       - run: make scripts-check
 
   # The deploy-your-own connector: `make connector-check` fetches and
-  # verifies the pinned module as a deploy does, then runs the OAuth and MCP
-  # flow under `wrangler dev --local` against the localhost mock. No
-  # Cloudflare account, nothing deployed.
+  # verifies the pinned modules as a deploy does, then runs the OAuth and MCP
+  # flow under `wrangler dev --local` against the localhost mocks, with
+  # example-cli's `mcp --http` as a home module. No Cloudflare account, no
+  # tunnel, nothing deployed.
   connector:
     name: connector (typecheck, tests, local e2e)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux keyring build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
       - uses: actions/setup-node@v4
         with:
           node-version: 24

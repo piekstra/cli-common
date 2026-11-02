@@ -1,14 +1,27 @@
 # The Worker's secrets. The Deploy to Cloudflare button asks for each one;
 # for local development, `npm run keys` writes a .dev.vars with dummy values.
+#
+# Only the passphrase is required. Every module is optional: its secrets
+# come pre-filled with `none`, and a module whose secrets are all `none` (or
+# empty) is off, its tools absent. Replace `none` for the services you use;
+# you can add or change them later in the Worker's settings (Variables and
+# Secrets), and each change redeploys.
 
 # A long random passphrase, 20 characters or more (for example the output of
 # `openssl rand -base64 24`). You type it on the connector's approval page
 # when you connect Claude; nobody without it can connect.
 OWNER_PASSPHRASE=
 
-# Your Coinbase CDP API key, from the key file Coinbase gives you when you
-# create it: its "name" (organizations/.../apiKeys/...) and its "privateKey"
-# (the whole PEM, BEGIN and END lines included; a one-line paste is fine).
-# Give the key the View permission only.
-CBASE_API_KEY_NAME=
-CBASE_API_PRIVATE_KEY=
+# Coinbase (optional): your CDP API key, from the key file Coinbase gives
+# you when you create it: its "name" (organizations/.../apiKeys/...) and its
+# "privateKey" (the whole PEM, BEGIN and END lines included; a one-line
+# paste is fine). Give the key the View permission only.
+CBASE_API_KEY_NAME=none
+CBASE_API_PRIVATE_KEY=none
+
+# Alpaca (optional): an API key pair from your Alpaca dashboard (API Keys),
+# the Key ID and its Secret Key. Alpaca keys cannot be limited to reading;
+# the connector only ever reads. For paper-trading keys, also add a variable
+# ALP_ENV=paper later.
+ALP_API_KEY_ID=none
+ALP_API_SECRET_KEY=none

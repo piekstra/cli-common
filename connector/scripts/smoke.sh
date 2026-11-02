@@ -5,10 +5,14 @@
 # HTTP, and a refresh-token rotation.
 #
 # scripts/e2e.sh runs it with everything it needs; by hand:
-#   npm run keys                        # once: dummy key + .dev.vars
+#   npm run keys                        # once: dummy keys + .dev.vars
 #   npm run mock                        # localhost Coinbase stand-in, :8788
+#   npm run mock:alpaca                 # localhost Alpaca stand-in, :8789
 #   npm run dev                         # the Worker, :8787
 #   sh scripts/smoke.sh [http://127.0.0.1:8787]
+#
+# SMOKE_EXPECT_TOOLS, a JSON array, is the tool list to expect (default:
+# the Coinbase and Alpaca modules' four); e2e.sh adds a home module's.
 #
 # Needs curl, jq, openssl.
 set -eu
@@ -97,9 +101,10 @@ expect "$INIT" '.result.instructions | test("running in the user.s own Cloudflar
   "the modules' instructions did not reach initialize"
 
 step "tools/list"
+WANT="${SMOKE_EXPECT_TOOLS:-[\"coinbase_accounts\",\"coinbase_transactions\",\"alpaca_portfolio\",\"alpaca_activities\"]}"
 LIST="$(rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')"
 printf '%s\n' "$LIST" | jq -c '.result.tools[] | {name, readOnly: .annotations.readOnlyHint}'
-expect "$LIST" '[.result.tools[].name] == ["coinbase_accounts","coinbase_transactions"]' "unexpected tool list"
+expect "$LIST" "([.result.tools[].name] | sort) == ($WANT | sort)" "unexpected tool list (want $WANT)"
 expect "$LIST" 'all(.result.tools[]; .annotations.readOnlyHint == true)' "a tool is not marked read-only"
 
 step "tools/call coinbase_accounts (zero balances hidden; two pages, two JWTs)"
@@ -113,6 +118,18 @@ OUT="$(rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"coin
 printf '%s\n' "$OUT" | jq -c '.result | {isError, items: [.structuredContent.items[]? | {date, type, amount}], error: (if .isError then .content[0].text else null end)}'
 expect "$OUT" '.result.isError == false and ([.result.structuredContent.items[].date] == ["2026-10-15","2026-06-01"])' \
   "transactions did not come back filtered to 2026"
+
+step "tools/call alpaca_portfolio (the key headers the mock checks)"
+OUT="$(rpc '{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"alpaca_portfolio","arguments":{}}}')"
+printf '%s\n' "$OUT" | jq -c '.result | {isError, equity: .structuredContent.account.equity, positions: [.structuredContent.items[]? | .symbol], error: (if .isError then .content[0].text else null end)}'
+expect "$OUT" '.result.isError == false and ([.result.structuredContent.items[].symbol] | sort) == ["ETFX","SMPL"]' \
+  "the portfolio did not come back through the Alpaca mock"
+
+step "tools/call alpaca_activities (June 2026: on the feed's second page)"
+OUT="$(rpc '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"alpaca_activities","arguments":{"since":"2026-06-01","until":"2026-06-30"}}}')"
+printf '%s\n' "$OUT" | jq -c '.result | {isError, items: [.structuredContent.items[]? | {date, type, net_amount}], error: (if .isError then .content[0].text else null end)}'
+expect "$OUT" '.result.isError == false and ([.result.structuredContent.items[].type] | sort) == ["DIV","DIVNRA"]' \
+  "the June activity did not come back from the second page"
 
 step "a bad argument is a tool error, not a crash"
 OUT="$(rpc '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"coinbase_transactions","arguments":{"account":"BTC Wallet","since":"yesterday"}}}')"

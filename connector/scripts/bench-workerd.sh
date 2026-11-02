@@ -4,7 +4,8 @@
 # time, so this samples the workerd process's CPU time around N requests of
 # each kind and divides. tools/list does the same OAuth token check, KV read
 # and MCP framing as tools/call, so the difference between the two is the
-# WebAssembly tool itself plus its fetches to the mock.
+# WebAssembly tool itself plus its fetches to the mocks (Coinbase on :8788,
+# Alpaca on :8789).
 #
 #   SMOKE_TOKEN_OUT=.e2e/tokens.json sh scripts/smoke.sh   # a live token
 #   sh scripts/bench-workerd.sh "$(jq -r .access .e2e/tokens.json)" [N] [base]
@@ -32,12 +33,19 @@ run() {
   echo "$(( end - start ))"
 }
 
+call() { # <tool> <arguments JSON>
+  run "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}"
+}
+
 run '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' >/dev/null # warm-up
 LIST=$(run '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')
-CALL=$(run '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"coinbase_accounts","arguments":{}}}')
-awk -v n="$N" -v l="$LIST" -v c="$CALL" 'BEGIN {
-  printf "workerd process CPU over %d requests each (ps, 10 ms resolution)\n", n
-  printf "  tools/list:                      %6.3f ms/request\n", l / n
-  printf "  tools/call coinbase_accounts (2 pages, 2 JWTs): %6.3f ms/request\n", c / n
-  printf "  difference (the WASM tool):      %6.3f ms/request\n", (c - l) / n
-}'
+printf 'workerd process CPU over %d requests each (ps, 10 ms resolution)\n' "$N"
+report() { # <label> <total ms>
+  awk -v n="$N" -v l="$LIST" -v c="$2" -v label="$1" 'BEGIN {
+    printf "  %-58s %7.3f ms/request  (%+.3f over tools/list)\n", label, c / n, (c - l) / n
+  }'
+}
+report "tools/list" "$LIST"
+report "coinbase_accounts (2 pages, 2 JWTs)" "$(call coinbase_accounts '{}')"
+report "alpaca_portfolio (account + positions: 2 GETs)" "$(call alpaca_portfolio '{}')"
+report "alpaca_activities June 2026 (2 pages of the feed)" "$(call alpaca_activities '{"since":"2026-06-01","until":"2026-06-30"}')"
