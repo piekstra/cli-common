@@ -68,6 +68,12 @@ impl HttpRequest {
         self
     }
 
+    /// The family's `User-Agent: <bin>/<version>`. Part of the request, not
+    /// the transport, so the binary and the Worker send the same one.
+    pub fn user_agent(self, binary: &str, version: &str) -> Self {
+        self.header("User-Agent", format!("{binary}/{version}"))
+    }
+
     pub fn body(mut self, body: impl Into<String>) -> Self {
         self.body = Some(body.into());
         self
@@ -78,19 +84,19 @@ impl HttpRequest {
         header_value(&self.headers, name)
     }
 
-    /// Where the request goes, for messages: the scheme and host only. The
-    /// path and query can carry account ids and tokens.
-    pub fn origin(&self) -> &str {
-        origin(&self.url)
+    /// Where the request goes, for messages: the scheme and host only, no
+    /// userinfo. The path and query can carry account ids and tokens.
+    pub fn origin(&self) -> String {
+        origin_and_path(&self.url).0
     }
 }
 
 impl fmt::Debug for HttpRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let without_query = self.url.split(['?', '#']).next().unwrap_or_default();
+        let (origin, path) = origin_and_path(&self.url);
         f.debug_struct("HttpRequest")
             .field("method", &self.method)
-            .field("url", &without_query)
+            .field("url", &format!("{origin}{path}"))
             .field("headers", &names(&self.headers))
             .field("body_len", &self.body.as_ref().map(String::len))
             .finish()
@@ -109,8 +115,9 @@ impl fmt::Debug for HttpRequest {
 #[non_exhaustive]
 pub struct HttpResponse {
     pub status: u16,
-    /// Header name and value pairs, in the order the transport gave them.
-    /// Names may arrive lower-cased (`fetch` normalises them).
+    /// Header name and value pairs, names lower-case, as `fetch` gives them:
+    /// a name that repeats is one pair with its values joined by `, `, except
+    /// `set-cookie`, one pair per cookie.
     pub headers: Vec<(String, String)>,
     pub body: String,
 }
@@ -156,8 +163,12 @@ impl fmt::Debug for HttpResponse {
 /// - **No redirects are followed.** A 3xx comes back as the response, with
 ///   its `Location` header: a signed request is never re-sent to wherever a
 ///   redirect points.
-/// - **No state is kept between sends.** No cookie jar, no default headers:
-///   what the request says is all that goes out.
+/// - **No state is kept between sends.** No cookie jar, no default headers
+///   (not even a `User-Agent`: [`HttpRequest::user_agent`] sets the
+///   family's): what the request says is all that goes out, plus what the
+///   platform adds to every request (`Host`, `Content-Length`, connection
+///   handling).
+/// - **Response headers have one shape**: see [`HttpResponse::headers`].
 /// - **Only a request that got no HTTP answer is an error**, and it is
 ///   [`CliError::Upstream`] naming the origin only (no path, no query): no
 ///   connection, a timeout, or a request the platform refused to send (a
@@ -201,14 +212,20 @@ impl<T: PlatformSigner + ?Sized> PlatformSigner for &T {
     }
 }
 
-/// The scheme and host of `url`, cut before the first `/`, `?` or `#` after
-/// the `://`.
-pub fn origin(url: &str) -> &str {
-    let start = url.find("://").map_or(0, |i| i + 3);
-    match url[start..].find(['/', '?', '#']) {
-        Some(end) => &url[..start + end],
-        None => url,
-    }
+/// `url`'s scheme and host (any userinfo dropped), and its path (no query or
+/// fragment): what a message or a `Debug` may show of it.
+fn origin_and_path(url: &str) -> (String, &str) {
+    let (scheme, rest) = match url.find("://") {
+        Some(i) => url.split_at(i + 3),
+        None => ("", url),
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, after) = rest.split_at(end);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let path = &after[..after.find(['?', '#']).unwrap_or(after.len())];
+    (format!("{scheme}{host}"), path)
 }
 
 fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -272,26 +289,31 @@ mod tests {
         assert_eq!(r.headers[1].0, "Accept");
         assert_eq!(r.body.as_deref(), Some("{}"));
         assert_eq!(r.header_value("cookie"), None);
+        let r = HttpRequest::get("https://x.test").user_agent("pk-test", "1.2.3");
+        assert_eq!(r.header_value("user-agent"), Some("pk-test/1.2.3"));
         let resp = HttpResponse::new(302, "").header("location", "https://x.test/next");
         assert_eq!(resp.header_value("Location"), Some("https://x.test/next"));
     }
 
     #[test]
-    fn the_origin_stops_before_any_path_query_or_fragment() {
-        for (url, want) in [
-            ("https://h.test/v2/a?x=1", "https://h.test"),
-            ("https://h.test?token=t", "https://h.test"),
-            ("https://h.test#frag", "https://h.test"),
-            ("http://127.0.0.1:8788", "http://127.0.0.1:8788"),
-            ("not a url/x", "not a url"),
+    fn the_origin_is_scheme_and_host_without_userinfo_path_or_query() {
+        for (url, want, path) in [
+            ("https://h.test/v2/a?x=1", "https://h.test", "/v2/a"),
+            ("https://h.test?token=t", "https://h.test", ""),
+            ("https://h.test#frag", "https://h.test", ""),
+            ("https://user:token@h.test/a", "https://h.test", "/a"),
+            ("https://h.test/a@b?c=@d", "https://h.test", "/a@b"),
+            ("http://127.0.0.1:8788", "http://127.0.0.1:8788", ""),
+            ("not a url/x", "not a url", "/x"),
         ] {
-            assert_eq!(origin(url), want, "{url}");
+            assert_eq!(origin_and_path(url), (want.to_string(), path), "{url}");
+            assert_eq!(HttpRequest::get(url).origin(), want, "{url}");
         }
     }
 
     #[test]
-    fn debug_never_shows_a_header_value_query_or_body() {
-        let r = HttpRequest::get("https://h.test/v2/a?token=secret-q")
+    fn debug_never_shows_a_header_value_query_body_or_userinfo() {
+        let r = HttpRequest::get("https://u:secret-u@h.test/v2/a?token=secret-q")
             .header("Authorization", "Bearer secret-h")
             .body("secret-b");
         let resp = HttpResponse::new(200, "secret-r").header("set-cookie", "secret-c");

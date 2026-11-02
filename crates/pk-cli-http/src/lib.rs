@@ -1,9 +1,11 @@
 //! HTTP plumbing for the piekstra CLI family.
 //!
 //! A blocking `reqwest` client builder with the family defaults (UA from
-//! binary+version, cookie store, timeout), [`BlockingTransport`] (that client
-//! behind `pk_cli_core::transport::Transport`), plus the standard raw `api`
-//! passthrough command (SPEC v1 §1.2). Provider session logic (login dances,
+//! binary+version, cookie store, timeout) for portal sessions,
+//! [`BlockingTransport`] (a contract-keeping client behind
+//! `pk_cli_core::transport::Transport`, for provider clients that also run in
+//! the Worker), plus the standard raw `api` passthrough command (SPEC v1
+//! §1.2). Provider session logic (login dances,
 //! scrape flows) stays in each CLI.
 
 use std::time::Duration;
@@ -41,22 +43,23 @@ pub struct BlockingTransport {
 }
 
 impl BlockingTransport {
-    /// Over the family defaults ([`builder`]) with the transport contract
-    /// applied: redirects are not followed and no cookies are kept.
-    pub fn new(binary: &str, version: &str) -> Result<Self, CliError> {
-        let client = builder(binary, version)
+    /// A client that keeps the [`Transport`] contract: no redirects followed,
+    /// no cookie store, no default headers (the request sets its own
+    /// `User-Agent`, `HttpRequest::user_agent`), and the family's 60 s
+    /// timeout.
+    pub fn new() -> Result<Self, CliError> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::none())
-            .cookie_store(false)
             .build()
             .map_err(|e| CliError::Other(format!("failed to build HTTP client: {e}")))?;
         Ok(Self::with_client(client))
     }
 
-    /// Over a client the CLI built itself (extra headers, say). It must keep
-    /// the [`Transport`] contract: build it with
-    /// `.redirect(reqwest::redirect::Policy::none())` and without a cookie
-    /// store, or the same provider client behaves differently here than in
-    /// the Worker.
+    /// Over a client the CLI built itself (a proxy, say). It must keep the
+    /// [`Transport`] contract: `.redirect(reqwest::redirect::Policy::none())`,
+    /// no cookie store and no default headers, or the same provider client
+    /// behaves differently here than in the Worker.
     pub fn with_client(client: reqwest::blocking::Client) -> Self {
         Self { client }
     }
@@ -77,16 +80,7 @@ impl BlockingTransport {
         // `without_url`: the path and query can carry ids, as in the Worker.
         let resp = rb.send().map_err(|e| failed(e.without_url().to_string()))?;
         let status = resp.status().as_u16();
-        let headers: Vec<(String, String)> = resp
-            .headers()
-            .iter()
-            .map(|(n, v)| {
-                (
-                    n.as_str().to_string(),
-                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
-                )
-            })
-            .collect();
+        let headers = fetch_shaped(resp.headers());
         let body = resp
             .text()
             .map_err(|e| failed(format!("reading the response body: {}", e.without_url())))?;
@@ -94,6 +88,25 @@ impl BlockingTransport {
         out.headers = headers;
         Ok(out)
     }
+}
+
+/// Response headers in the shape `fetch` gives them (`HttpResponse::headers`):
+/// names lower-case, a repeated name as one pair with its values joined by
+/// `, `, except `set-cookie`, one pair per cookie.
+fn fetch_shaped(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (name, value) in headers {
+        let name = name.as_str();
+        let value = String::from_utf8_lossy(value.as_bytes());
+        match out.iter_mut().find(|(n, _)| n == name) {
+            Some((_, joined)) if name != "set-cookie" => {
+                joined.push_str(", ");
+                joined.push_str(&value);
+            }
+            _ => out.push((name.to_string(), value.into_owned())),
+        }
+    }
+    out
 }
 
 impl Transport for BlockingTransport {
@@ -243,18 +256,28 @@ mod tests {
     #[test]
     fn the_blocking_transport_sends_the_request_as_built() {
         let (addr, server) = serve_once(
-            b"HTTP/1.1 418 I'm a teapot\r\ncontent-type: text/plain\r\nretry-after: 7\r\ncontent-length: 5\r\nconnection: close\r\n\r\nshort",
+            b"HTTP/1.1 418 I'm a teapot\r\ncontent-type: text/plain\r\nretry-after: 7\r\nlink: <a>\r\nset-cookie: a=1\r\nLink: <b>\r\nset-cookie: b=2\r\ncontent-length: 5\r\nconnection: close\r\n\r\nshort",
             Some("{\"q\":1}"),
         );
-        let transport = BlockingTransport::new("pk-test", "0.0.0").unwrap();
+        let transport = BlockingTransport::new().unwrap();
         let req = HttpRequest::new("POST", format!("http://{addr}/v1/x"))
             .query(&[("a", "b c".into())])
             .header("X-Test", "yes")
+            .user_agent("pk-test", "0.0.0")
             .body("{\"q\":1}");
         let resp = pk_cli_core::block_on(transport.send(req)).unwrap();
         assert_eq!(resp.status, 418);
         assert_eq!(resp.body, "short");
         assert_eq!(resp.header_value("Retry-After"), Some("7"));
+        // Shaped as `fetch` gives them: a repeated name joined, cookies apart.
+        assert_eq!(resp.header_value("link"), Some("<a>, <b>"));
+        let cookies: Vec<&str> = resp
+            .headers
+            .iter()
+            .filter(|(n, _)| n == "set-cookie")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(cookies, ["a=1", "b=2"]);
         let seen = server.join().unwrap();
         assert!(seen.starts_with("POST /v1/x?a=b%20c HTTP/1.1"), "{seen}");
         assert!(seen.to_ascii_lowercase().contains("x-test: yes"), "{seen}");
@@ -270,22 +293,25 @@ mod tests {
             b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:9/elsewhere\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
             None,
         );
-        let transport = BlockingTransport::new("pk-test", "0.0.0").unwrap();
+        let transport = BlockingTransport::new().unwrap();
         let req = HttpRequest::get(format!("http://{addr}/start")).header("Authorization", "t");
         let resp = pk_cli_core::block_on(transport.send(req)).unwrap();
+        // Nothing the request did not say: no User-Agent, no cookie.
+        let seen = server.join().unwrap().to_ascii_lowercase();
+        assert!(!seen.contains("user-agent"), "{seen}");
+        assert!(!seen.contains("cookie"), "{seen}");
         assert_eq!(resp.status, 302);
         assert_eq!(
             resp.header_value("location"),
             Some("http://127.0.0.1:9/elsewhere")
         );
-        server.join().unwrap();
     }
 
     /// A request that got no HTTP answer is `Upstream`, naming the origin
     /// only, whether the platform refused it or nothing answered.
     #[test]
     fn a_bad_method_or_no_connection_is_upstream_naming_the_origin() {
-        let transport = BlockingTransport::new("pk-test", "0.0.0").unwrap();
+        let transport = BlockingTransport::new().unwrap();
         let bad = HttpRequest::new("NOT A METHOD", "http://127.0.0.1:9/a?id=secret");
         // Port 9 (discard) on loopback: nothing listens there in CI.
         let refused = HttpRequest::get("http://127.0.0.1:9/a?id=secret");

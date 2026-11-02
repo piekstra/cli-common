@@ -10,12 +10,15 @@ callers are unchanged.
 - **`pk-cli-core::transport`** — the seam a provider client is written
   against so the same client runs in the terminal binary and in the
   deploy-your-own Worker: `HttpRequest` (builder; `query` percent-encodes
-  everything but RFC 3986's unreserved characters; `origin()`),
-  `HttpResponse` (status, headers and body text; `new`, `header_value`),
+  everything but RFC 3986's unreserved characters; `user_agent(bin,
+  version)` for the family's `User-Agent`; `origin()`, without userinfo),
+  `HttpResponse` (status, headers shaped as `fetch` gives them, and body
+  text; `new`, `header_value`),
   both `#[non_exhaustive]` with a `Debug` that shows no header value, query
   or body; the async `Transport` trait with no `Send` bound and one contract
   for every implementation: no redirects followed (a 3xx comes back with its
-  `Location`), no state between sends, and a request with no HTTP answer is
+  `Location`), no state or default headers between sends, and a request
+  with no HTTP answer is
   `CliError::Upstream` naming the origin only; and `PlatformSigner`
   (`sign_es256`: ECDSA P-256 / SHA-256 by the platform's own crypto, `None`
   where it has none), a separate trait so a wrapper around a transport
@@ -23,9 +26,10 @@ callers are unchanged.
   `wasm32-unknown-unknown`. `pk_cli_core::block_on` drives a blocking
   transport's futures, which finish on their first poll.
 - **`pk-cli-http::BlockingTransport`** — the family's blocking `reqwest`
-  client behind `Transport` and `PlatformSigner` (always `None`). `new(bin,
-  version)` turns off redirects and the cookie store to keep the transport
-  contract; `with_client` takes a client that must do the same.
+  client behind `Transport` and `PlatformSigner` (always `None`). `new()`
+  keeps the transport contract (no redirects, cookie store or default
+  headers; a 60 s timeout); `with_client` takes a client that must do the
+  same. Repeated response headers are joined as `fetch` joins them.
 - **`pk-cli-mcp` feature `wasm`** (no dependencies) — a `Toolset` as a
   self-contained WebAssembly module for the deploy-your-own Worker
   (DESIGN.md §1.9 path B, §2.3):
