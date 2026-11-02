@@ -145,6 +145,7 @@ pub struct SecretSpec {
     account: String,
     env: Option<String>,
     op: Option<OpRef>,
+    remedy: Option<String>,
 }
 
 impl SecretSpec {
@@ -154,6 +155,7 @@ impl SecretSpec {
             account: account.into(),
             env: None,
             op: None,
+            remedy: None,
         }
     }
 
@@ -167,6 +169,15 @@ impl SecretSpec {
     /// so a reference from optional config passes straight through.
     pub fn op(mut self, reference: Option<OpRef>) -> Self {
         self.op = reference;
+        self
+    }
+
+    /// How the user stores the secret again, for the error when the
+    /// keychain item is empty: a command such as
+    /// `` `m1f mcp --new-token --overwrite` ``. The default is
+    /// `` `auth login --overwrite` ``, right for a sign-in credential.
+    pub fn remedy(mut self, remedy: impl Into<String>) -> Self {
+        self.remedy = Some(remedy.into());
         self
     }
 
@@ -255,9 +266,10 @@ fn resolve_in<K: KeychainRead + ?Sized>(
                 Some(s) if s.is_empty() => {
                     return Err(CliError::Auth(format!(
                         "the stored credential `{}` under `{}` is empty; store it again \
-                         with `auth login --overwrite`",
+                         with {}",
                         spec.account,
-                        store.service()
+                        store.service(),
+                        spec.remedy.as_deref().unwrap_or("`auth login --overwrite`")
                     )))
                 }
                 found => found,
@@ -305,6 +317,24 @@ mod tests {
             msg.contains("`password`") && msg.contains("`piekstra.x`"),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn an_empty_keychain_item_names_the_spec_s_remedy() {
+        let store = MemStore::new("piekstra.x").with("token", "");
+        let resolve = |spec: &SecretSpec| {
+            resolve_in(&store, &OnePassword::new(), &SourceOrder::default(), spec)
+                .unwrap_err()
+                .to_string()
+        };
+        let stock = resolve(&SecretSpec::new("token"));
+        assert!(stock.contains("`auth login --overwrite`"), "{stock}");
+        let own = resolve(&SecretSpec::new("token").remedy("`x mcp --new-token --overwrite`"));
+        assert!(
+            own.contains("with `x mcp --new-token --overwrite`"),
+            "{own}"
+        );
+        assert!(!own.contains("auth login"), "{own}");
     }
 
     #[test]

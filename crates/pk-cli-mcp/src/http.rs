@@ -146,21 +146,11 @@ fn resolve_token<K: KeychainRead + ?Sized>(store: &K, bin: &str) -> Result<Secre
     let var = token_env_var(bin);
     let order =
         SourceOrder::new(&[SourceKind::Env, SourceKind::Keychain]).map_err(CliError::Other)?;
-    let spec = SecretSpec::new(TOKEN_ACCOUNT).env(var.clone());
-    let replace = format!("make a new one with `{bin} mcp --new-token --overwrite`");
-    let resolved = match SecretResolver::new(store).order(order).resolve(&spec) {
-        Ok(found) => found,
-        // With only the env and the keychain in the order, the resolver's
-        // one auth error is an empty keychain item; its stock remedy names
-        // `auth login`, which does not make this token.
-        Err(CliError::Auth(_)) => {
-            return Err(CliError::Auth(format!(
-                "the token in the keychain ({}, {TOKEN_ACCOUNT}) is empty; {replace}",
-                store.service()
-            )))
-        }
-        Err(e) => return Err(e),
-    };
+    let replace = format!("`{bin} mcp --new-token --overwrite`");
+    let spec = SecretSpec::new(TOKEN_ACCOUNT)
+        .env(var.clone())
+        .remedy(replace.clone());
+    let resolved = SecretResolver::new(store).order(order).resolve(&spec)?;
     let Some(resolved) = resolved else {
         return Err(CliError::Auth(format!(
             "`{bin} mcp --http` will not start without a bearer token: run `{bin} mcp \
@@ -172,7 +162,8 @@ fn resolve_token<K: KeychainRead + ?Sized>(store: &K, bin: &str) -> Result<Secre
         CliError::Auth(match resolved.source {
             SourceKind::Env => format!("{var} {why}"),
             _ => format!(
-                "the token in the keychain ({}, {TOKEN_ACCOUNT}) {why}; {replace}",
+                "the token in the keychain ({}, {TOKEN_ACCOUNT}) {why}; make a new one with \
+                 {replace}",
                 store.service()
             ),
         })
@@ -654,7 +645,7 @@ mod tests {
             assert_eq!(e.exit_code(), 3, "{bad:?}");
             let text = e.to_string();
             assert!(
-                text.contains("keychain (piekstra.test, mcp-http-token)"),
+                text.contains("mcp-http-token") && text.contains("piekstra.test"),
                 "{text}"
             );
             assert!(text.contains("--new-token --overwrite"), "{text}");

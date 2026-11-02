@@ -20,6 +20,10 @@
   a saved token without `--overwrite`. A CLI turns the feature on;
   `McpArgs` and `run` carry the rest. `example-cli` serves it, and
   `tests/mcp_http.rs` drives the binary over HTTP through every refusal.
+- `pk-cli-secrets`: `SecretSpec::remedy` names how to store a secret again,
+  for the error when its keychain item is empty (default `auth login
+  --overwrite`, right for a sign-in credential; `mcp --http`'s token names
+  `mcp --new-token --overwrite`).
 - `pk-cli-mcp`: `McpArgs` is `#[non_exhaustive]`, so its shape no longer
   depends on a feature: build it with clap or `McpArgs::default()`, not a
   struct literal. (Breaking for a struct literal; no family CLI uses one.)
