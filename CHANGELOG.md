@@ -10,16 +10,22 @@ callers are unchanged.
 - **`pk-cli-core::transport`** — the seam a provider client is written
   against so the same client runs in the terminal binary and in the
   deploy-your-own Worker: `HttpRequest` (builder; `query` percent-encodes
-  everything but RFC 3986's unreserved characters), `HttpResponse` (status
-  and body text), and the async `Transport` trait with no `Send` bound:
-  `send`, and `sign_es256` (ECDSA P-256 / SHA-256 by the platform's own
-  crypto, `None` by default so the caller signs in Rust). Implemented for
-  `&T`. Builds for `wasm32-unknown-unknown`. `pk_cli_core::block_on` drives
-  a blocking transport's futures, which finish on their first poll.
+  everything but RFC 3986's unreserved characters; `origin()`),
+  `HttpResponse` (status, headers and body text; `new`, `header_value`),
+  both `#[non_exhaustive]` with a `Debug` that shows no header value, query
+  or body; the async `Transport` trait with no `Send` bound and one contract
+  for every implementation: no redirects followed (a 3xx comes back with its
+  `Location`), no state between sends, and a request with no HTTP answer is
+  `CliError::Upstream` naming the origin only; and `PlatformSigner`
+  (`sign_es256`: ECDSA P-256 / SHA-256 by the platform's own crypto, `None`
+  where it has none), a separate trait so a wrapper around a transport
+  cannot drop it unnoticed. Both implemented for `&T`. Builds for
+  `wasm32-unknown-unknown`. `pk_cli_core::block_on` drives a blocking
+  transport's futures, which finish on their first poll.
 - **`pk-cli-http::BlockingTransport`** — the family's blocking `reqwest`
-  client behind `Transport` (`new(bin, version)`, or `with_client`). An HTTP
-  error status is a response, not an error; a failed connection is
-  `CliError::Upstream`.
+  client behind `Transport` and `PlatformSigner` (always `None`). `new(bin,
+  version)` turns off redirects and the cookie store to keep the transport
+  contract; `with_client` takes a client that must do the same.
 - **`pk-cli-mcp` feature `wasm`** (no dependencies) — a `Toolset` as a
   self-contained WebAssembly module for the deploy-your-own Worker
   (DESIGN.md §1.9 path B, §2.3):
@@ -33,11 +39,12 @@ callers are unchanged.
     `.wasm` with no JavaScript glue, so a release ships one file pinned by
     its SHA-256, and one host serves every module.
   - The factory builds the toolset from the host's per-call config JSON;
-    `InWorker` gives every instruction and auth remedy the Worker's wording
-    (`Server::hosted`: the credentials are Worker secrets).
-  - `HostTransport`: the host's `fetch` (redirects never followed) and
-    WebCrypto ES256 behind `Transport`, falling back to Rust signing where
-    the host has no WebCrypto ECDSA. `fill_random` and `now_ms` replace
+    every instruction and auth remedy the module sends has the Worker's
+    wording (`Server::hosted`: the credentials are Worker secrets).
+  - `HostTransport`: the host's `fetch` (redirects never followed; the
+    response headers come back framed ahead of the body) behind
+    `Transport`, and its WebCrypto ES256 behind `PlatformSigner`, `None`
+    where the host has no WebCrypto ECDSA. `fill_random` and `now_ms` replace
     `getrandom` and `SystemTime`, which do not work on
     `wasm32-unknown-unknown` without `wasm-bindgen`. `log` writes to the
     Worker's logs; a panic is logged before the module traps.

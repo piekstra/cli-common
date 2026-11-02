@@ -83,6 +83,17 @@ export function checkModule(module: WebAssembly.Module): void {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+/** A fetch's answer as the ABI frames it: the length of the headers' JSON
+ * (u32, little-endian), that JSON, then the body. */
+function frameResponse(headers: Array<[string, string]>, body: Uint8Array): Uint8Array {
+  const names = encoder.encode(JSON.stringify(headers));
+  const out = new Uint8Array(4 + names.length + body.length);
+  new DataView(out.buffer).setUint32(0, names.length, true);
+  out.set(names, 4);
+  out.set(body, 4 + names.length);
+  return out;
+}
+
 function message(e: unknown): string {
   return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
 }
@@ -272,7 +283,8 @@ export class WasmToolset {
     let data: Uint8Array;
     try {
       // `manual`: a signed request is never re-sent to wherever a redirect
-      // points; the module sees the 3xx and decides.
+      // points; the module sees the 3xx and its Location, and decides.
+      // Workers' fetch keeps no cookies, so nothing carries between sends.
       const response = await this.#fetch(request.url, {
         method: request.method,
         headers: request.headers,
@@ -280,7 +292,7 @@ export class WasmToolset {
         redirect: "manual",
       });
       status = response.status;
-      data = new Uint8Array(await response.arrayBuffer());
+      data = frameResponse([...response.headers], new Uint8Array(await response.arrayBuffer()));
     } catch (e) {
       status = STATUS_FAILED;
       data = encoder.encode(message(e));

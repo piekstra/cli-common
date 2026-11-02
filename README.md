@@ -19,7 +19,7 @@ self-update.
 
 | Crate | What it gives a CLI |
 |---|---|
-| `pk-cli-core` | error type + stable exit codes (0–6), `--json`/text output renderer (incl. `emit_list`/`emit_one`), common global flags, date & `Money` helpers, `cli-info/v1` DTO, shared list primitives (`Paged` envelope + `--limit/--since/--until` range flags), the §1.3 confirmation gate (`confirm`), reference resolution (`resolve::pick`), and the `transport` seam (`HttpRequest`, `HttpResponse`, the async `Transport` trait, `block_on`) a provider client is written against so it runs in the terminal binary and in a WebAssembly Worker alike |
+| `pk-cli-core` | error type + stable exit codes (0–6), `--json`/text output renderer (incl. `emit_list`/`emit_one`), common global flags, date & `Money` helpers, `cli-info/v1` DTO, shared list primitives (`Paged` envelope + `--limit/--since/--until` range flags), the §1.3 confirmation gate (`confirm`), reference resolution (`resolve::pick`), and the `transport` seam (`HttpRequest`, `HttpResponse`, the async `Transport` and `PlatformSigner` traits, `block_on`) a provider client is written against so it runs in the terminal binary and in a WebAssembly Worker alike |
 | `pk-cli-secrets` | redacting `Secret` type, OS-keychain `CredentialStore` (`piekstra.<bin>`) with one-item JSON credentials (`get_json`/`set_json`) and legacy-service `migrate_from`, `--stdin`/`--from-env`/`--op` ingestion (secrets never on argv), 1Password reads through `op`, and a configurable env/keychain/1Password precedence (`SecretResolver`) |
 | `pk-cli-config` | non-secret JSON config at `~/.config/<bin>/config.json` |
 | `pk-cli-selfupdate` | `self-update [--check] [-y]` from GitHub Releases, `self-update/v1` DTO |

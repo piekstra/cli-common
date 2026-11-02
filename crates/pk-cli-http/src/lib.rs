@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use pk_cli_core::transport::{HttpRequest, HttpResponse, Transport};
+use pk_cli_core::transport::{HttpRequest, HttpResponse, PlatformSigner, Transport};
 use pk_cli_core::CliError;
 use serde_json::Value;
 
@@ -32,27 +32,41 @@ pub fn builder(binary: &str, version: &str) -> reqwest::blocking::ClientBuilder 
 /// The native [`Transport`]: a blocking `reqwest` client, so a provider
 /// client written against the transport seam runs in the terminal binary
 /// unchanged. Its futures finish on their first poll; drive them with
-/// `pk_cli_core::block_on`.
+/// `pk_cli_core::block_on`. It has no platform signer
+/// ([`PlatformSigner::sign_es256`] is always `None`): the client signs in
+/// Rust.
 #[derive(Debug, Clone)]
 pub struct BlockingTransport {
     client: reqwest::blocking::Client,
 }
 
 impl BlockingTransport {
-    /// Over the family-standard [`client`].
+    /// Over the family defaults ([`builder`]) with the transport contract
+    /// applied: redirects are not followed and no cookies are kept.
     pub fn new(binary: &str, version: &str) -> Result<Self, CliError> {
-        Ok(Self::with_client(client(binary, version)?))
+        let client = builder(binary, version)
+            .redirect(reqwest::redirect::Policy::none())
+            .cookie_store(false)
+            .build()
+            .map_err(|e| CliError::Other(format!("failed to build HTTP client: {e}")))?;
+        Ok(Self::with_client(client))
     }
 
-    /// Over a client the CLI built itself (extra headers, a redirect
-    /// policy; start from [`builder`]).
+    /// Over a client the CLI built itself (extra headers, say). It must keep
+    /// the [`Transport`] contract: build it with
+    /// `.redirect(reqwest::redirect::Policy::none())` and without a cookie
+    /// store, or the same provider client behaves differently here than in
+    /// the Worker.
     pub fn with_client(client: reqwest::blocking::Client) -> Self {
         Self { client }
     }
 
     fn send_blocking(&self, request: HttpRequest) -> Result<HttpResponse, CliError> {
+        let origin = request.origin().to_string();
+        let failed =
+            |why: String| CliError::Upstream(format!("the request to {origin} failed: {why}"));
         let method = reqwest::Method::from_bytes(request.method.as_bytes())
-            .map_err(|_| CliError::Usage(format!("`{}` is not an HTTP method", request.method)))?;
+            .map_err(|_| failed(format!("`{}` is not an HTTP method", request.method)))?;
         let mut rb = self.client.request(method, &request.url);
         for (name, value) in &request.headers {
             rb = rb.header(name.as_str(), value.as_str());
@@ -60,18 +74,37 @@ impl BlockingTransport {
         if let Some(body) = request.body {
             rb = rb.body(body);
         }
-        let resp = rb.send().map_err(|e| CliError::Upstream(e.to_string()))?;
+        // `without_url`: the path and query can carry ids, as in the Worker.
+        let resp = rb.send().map_err(|e| failed(e.without_url().to_string()))?;
         let status = resp.status().as_u16();
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(n, v)| {
+                (
+                    n.as_str().to_string(),
+                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
         let body = resp
             .text()
-            .map_err(|e| CliError::Upstream(format!("reading the response body: {e}")))?;
-        Ok(HttpResponse { status, body })
+            .map_err(|e| failed(format!("reading the response body: {}", e.without_url())))?;
+        let mut out = HttpResponse::new(status, body);
+        out.headers = headers;
+        Ok(out)
     }
 }
 
 impl Transport for BlockingTransport {
     async fn send(&self, request: HttpRequest) -> Result<HttpResponse, CliError> {
         self.send_blocking(request)
+    }
+}
+
+impl PlatformSigner for BlockingTransport {
+    async fn sign_es256(&self, _key: &[u8], _message: &[u8]) -> Option<Result<Vec<u8>, CliError>> {
+        None
     }
 }
 
@@ -169,11 +202,13 @@ mod tests {
         );
     }
 
-    /// One request over a loopback socket: the method, path, query, headers
-    /// and body arrive as built, and an error status comes back as a
-    /// response, not an error.
-    #[test]
-    fn the_blocking_transport_sends_the_request_as_built() {
+    /// Serve one canned HTTP answer on a loopback socket; returns the
+    /// address and a handle yielding the raw request it read (up to the
+    /// first blank line, plus `body_marker` if given).
+    fn serve_once(
+        answer: &'static [u8],
+        body_marker: Option<&'static str>,
+    ) -> (std::net::SocketAddr, std::thread::JoinHandle<String>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -181,19 +216,36 @@ mod tests {
             let (mut sock, _) = listener.accept().unwrap();
             let mut seen = Vec::new();
             let mut buf = [0u8; 4096];
-            while !String::from_utf8_lossy(&seen).contains("{\"q\":1}") {
+            loop {
+                let text = String::from_utf8_lossy(&seen);
+                let done = match body_marker {
+                    Some(m) => text.contains(m),
+                    None => text.contains("\r\n\r\n"),
+                };
+                if done {
+                    break;
+                }
                 let n = sock.read(&mut buf).unwrap();
                 if n == 0 {
                     break;
                 }
                 seen.extend_from_slice(&buf[..n]);
             }
-            sock.write_all(
-                b"HTTP/1.1 418 I'm a teapot\r\ncontent-type: text/plain\r\ncontent-length: 5\r\nconnection: close\r\n\r\nshort",
-            )
-            .unwrap();
+            sock.write_all(answer).unwrap();
             String::from_utf8_lossy(&seen).into_owned()
         });
+        (addr, server)
+    }
+
+    /// The method, path, query, headers and body arrive as built, and an
+    /// error status comes back as a response, headers included, not an
+    /// error.
+    #[test]
+    fn the_blocking_transport_sends_the_request_as_built() {
+        let (addr, server) = serve_once(
+            b"HTTP/1.1 418 I'm a teapot\r\ncontent-type: text/plain\r\nretry-after: 7\r\ncontent-length: 5\r\nconnection: close\r\n\r\nshort",
+            Some("{\"q\":1}"),
+        );
         let transport = BlockingTransport::new("pk-test", "0.0.0").unwrap();
         let req = HttpRequest::new("POST", format!("http://{addr}/v1/x"))
             .query(&[("a", "b c".into())])
@@ -202,6 +254,7 @@ mod tests {
         let resp = pk_cli_core::block_on(transport.send(req)).unwrap();
         assert_eq!(resp.status, 418);
         assert_eq!(resp.body, "short");
+        assert_eq!(resp.header_value("Retry-After"), Some("7"));
         let seen = server.join().unwrap();
         assert!(seen.starts_with("POST /v1/x?a=b%20c HTTP/1.1"), "{seen}");
         assert!(seen.to_ascii_lowercase().contains("x-test: yes"), "{seen}");
@@ -209,20 +262,45 @@ mod tests {
         assert!(pk_cli_core::block_on(transport.sign_es256(b"k", b"m")).is_none());
     }
 
+    /// The transport contract: a redirect is handed back, not followed (the
+    /// signed request is never re-sent to wherever it points).
     #[test]
-    fn a_bad_method_or_no_connection_is_an_error_not_a_panic() {
+    fn a_redirect_comes_back_as_the_response() {
+        let (addr, server) = serve_once(
+            b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:9/elsewhere\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            None,
+        );
         let transport = BlockingTransport::new("pk-test", "0.0.0").unwrap();
-        let bad = HttpRequest::new("NOT A METHOD", "http://127.0.0.1:9/");
-        assert!(matches!(
-            pk_cli_core::block_on(transport.send(bad)),
-            Err(CliError::Usage(_))
-        ));
+        let req = HttpRequest::get(format!("http://{addr}/start")).header("Authorization", "t");
+        let resp = pk_cli_core::block_on(transport.send(req)).unwrap();
+        assert_eq!(resp.status, 302);
+        assert_eq!(
+            resp.header_value("location"),
+            Some("http://127.0.0.1:9/elsewhere")
+        );
+        server.join().unwrap();
+    }
+
+    /// A request that got no HTTP answer is `Upstream`, naming the origin
+    /// only, whether the platform refused it or nothing answered.
+    #[test]
+    fn a_bad_method_or_no_connection_is_upstream_naming_the_origin() {
+        let transport = BlockingTransport::new("pk-test", "0.0.0").unwrap();
+        let bad = HttpRequest::new("NOT A METHOD", "http://127.0.0.1:9/a?id=secret");
         // Port 9 (discard) on loopback: nothing listens there in CI.
-        let refused = HttpRequest::get("http://127.0.0.1:9/");
-        assert!(matches!(
-            pk_cli_core::block_on(transport.send(refused)),
-            Err(CliError::Upstream(_))
-        ));
+        let refused = HttpRequest::get("http://127.0.0.1:9/a?id=secret");
+        for req in [bad, refused] {
+            match pk_cli_core::block_on(transport.send(req)) {
+                Err(CliError::Upstream(m)) => {
+                    assert!(
+                        m.starts_with("the request to http://127.0.0.1:9 failed: "),
+                        "{m}"
+                    );
+                    assert!(!m.contains("secret") && !m.contains("/a"), "{m}");
+                }
+                other => panic!("expected Upstream, got {other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -38,7 +38,7 @@
 //! |---|---|
 //! | `now_ms() -> f64` | `Date.now()` |
 //! | `random(ptr, len)` | `crypto.getRandomValues` into the buffer |
-//! | `fetch(op, ptr, len)` | starts a request: `{"method", "url", "headers": [[name, value], …], "body": string \| null}`. Answered later with `pk_complete(op, http_status, body)`, or status `-1` and a message when the request failed |
+//! | `fetch(op, ptr, len)` | starts a request: `{"method", "url", "headers": [[name, value], …], "body": string \| null}`, sent without following redirects or keeping cookies. Answered later with `pk_complete(op, http_status, answer)`, where `answer` is the length of the response headers' JSON (`u32`, little-endian), that JSON (`[[name, value], …]`) and then the body; or status `-1` and a message when no HTTP answer came |
 //! | `sign_es256(op, key_ptr, key_len, data_ptr, data_len)` | starts an ECDSA P-256 / SHA-256 signature with the PKCS#8 DER key. Answered with status `0` and the 64-byte `r‖s`, `-1` and a message, or `-2` when the host has no WebCrypto ECDSA (the module then signs itself) |
 //! | `log(level, ptr, len)` | a line for the host's log: `0` error, `1` warn, `2` info |
 //!
@@ -67,9 +67,9 @@
 //! then discards the instance and starts a fresh one for the next call.
 //!
 //! Every tool description, instruction and auth remedy a module sends says
-//! where it runs: [`InWorker`] replaces the local host's wording (credentials
-//! on the user's machine, `<bin> auth login` in a terminal) with the
-//! Worker's.
+//! where it runs: `pk_describe` and `pk_call` replace the local host's wording
+//! (credentials on the user's machine, `<bin> auth login` in a terminal) with
+//! the Worker's (the credentials are Worker secrets).
 
 mod host;
 mod runtime;
@@ -93,7 +93,7 @@ pub const ABI_VERSION: u32 = 1;
 
 /// A toolset as the Worker serves it: the same tools, with the instructions
 /// and auth remedies saying the credentials are the Worker's secrets.
-pub struct InWorker<T>(pub T);
+pub(crate) struct InWorker<T>(pub(crate) T);
 
 impl<T: Toolset> Toolset for InWorker<T> {
     fn server(&self) -> Server {
@@ -313,7 +313,7 @@ macro_rules! export_wasm {
 mod tests {
     use super::*;
     use crate::toolset::{tools_list_json, Server};
-    use pk_cli_core::transport::{HttpRequest, Transport};
+    use pk_cli_core::transport::{HttpRequest, PlatformSigner, Transport};
     use pk_cli_core::CliError;
     use serde_json::json;
 
@@ -382,10 +382,15 @@ mod tests {
         unsafe { abi::call(p, pl, c, cl, probe) }
     }
 
-    fn answer(op: u32, status: i32, body: &[u8]) {
-        let (ptr, len) = pass(body);
+    fn answer(op: u32, status: i32, data: &[u8]) {
+        let (ptr, len) = pass(data);
         // SAFETY: the buffer comes from `alloc`.
         unsafe { abi::complete(op, status, ptr, len) };
+    }
+
+    /// An HTTP answer to a fetch, framed as the ABI says.
+    fn respond(op: u32, status: i32, body: &[u8]) {
+        answer(op, status, &transport::encode_response(&[], body));
     }
 
     fn fetch_op() -> (u32, Value) {
@@ -426,7 +431,7 @@ mod tests {
         // Polling again before the answer changes nothing.
         assert_eq!(abi::poll(task), -1);
         assert!(host::take_started().is_empty());
-        answer(op, 201, b"made");
+        respond(op, 201, b"made");
         let out = read_out(abi::poll(task));
         assert_eq!(out["result"]["isError"], false);
         assert_eq!(
@@ -456,7 +461,7 @@ mod tests {
             ),
             "{text}"
         );
-        answer(op_a, 200, b"");
+        respond(op_a, 200, b"");
         assert_eq!(read_out(abi::poll(a))["result"]["isError"], false);
     }
 
@@ -508,7 +513,7 @@ mod tests {
         assert_eq!(abi::poll(task), -1);
         let (op, _) = fetch_op();
         abi::drop_task(task);
-        answer(op, 200, b"late");
+        respond(op, 200, b"late");
         assert_eq!(runtime::live(), (0, 0));
     }
 

@@ -8,7 +8,7 @@
 //!     json!({"name": "svc_items", "arguments": {}}),
 //!     json!({"api_key": "dummy"}),
 //!     |asked| match asked {
-//!         Asked::Fetch(req) => Reply::Response(HttpResponse { status: 200, body: fixture() }),
+//!         Asked::Fetch(req) => Reply::Response(HttpResponse::new(200, fixture())),
 //!         Asked::SignEs256 { .. } => Reply::Unsupported,
 //!     },
 //! );
@@ -26,8 +26,8 @@ pub use super::host::take_logs;
 use super::runtime::{self, STATUS_FAILED, STATUS_UNSUPPORTED};
 use crate::toolset::Toolset;
 
-/// What the module asked of the host.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What the module asked of the host. `Debug` shows no key material.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Asked {
     /// A `fetch`, decoded back into the request the module built.
     Fetch(HttpRequest),
@@ -35,10 +35,23 @@ pub enum Asked {
     SignEs256 { key: Vec<u8>, data: Vec<u8> },
 }
 
+impl std::fmt::Debug for Asked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Asked::Fetch(request) => f.debug_tuple("Fetch").field(request).finish(),
+            Asked::SignEs256 { key, data } => f
+                .debug_struct("SignEs256")
+                .field("key_len", &key.len())
+                .field("data_len", &data.len())
+                .finish(),
+        }
+    }
+}
+
 /// The host's answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
-    /// A `fetch`'s HTTP response.
+    /// A `fetch`'s HTTP response, headers included.
     Response(HttpResponse),
     /// A signature, `r‖s`.
     Signature(Vec<u8>),
@@ -90,7 +103,10 @@ where
                 Started::SignEs256 { op, key, data } => (op, Asked::SignEs256 { key, data }),
             };
             let (status, data) = match host(asked) {
-                Reply::Response(r) => (i32::from(r.status), r.body.into_bytes()),
+                Reply::Response(r) => (
+                    i32::from(r.status),
+                    super::transport::encode_response(&r.headers, r.body.as_bytes()),
+                ),
                 Reply::Signature(sig) => (0, sig),
                 Reply::Failed(m) => (STATUS_FAILED, m.into_bytes()),
                 Reply::Unsupported => (STATUS_UNSUPPORTED, Vec::new()),
@@ -102,23 +118,15 @@ where
 
 fn decode(request: &[u8]) -> HttpRequest {
     let v: Value = serde_json::from_slice(request).expect("the module sends JSON");
-    let text = |k: &str| v[k].as_str().unwrap_or_default().to_string();
-    HttpRequest {
-        method: text("method"),
-        url: text("url"),
-        headers: v["headers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|pair| {
-                (
-                    pair[0].as_str().unwrap_or_default().to_string(),
-                    pair[1].as_str().unwrap_or_default().to_string(),
-                )
-            })
-            .collect(),
-        body: v["body"].as_str().map(String::from),
+    let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+    let mut out = HttpRequest::new(text(&v["method"]), text(&v["url"]));
+    for pair in v["headers"].as_array().into_iter().flatten() {
+        out = out.header(text(&pair[0]), text(&pair[1]));
     }
+    if let Some(body) = v["body"].as_str() {
+        out = out.body(body);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -128,7 +136,7 @@ mod tests {
     use crate::result::ToolOutput;
     use crate::tool::ToolDef;
     use crate::toolset::Server;
-    use pk_cli_core::transport::Transport;
+    use pk_cli_core::transport::{PlatformSigner, Transport};
     use serde_json::json;
 
     struct Twice;
@@ -151,7 +159,12 @@ mod tests {
             let a = t.send(HttpRequest::get("https://h.test/a")).await?;
             let b = t.send(post_json("https://h.test/b", "{}")).await?;
             let signed = t.sign_es256(b"k", b"m").await.transpose()?.is_some();
-            ToolOutput::new(&json!({"a": a.body, "b": b.status, "signed": signed}))
+            ToolOutput::new(&json!({
+                "a": a.body,
+                "etag": a.header_value("ETag"),
+                "b": b.status,
+                "signed": signed,
+            }))
         }
     }
 
@@ -171,21 +184,17 @@ mod tests {
             |asked| {
                 seen.push(asked.clone());
                 match asked {
-                    Asked::Fetch(r) if r.url.ends_with("/a") => Reply::Response(HttpResponse {
-                        status: 200,
-                        body: "first".into(),
-                    }),
-                    Asked::Fetch(_) => Reply::Response(HttpResponse {
-                        status: 204,
-                        body: String::new(),
-                    }),
+                    Asked::Fetch(r) if r.url.ends_with("/a") => {
+                        Reply::Response(HttpResponse::new(200, "first").header("etag", "\"1\""))
+                    }
+                    Asked::Fetch(_) => Reply::Response(HttpResponse::new(204, "")),
                     Asked::SignEs256 { .. } => Reply::Unsupported,
                 }
             },
         );
         assert_eq!(
             out["result"]["structuredContent"],
-            json!({"a": "first", "b": 204, "signed": false})
+            json!({"a": "first", "etag": "\"1\"", "b": 204, "signed": false})
         );
         assert_eq!(seen.len(), 3);
         assert_eq!(seen[1], Asked::Fetch(post_json("https://h.test/b", "{}")));

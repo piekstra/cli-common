@@ -82,7 +82,9 @@ mod native {
     use super::Level;
 
     /// A request the module made of the host, waiting for an answer.
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    /// `Debug` shows the operation and sizes only: the request carries
+    /// tokens, and the key is a private key.
+    #[derive(Clone, PartialEq, Eq)]
     pub enum Started {
         /// `fetch(op, request)`: the request JSON, as the module wrote it.
         Fetch { op: u32, request: Vec<u8> },
@@ -92,6 +94,24 @@ mod native {
             key: Vec<u8>,
             data: Vec<u8>,
         },
+    }
+
+    impl std::fmt::Debug for Started {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Started::Fetch { op, request } => f
+                    .debug_struct("Fetch")
+                    .field("op", op)
+                    .field("request_len", &request.len())
+                    .finish(),
+                Started::SignEs256 { op, key, data } => f
+                    .debug_struct("SignEs256")
+                    .field("op", op)
+                    .field("key_len", &key.len())
+                    .field("data_len", &data.len())
+                    .finish(),
+            }
+        }
     }
 
     thread_local! {

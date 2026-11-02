@@ -67,12 +67,22 @@ test("a fetch goes out as the module built it and its answer comes back", async 
   const { toolset, seen } = host(() => new Response("hello", { status: 202 }));
   const r = result(await toolset.call({ name: "demo_fetch", arguments: { path: "items" } }, config));
   assert.equal(r.isError, false);
-  assert.deepEqual(r.structuredContent, { status: 202, body: "hello" });
+  assert.deepEqual(r.structuredContent, { status: 202, body: "hello", location: null });
   assert.equal(seen.length, 1);
   assert.equal(seen[0].url, "https://demo.test/items?q=a%20b");
   assert.equal(seen[0].init.method, "GET");
   assert.equal(seen[0].init.redirect, "manual");
   assert.deepEqual(seen[0].init.headers, [["X-Demo", "1"]]);
+});
+
+test("a redirect comes back to the module with its Location, not followed", async () => {
+  const { toolset, seen } = host(
+    () => new Response(null, { status: 302, headers: { location: "https://elsewhere.test/x" } }),
+  );
+  const r = result(await toolset.call({ name: "demo_fetch", arguments: { path: "moved" } }, config));
+  assert.equal(r.isError, false, JSON.stringify(r));
+  assert.deepEqual(r.structuredContent, { status: 302, body: "", location: "https://elsewhere.test/x" });
+  assert.equal(seen.length, 1);
 });
 
 test("a failed fetch is an upstream tool error naming the origin only", async () => {
@@ -106,6 +116,8 @@ test("ES256 is signed by WebCrypto and verifies under the public key", async () 
   const bad = result(await toolset.call({ name: "demo_sign", arguments: { message: "x" } }, { es256_key_hex: "00" }));
   assert.equal(bad.isError, true);
   assert.match(bad.content[0].text, /the host could not sign/);
+  const typo = result(await toolset.call({ name: "demo_sign", arguments: { message: "x" } }, { es256_key_hex: "0g" }));
+  assert.match(typo.content[0].text, /^auth: es256_key_hex is not valid hex/);
 });
 
 test("two operations in one call, and two calls, are in flight together", async () => {
@@ -120,7 +132,7 @@ test("two operations in one call, and two calls, are in flight together", async 
   // Answer out of order: the later call and the second fetch first.
   gates.get("/solo")!(new Response("s", { status: 200 }));
   gates.get("/two")!(new Response(null, { status: 204 }));
-  assert.deepEqual(result(await single).structuredContent, { status: 200, body: "s" });
+  assert.deepEqual(result(await single).structuredContent, { status: 200, body: "s", location: null });
   gates.get("/one")!(new Response(null, { status: 201 }));
   assert.deepEqual(result(await both).structuredContent, { one: 201, two: 204 });
   assert.equal(seen.length, 3);

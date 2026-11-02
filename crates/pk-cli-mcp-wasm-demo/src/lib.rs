@@ -11,7 +11,7 @@ use std::future::{poll_fn, Future};
 use std::pin::pin;
 use std::task::Poll;
 
-use pk_cli_core::transport::{HttpRequest, Transport};
+use pk_cli_core::transport::{HttpRequest, PlatformSigner, Transport};
 use pk_cli_core::CliError;
 use pk_cli_mcp::wasm::{fill_random, now_ms, HostTransport};
 use pk_cli_mcp::{parse_args, Server, ToolDef, ToolError, ToolOutput, Toolset};
@@ -90,15 +90,20 @@ impl Toolset for Demo {
             "demo_fetch" => {
                 let a: FetchArgs = parse_args(args)?;
                 let resp = HostTransport.send(self.request(&a.path)?).await?;
-                ToolOutput::new(&json!({"status": resp.status, "body": resp.body}))
+                ToolOutput::new(&json!({
+                    "status": resp.status,
+                    "body": resp.body,
+                    "location": resp.header_value("Location"),
+                }))
             }
             "demo_sign" => {
                 let a: SignArgs = parse_args(args)?;
                 let key = self
                     .key_hex
                     .as_deref()
-                    .map(unhex)
                     .ok_or_else(|| CliError::Auth("no es256_key_hex configured".into()))?;
+                let key = unhex(key)
+                    .ok_or_else(|| CliError::Auth("es256_key_hex is not valid hex".into()))?;
                 let sig = HostTransport
                     .sign_es256(&key, a.message.as_bytes())
                     .await
@@ -167,9 +172,14 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn unhex(s: &str) -> Vec<u8> {
+/// The bytes `s` spells in hex, or `None` for anything that is not an even
+/// number of hex digits.
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
     (0..s.len() / 2)
-        .filter_map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok())
+        .map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok())
         .collect()
 }
 
@@ -188,10 +198,7 @@ mod tests {
             json!({"base": "https://demo.test"}),
             |a| {
                 asked.push(a);
-                Reply::Response(HttpResponse {
-                    status: 200 + asked.len() as u16,
-                    body: String::new(),
-                })
+                Reply::Response(HttpResponse::new(200 + asked.len() as u16, ""))
             },
         );
         assert_eq!(
@@ -215,7 +222,11 @@ mod tests {
     }
 
     #[test]
-    fn hex_round_trips() {
-        assert_eq!(unhex(&hex(&[0, 15, 255])), vec![0, 15, 255]);
+    fn hex_round_trips_and_bad_hex_is_refused() {
+        assert_eq!(unhex(&hex(&[0, 15, 255])), Some(vec![0, 15, 255]));
+        assert_eq!(unhex(""), Some(vec![]));
+        for bad in ["0", "zz", "0g", "abc", "é0"] {
+            assert_eq!(unhex(bad), None, "{bad}");
+        }
     }
 }
