@@ -21,6 +21,18 @@ status here.
 - [ ] A portal the CLI cannot sign in to by itself (bot check, OAuth single-page app) offers `auth login --browser` through `pk-cli-browser` (DESIGN.md §2.2), reports `method: "browser-session"`, and verifies the captured session before storing it
 - [ ] `make install` uses `--locked`, so the installed binary is built from the reviewed Cargo.lock
 
+### MCP profile (DESIGN.md §1.9), for a CLI that serves tools
+
+- [ ] `<bin> mcp` through `pk-cli-mcp` (`McpArgs` + `run`), two to four workflow-shaped tools over the CLI's own command logic and DTOs
+- [ ] Tool names `<service>_<what>`, one prefix, at most 64 characters of `[a-z0-9_]`; arguments take names as well as ids
+- [ ] Every tool has a `title`, explicit `readOnlyHint`/`destructiveHint` (plus `idempotentHint`/`openWorldHint`), an `outputSchema`, and a description of at least three sentences naming the returned fields; every argument is described
+- [ ] Every write is its own tool, never combined with a read, never moves money, and carries `_meta` `anthropic/requiresUserInteraction: true`
+- [ ] Results are `structuredContent` plus the same JSON as compact text; lists use `ListArgs`/`PageRequest`/`Page` (limit 25 default, 200 max, filter-bound cursors, `response_format` concise/detailed, the 32,000-byte budget with `truncated` + `hint`)
+- [ ] Errors keep their exit code's meaning and say how to fix the call; an auth error names `<bin> auth login`, and no tool call signs in, prompts, or creates a keychain item
+- [ ] `tools/list` touches no credential; the credential is also read from named environment variables (env before keychain), so an `.mcpb` can pass it
+- [ ] Tests call `pk_cli_mcp::conformance::assert_conforms` and run each tool through `assert_fits` on scrubbed fixtures, offline; all definitions together stay under 8,000 characters
+- [ ] Releases attach `<bin>-<version>.mcpb` (binary server type; macOS universal, Linux and Windows x86_64; credential as `sensitive` `user_config`), and a `claude-plugins` plugin's `.mcp.json` runs `<bin> mcp`
+
 ## Family status
 
 Drift notes are from the 2026-07-19 family audit.
@@ -93,6 +105,18 @@ Google Home's, replacing a hand-kept device→room table. Producers declare
 | wfr | embedded copy (cookies, validated with a read) — migrate; its session cookie is also set for anonymous visitors, so it needs a signed-in-only readiness signal |
 | carta | embedded copy (cookies, then endpoint recording) — migrate once the crate offers endpoint recording |
 | m1f, rhd, nlnt | planned — today a `--stdin` import of a value the owner copies out of DevTools |
+
+## MCP profile (DESIGN.md §1.9)
+
+| CLI | Tools | Path A packaging |
+|---|---|---|
+| example-cli | demo: `example_devices` (paged read), `example_device_rename` (write) | `mcp` subcommand and a stdio end-to-end test; not released |
+| coinbase-cli (`cbase`) | pilot: `coinbase_accounts`, `coinbase_transactions` | `.mcpb` on each release from v0.2.0; `coinbase-cli` plugin in `claude-plugins` |
+
+Consumers: Claude Code, Claude Desktop, and (path B, in design) a
+deploy-your-own Cloudflare Worker reached from claude.ai. The `cli-mcp`
+server's generic one-passthrough-tool-per-CLI registration stays for CLIs
+without a profile toolset.
 
 ## CI
 

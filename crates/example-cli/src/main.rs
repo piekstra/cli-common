@@ -13,7 +13,8 @@
 //! with `state sync` as the background refresh's child. `auth login
 //! --browser` is the browser sign-in (`pk-cli-browser`) a bot-protected
 //! portal offers: a Chrome window the owner signs in through, and the web
-//! session read back out of it.
+//! session read back out of it. `mcp` serves the demo devices as MCP tools
+//! (`pk-cli-mcp`) over stdio, for Claude and other MCP clients.
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
@@ -30,6 +31,8 @@ use pk_cli_secrets::{
 use pk_cli_selfupdate::{SelfUpdateArgs, Updater};
 use pk_cli_utility::{Paged, RangeArgs, Statement, UtilitySummary};
 use serde::{Deserialize, Serialize};
+
+mod mcp;
 
 const BIN: &str = "example-cli";
 const REPO: &str = "piekstra/cli-common";
@@ -69,6 +72,8 @@ enum Command {
     Devices(DevicesCmd),
     /// Small state files in the owner's Drive (mount or rclone remote).
     State(StateArgs),
+    /// Serve this CLI's tools to Claude and other MCP clients over stdio.
+    Mcp(pk_cli_mcp::McpArgs),
     /// Update to the latest release from GitHub.
     SelfUpdate(SelfUpdateArgs),
     /// Print a shell completion script.
@@ -374,6 +379,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         }
         Command::Devices(cmd) => devices(cli, cmd),
         Command::State(args) => state(cli, args, &store),
+        Command::Mcp(args) => pk_cli_mcp::run(args, mcp::ExampleTools),
         Command::SelfUpdate(args) => Updater {
             repo: REPO.into(),
             binary: BIN.into(),
@@ -402,6 +408,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     "documents",
                     "devices",
                     "state",
+                    "mcp",
                 ],
             )
             .with_profiles(&[pk_cli_utility::PROFILE, pk_cli_documents::PROFILE]);

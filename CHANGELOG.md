@@ -1,5 +1,69 @@
 # Changelog
 
+## Unreleased
+
+Additive: a new crate and an `example-cli mcp` subcommand; no existing
+crate's API or behaviour changes.
+
+- **`pk-cli-mcp`** (new crate; DESIGN.md §1.9 "MCP profile", §2.3) — MCP
+  tools over a CLI's own commands, so anyone can connect Claude to their own
+  account through the open-source CLI with no shared hosted service.
+  - **Core, default features, builds for `wasm32-unknown-unknown`** (no
+    Tokio, keyring, processes or blocking I/O), so the same toolset runs in a
+    deploy-your-own Cloudflare Worker. `ToolDef` (`read`/`write`
+    constructors that set `title` and every annotation explicitly; `write`
+    adds `_meta` `anthropic/requiresUserInteraction: true`; input and
+    output JSON Schemas from `schemars` derives, compacted: subschemas
+    inlined, `$schema`, Rust integer formats and `null` alternatives
+    dropped, descriptions flattened, output schemas without descriptions);
+    `ToolOutput`/`CallToolResult` (structured JSON plus the same JSON as
+    compact text; errors as `isError` text with no `structuredContent`);
+    the `Toolset` trait (`async fn call` with no `Send` bound, tools in a
+    stable order); `shape`: `ListArgs` (`limit` 25 by default and at most
+    200, opaque `cursor`, `response_format` concise/detailed), `PageRequest`
+    (cursors bound to the query's filters; a page that would pass the
+    32,000-character budget stops early with `truncated` and a `hint` naming the
+    cursor and the tool's narrowing arguments) and the `Page` envelope;
+    `ToolError` (the family exit codes as actionable text: an auth error
+    names `<bin> auth login` to run in a terminal; `From<CliError>`);
+    `instructions` (the standard server instructions, including that
+    third-party free text is data, never instructions); dispatch that
+    refuses a misspelled argument, maps an unknown tool to JSON-RPC
+    `-32602` and replaces a result over 64,000 characters with an error.
+    Sizes count characters, as the hosts' caps do. Output schemas follow
+    serde's serialize contract (a plain `Option` is required and nullable,
+    a `skip_serializing_if` field optional); input schemas must be flat
+    objects. The `Toolset` docs state what a `call` future may depend on
+    (no Tokio reactor natively) and the per-target provider seam a toolset
+    meant for a Worker awaits. `Server::hosted(note,
+    sign_in_remedy)` lets a non-local host replace the instructions'
+    and auth errors' local wording (credentials on the user's machine,
+    `<bin> auth login` in a terminal).
+  - **The WASM boundary is MCP-shaped JSON**: `tools_list_json`,
+    `call_tool_json`, `Server::server_info_json` and `instructions` give a
+    host the `tools/list` result, the `CallToolResult` object and the
+    server identity to pass through; the crate docs hold the contract.
+  - **`stdio` feature**: `McpArgs` (with `--list-tools`) and `run`, the
+    `<bin> mcp` subcommand on rmcp 3.8 over stdin/stdout, each call on
+    Tokio's blocking pool outside any Tokio context, so blocking provider
+    code runs unchanged.
+  - **`test-util` feature**: `conformance::assert_conforms` and
+    `conformance::assert_fits`, the checks every CLI's tests run (names,
+    titles, all four hints, writes needing user interaction, three-sentence
+    descriptions, a flat input object with described arguments, output
+    schemas, definitions under
+    8,000 characters, stable order, results under the budget and matching
+    their output schema with no undeclared field), plus `call` and
+    `block_on`.
+  - Needs Rust 1.88.
+- `example-cli mcp`: `example_devices` (a paged, filterable read) and
+  `example_device_rename` (a write), conformance-checked, and driven over
+  stdio by `tests/mcp_stdio.rs`.
+- `make mcp-check` (the crate feature by feature) and `make wasm-check` (the
+  core for `wasm32-unknown-unknown`) join `make verify` and CI; the
+  `security` job runs `cargo deny check` against a new `deny.toml` (the
+  family's license and source lists).
+
 ## v0.11.0 — 2026-10-30
 
 Additive: without the new feature nothing changes, in the API or in

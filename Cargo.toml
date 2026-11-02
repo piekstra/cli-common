@@ -12,6 +12,7 @@ members = [
     "crates/pk-cli-scrape",
     "crates/pk-cli-drive",
     "crates/pk-cli-browser",
+    "crates/pk-cli-mcp",
     "crates/example-cli",
 ]
 
@@ -36,6 +37,7 @@ pk-cli-documents = { path = "crates/pk-cli-documents", version = "0.11.0" }
 pk-cli-scrape = { path = "crates/pk-cli-scrape", version = "0.11.0" }
 pk-cli-drive = { path = "crates/pk-cli-drive", version = "0.11.0" }
 pk-cli-browser = { path = "crates/pk-cli-browser", version = "0.11.0" }
+pk-cli-mcp = { path = "crates/pk-cli-mcp", version = "0.11.0" }
 
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
@@ -59,6 +61,12 @@ libc = "0.2"
 # The same pins sofi-cli, wealthfront-cli and carta-cli carry.
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 ctrlc = "3.5"
+# pk-cli-mcp: tool input/output JSON Schemas (the same major rmcp uses, so a
+# CLI's derives serve both), and behind its `stdio` feature the official MCP
+# Rust SDK plus the runtime its stdio transport needs.
+schemars = "1"
+rmcp = { version = "3.8", default-features = false, features = ["server", "transport-io"] }
+tokio = { version = "1", default-features = false, features = ["rt"] }
 
 [profile.release]
 strip = true

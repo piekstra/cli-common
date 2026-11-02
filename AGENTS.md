@@ -112,9 +112,16 @@ README.md, "Self-view for family desktop apps". Its macOS effects live in
 
 - `make verify` (format check, clippy `-D warnings`, tests,
   `test-util-check`: `pk-cli-browser` linted and tested with its
-  `test-util` feature off and on, and `scripts-check`: shellcheck plus the
-  self-view tests; the `Makefile` defines them and CI runs the same
-  targets) must be clean before committing.
+  `test-util` feature off and on, `mcp-check`: `pk-cli-mcp` linted and
+  tested feature by feature, `wasm-check`: `pk-cli-mcp`'s core built for
+  `wasm32-unknown-unknown` (`rustup target add wasm32-unknown-unknown`
+  once), and `scripts-check`: shellcheck plus the self-view tests; the
+  `Makefile` defines them and CI runs the same targets) and
+  `cargo deny check` must be clean before committing.
+- **`pk-cli-mcp`'s default features stay WebAssembly-clean**: no Tokio,
+  keyring, processes or blocking I/O outside its `stdio` and `test-util`
+  features, so a CLI's toolset can run in a deploy-your-own Worker
+  (DESIGN.md §1.9, §2.3).
 - `example-cli` must keep compiling and demonstrating the full surface — it is
   the template new CLIs copy.
 - Releases: bump `workspace.package.version`, update `CHANGELOG.md`, tag
