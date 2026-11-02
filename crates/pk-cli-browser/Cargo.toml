@@ -1,6 +1,6 @@
 [package]
 name = "pk-cli-browser"
-description = "Browser sign-in for the piekstra CLI family: a scratch-profile Chrome the owner signs in through, and the web session read back over the DevTools protocol (localStorage or cookies) without ever touching disk or argv."
+description = "Browser sign-in for the piekstra CLI family: a Chrome the owner signs in through, in an owner-only profile each CLI keeps so the provider remembers the device, and the web session read back over the DevTools protocol (localStorage or cookies) without the CLI ever writing it to disk or argv."
 version.workspace = true
 edition.workspace = true
 # tungstenite 0.30 (through its sha1/digest stack) needs 1.85.

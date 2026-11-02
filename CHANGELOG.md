@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased
+
+Behaviour change in `pk-cli-browser`: a sign-in now runs in a profile each
+CLI keeps, where it used to run in a scratch profile deleted after every
+sign-in. Additive API; no shape or exit code changes.
+
+- **`pk-cli-browser`: a kept, owner-only Chrome profile per CLI**
+  (DESIGN.md §1.7, §2.2). `Launch::spawn` runs Chrome in
+  `<data dir>/piekstra.<bin>/browser-profile`
+  (`~/Library/Application Support/piekstra.<bin>/browser-profile` on macOS,
+  `$XDG_DATA_HOME` or `~/.local/share` elsewhere) and leaves it in place
+  when the window closes; Chrome is still stopped on drop. The provider's
+  own cookies (its remembered device, its single-sign-on session, a bot
+  check's clearance) carry over, so a CLI's second and later
+  `auth login --browser` often finish with no password, code or bot check:
+  the window opens, the app loads signed in, the capture is read and the
+  window closes. The trade, stated in the docs: a profile kept on disk for
+  far fewer sign-ins. Chrome encrypts its cookies at rest (on macOS with
+  the "Chrome Safe Storage" keychain key) but not a site's `localStorage`.
+  - **Owner-only.** Created `0700` with any missing parents; a launch is
+    refused when the profile is a symlink, is not the current user's or is
+    not `0700`.
+  - **One sign-in at a time.** A sign-in holds an advisory lock on
+    `pk-cli-browser.lock` in the profile (released by the kernel if the
+    process dies), so a second is refused before anything launches; a
+    Chrome still running in the profile (its `SingletonLock` naming a live
+    pid) refuses the launch too. A lock whose pid is gone is stale: it, the
+    other singleton links and the old `DevToolsActivePort` are removed
+    before Chrome starts.
+  - **`Launch::fresh_profile(bool)`** opts back into the scratch profile
+    for one run (created `0700` in the temp dir, removed on drop), leaving
+    the kept one alone. **`BrowserArgs` gains `--fresh-profile`**
+    (`fresh_profile`), which requires `--browser`.
+  - **`forget_profile(bin) -> Result<bool, BrowserError>`** removes the
+    kept profile (`true` when there was one), for `auth logout`. It removes
+    the profile directory only and refuses while a sign-in or a Chrome is
+    using it, or when the path is a symlink or another user's.
+  - **Several accounts:** `Launch::profile_name(name)` keeps a separate
+    `browser-profile-<name>` per account at the provider, and
+    `forget_named_profile(bin, name)` removes it, so one account's sign-in
+    never opens signed in as another. Names are 1 to 64 ASCII letters,
+    digits, `-` or `_`, checked and never rewritten.
+  - **`BrowserError::Profile`** (exit 1): the kept profile is in use, is
+    not a private directory of the user's, or cannot be located, created or
+    removed. The enum is `#[non_exhaustive]`, so this is additive.
+  - A second Ctrl-C still kills Chrome and exits 130; it removes a scratch
+    profile, never the kept one.
+- `example-cli`: `auth login --browser --fresh-profile` is passed to
+  `Launch::fresh_profile`, and `auth logout` calls `forget_profile`.
+
 ## v0.12.0 — 2026-11-02
 
 Additive: a new crate and an `example-cli mcp` subcommand; no existing

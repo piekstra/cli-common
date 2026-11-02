@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -174,6 +174,14 @@ conventions alone; TOML manifests stay as the escape hatch for non-conforming CL
   entries migrated on first run — `CredentialStore::migrate_from`), or in
   1Password, read through the `op` CLI. Neither path writes a secret to a
   file.
+- **The one exception is the browser profile** a `--browser` sign-in keeps
+  (§2.2): Chrome's own store of the provider's cookies and site storage,
+  kept per CLI so the provider remembers the device. It trades a profile on
+  disk for far fewer sign-ins. It is owner-only (`0700`, refused otherwise);
+  Chrome encrypts the cookies in it (on macOS with the "Chrome Safe Storage"
+  keychain key), though not a site's `localStorage`; `auth logout` removes
+  it (`pk_cli_browser::forget_profile`) and `--fresh-profile` signs in
+  without it. The CLI never writes into it itself.
 - **One keychain item per credential set.** A token, its refresh token and
   their metadata are one JSON item, not one item each: on macOS every item a
   freshly built binary reads is a permission prompt, so a four-item layout
@@ -549,7 +557,7 @@ AGENTS.md, same house style as the CLIs.
 | `pk-cli-documents` | the `documents/v1` domain profile (§1.8): `Document`, `SavedDocument`, `DownloadBatch`, `OpenedDocument` — list & download a portal's published files | `organize-scans`' per-CLI download-command adapter table |
 | `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages: elements, attributes, table rows/cells, entity decoding — all total, never panicking | a DOM-parser dependency, and the ad-hoc `str::find` scraping each portal CLI grows on its own |
 | `pk-cli-drive` | state in the owner's Drive (§2.1): one `Backend` over a mounted folder or an rclone remote, the stale-while-revalidate read cache in front of the remote (`CachedRemote`), its bounded background refresh, and owner-only file output (`private_file`) | tax-cli's `drive.rs` + `cache.rs` + `private_file.rs`, and the copy every other CLI that keeps state in Drive would write |
-| `pk-cli-browser` | browser sign-in (§2.2): a scratch-profile Chrome the owner signs in through (`Launch`, a `Browser` guard that kills it and removes the profile on drop), and the web session read back over the DevTools protocol (`Capture`: exact hosts, an in-page expression, `HttpOnly`-capable cookies, a domain's whole jar, the CLI's `confirm` check, a watched request or a request log, the user agent) as `Secret`s, the tab closed the moment it is read; the `--browser` flag (`BrowserArgs`) | the browser-login module `sfi`, `wfr` and `carta` each embed, and the DevTools-console paste `m1f`, `rhd` and `nlnt` ask of the owner |
+| `pk-cli-browser` | browser sign-in (§2.2): a Chrome the owner signs in through, in an owner-only profile each CLI keeps so the provider remembers the device (`Launch`; `fresh_profile` for a scratch profile removed on drop; `forget_profile` for `auth logout`; a `Browser` guard that kills Chrome on drop), and the web session read back over the DevTools protocol (`Capture`: exact hosts, an in-page expression, `HttpOnly`-capable cookies, a domain's whole jar, the CLI's `confirm` check, a watched request or a request log, the user agent) as `Secret`s, the tab closed the moment it is read; the `--browser` flag (`BrowserArgs`) | the browser-login module `sfi`, `wfr` and `carta` each embed, and the DevTools-console paste `m1f`, `rhd` and `nlnt` ask of the owner |
 | `pk-cli-mcp` | the MCP profile (§1.9, §2.3): tool definitions with schemars schemas and explicit annotations (`ToolDef`), structured-plus-text results (`ToolOutput`, `CallToolResult`), the `Toolset` trait (async, no `Send` bound), list shaping (`ListArgs`, `PageRequest`, `Page`: limits, filter-bound cursors, `response_format`, the size budget), exit codes as actionable tool errors (`ToolError`), the standard server instructions; a core that builds for WebAssembly, a `stdio` feature (`<bin> mcp` on rmcp) and a `test-util` conformance check | per-CLI MCP wrappers, and the `cli-mcp` server's one generic passthrough tool per CLI |
 
 Each crate is small and independent; a CLI adopts them piecemeal. Provider
@@ -629,15 +637,18 @@ on the provider's own page in a real Chrome window, password and MFA
 included; the CLI reads the session the web app keeps out of that window
 over the Chrome DevTools Protocol and stores it like any other credential.
 
-**The surface.** `<bin> auth login --browser`, the flag being
-`pk_cli_browser::BrowserArgs` flattened beside `LoginArgs`. It takes no
-other credential source: `--browser` with `--stdin`, `--from-env` or `--op`
-is exit 2, decided before any keychain or network work. After the capture
-the CLI verifies the session with one provider read and stores it as one
-keychain item (§1.7), exactly as a `--stdin` import of the same value would.
-`auth status` reports `method: "browser-session"`, and `info.auth.login_hint`
-is `<bin> auth login --browser`. The manual path (`--stdin` with a value
-copied out of DevTools) stays as the fallback for a machine without Chrome.
+**The surface.** `<bin> auth login --browser [--fresh-profile]`, the flags
+being `pk_cli_browser::BrowserArgs` flattened beside `LoginArgs`. It takes
+no other credential source: `--browser` with `--stdin`, `--from-env` or
+`--op` is exit 2, decided before any keychain or network work, and so is
+`--fresh-profile` without `--browser`. `<bin> auth logout` calls
+`pk_cli_browser::forget_profile(BIN)`, so a logout signs the browser out
+too. After the capture the CLI verifies the session with one provider read
+and stores it as one keychain item (§1.7), exactly as a `--stdin` import of
+the same value would. `auth status` reports `method: "browser-session"`, and
+`info.auth.login_hint` is `<bin> auth login --browser`. The manual path
+(`--stdin` with a value copied out of DevTools) stays as the fallback for a
+machine without Chrome.
 
 ```rust
 use pk_cli_browser::{Capture, HostRule, Launch, DEFAULT_TIMEOUT};
@@ -646,7 +657,10 @@ let capture = Capture::new("Example", HostRule::exact("app.example.com")?)
     .expression("localStorage.getItem('session') || null")
     .hint("password and the texted code");
 let session = pk_cli_browser::capture(
-    Launch::new(BIN).url("https://app.example.com/login").quiet(common.quiet),
+    Launch::new(BIN)
+        .url("https://app.example.com/login")
+        .fresh_profile(args.browser.fresh_profile)
+        .quiet(common.quiet),
     &capture,
     DEFAULT_TIMEOUT,
 )?
@@ -655,9 +669,14 @@ let session = pk_cli_browser::capture(
 
 | Rule | |
 |---|---|
-| A plain Chrome | launched with only `--remote-debugging-port=0` (Chrome picks the port and writes it to `DevToolsActivePort`), a scratch `--user-data-dir`, `--no-first-run` and `--no-default-browser-check`. No automation flags, so `navigator.webdriver` is false and bot checks see an ordinary browser; no service-disabling flags either, which Turnstile reads as automation. The owner clicks; the crate never drives a page |
+| A plain Chrome | launched with only `--remote-debugging-port=0` (Chrome picks the port and writes it to `DevToolsActivePort`), the profile as `--user-data-dir`, `--no-first-run` and `--no-default-browser-check`. No automation flags, so `navigator.webdriver` is false and bot checks see an ordinary browser; no service-disabling flags either, which Turnstile reads as automation. The owner clicks; the crate never drives a page |
 | Which Chrome | `<PREFIX>_CHROME` (`SFI_CHROME`, `M1F_CHROME`) when set, else the standard macOS app paths (Chrome, Chromium, Edge; also under `~/Applications`), then the Linux ones |
-| The scratch profile | created `0700`, exclusively, under an unpredictable name in the temp dir, and checked to be a private directory before Chrome starts. It holds the unauthenticated debug port's address and the live session, so it is removed on every exit: the `Browser` guard's drop stops Chrome (SIGTERM, SIGKILL after 3 s) and then deletes it |
+| The kept profile | Chrome runs in `<data dir>/piekstra.<bin>/browser-profile`: `~/Library/Application Support/piekstra.<bin>/browser-profile` on macOS, under `$XDG_DATA_HOME` (or `~/.local/share`) elsewhere. A brand-new profile is an unknown device, so each sign-in in one costs a password, a texted code and a bot check, and the sessions captured from many providers last under an hour. The kept profile keeps the provider's own cookies between sign-ins (its "remember this device" cookie, its single-sign-on session, a bot check's clearance), so a re-login often needs no input: the window opens, the app loads signed in, the capture is read and the window closes. It is created `0700` with any missing parents, and a launch is refused (`BrowserError::Profile`) when it is a symlink, is not the current user's or is not `0700`. The `Browser` guard's drop stops Chrome (SIGTERM, SIGKILL after 3 s) and leaves the profile |
+| The trade | a kept profile on disk, for far fewer sign-ins. Between runs the profile holds the provider's session cookies, encrypted at rest by Chrome (on macOS with the "Chrome Safe Storage" key in the login keychain; on Linux with the desktop keyring, where there is one), and whatever the site keeps in `localStorage`, which Chrome does not encrypt, so the `0700` mode is what protects it. `auth logout` removes it and `--fresh-profile` avoids it. The crate never writes into it, and removes nothing outside it |
+| One sign-in at a time | a sign-in holds an advisory lock (`flock`) on `pk-cli-browser.lock` in the profile for its whole run; the kernel releases it if the process dies, so it is never stale, and a second sign-in is refused before anything launches. Chrome's own lock is checked too, since a Chrome can outlive its CLI: a `SingletonLock` naming a live pid refuses the launch (close that window). One naming a pid that is gone is stale: it, the `SingletonSocket` and `SingletonCookie` links (the links, not their targets) and the old `DevToolsActivePort` are removed before Chrome starts, so the new debug port is the one read. The host in the lock is not compared: a Mac's host name changes with its network |
+| `--fresh-profile` | `Launch::fresh_profile(true)`: one sign-in in a scratch profile instead, created `0700`, exclusively, under an unpredictable name in the temp dir, checked to be a private directory before Chrome starts, and removed when the guard drops, after Chrome is stopped. The provider sees a new device; the kept profile is neither read nor changed |
+| Logout | `pk_cli_browser::forget_profile(bin) -> Result<bool, BrowserError>` removes the kept profile (`true` when there was one). It removes that directory only (a link inside is removed, never its target), and refuses while a sign-in or a Chrome is using it, or when the path is a symlink, not a directory or another user's. A CLI clears its keychain items first, so a refusal leaves the rest of the logout done |
+| Several accounts | a CLI that signs in more than one account at a provider (`rhd --profile`) keeps one profile per account with `Launch::profile_name(name)` (`browser-profile-<name>` beside the default) and removes it with `forget_named_profile(bin, name)`, so one account's sign-in never opens signed in as another. A name is 1 to 64 ASCII letters, digits, `-` or `_`, checked and never rewritten, so two names never share a profile |
 | Exact hosts | a capture names the hosts it may be read from: `HostRule::exact` (one host) or `HostRule::domain` (a registrable domain and its subdomains). A page counts only when its URL is `https` on the default port and its parsed host matches label for label, never by substring: `example.com.evil.example`, `notexample.com`, `evil.example/?x=example.com`, `example.com@evil.example`, an `http` page and punycode look-alikes all fail. The expression also returns the answering document's own `location.hostname`, which must match too |
 | What is read | a JavaScript expression evaluated in each matching page that answers with the session as a non-empty string once signed in (`null`, `undefined` or `""` before; a promise is awaited), and/or named cookies for `https` URLs on the capture's hosts, read from the browser's jar (`Storage.getCookies`, so `HttpOnly` cookies work) and chosen as the browser would send them, and/or a domain's whole jar (below). A capture is ready when a page on its hosts is open, the expression answers, every required cookie is set, the jar holds a cookie, a required request was seen, its watch window is over, and its confirm hook says so, checked in that order on each poll |
 | The whole jar | `Capture::cookie_jar(domain)`: every cookie the browser would send to `domain` or a host under it (host-only and domain cookies on those hosts, a domain cookie on a parent, partitioned cookies only in their own first-party site), `HttpOnly` included, matched label for label so `notexample.com` and `example.com.evil.example` never count. Path is not filtered: a CLI replays the jar to API paths the crate does not know, and the three CLIs that keep a jar all drop the path. `domain` must be one the capture's hosts are on, so a capture never reads another site's jar; it may be wider than the hosts (`HostRule::exact("www.example.com")` with the jar of `example.com` takes the login host's cookies without ever touching its page). Handed over as `Captured::jar()` (name, value as a `Secret`, domain, host-only, path) and `Captured::cookie_header()`, one `Cookie` header value, longer paths first; two cookies of one name are both kept, as the browser would send both |
@@ -667,10 +686,10 @@ let session = pk_cli_browser::capture(
 | A light footprint | the page list, the cookies and the user agent are browser-level calls no page can observe. The expression runs only in pages on the capture's hosts, never on a login host where the bot checks run, through a flattened target session, with no `Runtime.enable`. `Network` is the one domain ever enabled in a page, and only for a capture that watches requests: only in pages on its hosts, from a separate connection that stays open between polls (network events reach only a connection that is attached), that detaches from a page as soon as it leaves those hosts, and that asks for no request bodies. The crate sends no request of its own |
 | The tab is closed | the moment a capture is read, every page on its hosts is closed, before anything else happens, so the web app cannot renew, and so rotate, the token it just handed over. A watch window and the confirm hook come before the read, never after it: the session handed over is the one read, and confirmed, in the poll that closes the tab. A capture still in its watch window when the timeout comes is read and confirmed once more rather than lost |
 | Several providers | `Browser::wait_each` waits for several captures in one window, one tab each (their hosts must not overlap), and hands each over as it is read, so one provider's timeout never loses another's session |
-| Secrets | values come back as `pk_cli_secrets::Secret` (redacted `Debug`/`Display`, zeroized on drop): the expression's answer, each named cookie, each jar cookie and the header built from them, each header value of a watched request. A watched request comes back without its query, and a request log holds no header, body or query. The crate never logs a value, never puts one on a command line and never writes one to disk; status lines and errors name labels, hosts, URLs without a query and cookie names only, plus a confirm hook's `NotYet` reason, which the CLI words the same way |
+| Secrets | values come back as `pk_cli_secrets::Secret` (redacted `Debug`/`Display`, zeroized on drop): the expression's answer, each named cookie, each jar cookie and the header built from them, each header value of a watched request. A watched request comes back without its query, and a request log holds no header, body or query. The crate never logs a value, never puts one on a command line and never writes one to disk (Chrome's own profile, above, is the one place a session touches it); status lines and errors name labels, hosts, URLs without a query and cookie names only, plus a confirm hook's `NotYet` reason, which the CLI words the same way |
 | Status lines | on stderr, suppressed by `-q`: `A Chrome window opened at the Example sign-in. Sign in there (password and the texted code); this waits for the session and captures it (up to 10 minutes; Ctrl-C cancels).`, then `Example: session captured, tab closed.` A capture that holds its tab open says so when the hold starts: `Example: keeping the tab open up to 25 seconds for the page to request www.example.com/bff/graphql before capturing the session.` |
-| Errors | every call returns a `BrowserError`, which `?` turns into the family's `CliError`. `TimedOut` (after `DEFAULT_TIMEOUT`, 10 minutes, unless the CLI passes another) and `WindowClosed` are exit 3, naming what was seen (no page on the host was open, the page held no session yet, the expression threw, which cookie was missing, that the jar was empty and which cookie names it held, which request was never made, the confirm hook's last `NotYet` reason) and the command to re-run (`<bin> auth login --browser`; `Launch::login_hint` overrides it). `Canceled` (`browser login canceled`), `ChromeNotFound` (naming `<PREFIX>_CHROME`), `Launch` and `Invalid` are exit 1, and `Handler` passes the CLI's own error through: the `wait_each` handler's, or a confirm hook's `Fail`. A CLI branches on the variant: on `ChromeNotFound` it can point the owner at its `--stdin` path |
-| Ctrl-C | the crate installs one process-wide handler: the first Ctrl-C ends the wait, so the guard drops and cleans up; a second kills Chrome, removes the profile and exits 130; with no window open, Ctrl-C exits 130 as it would without a handler. A CLI with its own handler sets `Launch::ctrl_c(false)` and calls `pk_cli_browser::cancel()` from it |
+| Errors | every call returns a `BrowserError`, which `?` turns into the family's `CliError`. `TimedOut` (after `DEFAULT_TIMEOUT`, 10 minutes, unless the CLI passes another) and `WindowClosed` are exit 3, naming what was seen (no page on the host was open, the page held no session yet, the expression threw, which cookie was missing, that the jar was empty and which cookie names it held, which request was never made, the confirm hook's last `NotYet` reason) and the command to re-run (`<bin> auth login --browser`; `Launch::login_hint` overrides it). `Canceled` (`browser login canceled`), `ChromeNotFound` (naming `<PREFIX>_CHROME`), `Launch`, `Profile` (the kept profile in use, not private, or not removable, naming its path) and `Invalid` are exit 1, and `Handler` passes the CLI's own error through: the `wait_each` handler's, or a confirm hook's `Fail`. A CLI branches on the variant: on `ChromeNotFound` it can point the owner at its `--stdin` path |
+| Ctrl-C | the crate installs one process-wide handler: the first Ctrl-C ends the wait, so the guard drops and cleans up; a second kills Chrome, removes a scratch profile (the kept one stays) and exits 130; with no window open, Ctrl-C exits 130 as it would without a handler. A CLI with its own handler sets `Launch::ctrl_c(false)` and calls `pk_cli_browser::cancel()` from it |
 
 **Choosing the readiness signal.** A capture is read once and its tab
 closed, so the signal must exist only after sign-in: the access token inside
@@ -725,7 +744,8 @@ and behaviour are unchanged; `make test-util-check` builds, lints and tests
 the crate both ways.
 
 The crate needs Rust 1.85 (tungstenite 0.30). `example-cli auth login
---browser` shows the flag check and the capture, and its unit tests run the
+--browser [--fresh-profile]` shows the flag check and the capture, its
+`auth logout` the `forget_profile` call, and its unit tests run the
 confirm hook on a built `Captured`. Its demo portal has no read
 to verify a session against, and its `auth status` and `info` stay those of
 its password login, so the verification, the `browser-session` method and

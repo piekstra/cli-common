@@ -23,8 +23,13 @@ pub enum BrowserError {
     /// points at nothing. A CLI can fall back to its manual path on this.
     ChromeNotFound(String),
     /// Chrome could not be started, or exited or stalled before opening its
-    /// debug port, or its profile directory could not be made.
+    /// debug port, or a scratch profile directory could not be made.
     Launch(String),
+    /// The CLI's kept browser profile could not be used or removed: another
+    /// sign-in or a running Chrome has it open, it is not a private (`0700`)
+    /// directory of the current user's, or it could not be located, created
+    /// or removed. The message names the path and what to do.
+    Profile(String),
     /// Ctrl-C, or [`cancel`](crate::cancel), during the sign-in.
     Canceled,
     /// The sign-in did not finish within the timeout.
@@ -44,6 +49,7 @@ impl fmt::Display for BrowserError {
             BrowserError::Invalid(m)
             | BrowserError::ChromeNotFound(m)
             | BrowserError::Launch(m)
+            | BrowserError::Profile(m)
             | BrowserError::TimedOut(m)
             | BrowserError::WindowClosed(m) => f.write_str(m),
             BrowserError::Canceled => f.write_str("browser login canceled"),
@@ -96,6 +102,11 @@ mod tests {
                 BrowserError::Launch("launching x: y".into()),
                 1,
                 "launching x: y",
+            ),
+            (
+                BrowserError::Profile("a Chrome (pid 7) is still running in x".into()),
+                1,
+                "a Chrome (pid 7) is still running in x",
             ),
             (BrowserError::Canceled, 1, "browser login canceled"),
             (BrowserError::TimedOut("timed out".into()), 3, "timed out"),

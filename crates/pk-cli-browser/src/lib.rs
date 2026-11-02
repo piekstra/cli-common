@@ -5,13 +5,13 @@
 //! Turnstile, reCAPTCHA, Akamai) or an OAuth single-page app stands in front
 //! of the password. The owner can still sign in on the provider's own page,
 //! in a real browser, and the CLI can read the resulting web session out of
-//! that browser. This crate is that: it launches Chrome with a throwaway
+//! that browser. This crate is that: it launches Chrome with the CLI's own
 //! profile and a DevTools debug port, waits while the owner signs in
 //! (password and MFA happen on the provider's page, never through the CLI),
 //! reads the session the web app keeps (a `localStorage` entry, a cookie,
 //! `HttpOnly` cookies included, or a domain's whole cookie jar) over the
-//! Chrome DevTools Protocol, closes the tab at once, kills Chrome and
-//! deletes the profile.
+//! Chrome DevTools Protocol, closes the tab at once and kills Chrome. The
+//! profile is kept for the next sign-in ([below](#the-kept-profile)).
 //!
 //! ```no_run
 //! use pk_cli_browser::{Capture, HostRule, Launch, DEFAULT_TIMEOUT};
@@ -67,7 +67,7 @@
 //!
 //! # Why a plain Chrome
 //!
-//! Chrome launched normally, with only a debug port and a scratch profile
+//! Chrome launched normally, with only a debug port and its own profile
 //! and none of the flags a WebDriver or Playwright launch adds, reports
 //! `navigator.webdriver == false` and looks like an ordinary browser to the
 //! bot checks; the owner is the one who clicks. The crate never drives a
@@ -82,14 +82,55 @@
 //! page leaves them, and never with request bodies. A capture that watches
 //! nothing leaves every page untouched but for the expression.
 //!
+//! # The kept profile
+//!
+//! Chrome runs in a profile the CLI keeps between sign-ins:
+//! `<data dir>/piekstra.<bin>/browser-profile`, which on macOS is
+//! `~/Library/Application Support/piekstra.<bin>/browser-profile` and
+//! elsewhere is under `$XDG_DATA_HOME` (or `~/.local/share`). A brand-new
+//! profile is an unknown device to the provider, so every sign-in in one
+//! costs a password, a texted code and a bot check. The kept profile keeps
+//! the provider's own cookies instead: its "remember this device" cookie,
+//! its single-sign-on session, a bot check's clearance. The next sign-in
+//! often needs no input at all: the window opens, the app loads already
+//! signed in, the capture is read and the window closes.
+//!
+//! That is a trade: a profile kept on disk, for far fewer sign-ins. The
+//! profile holds the provider's session cookies between runs (and whatever
+//! the site keeps in `localStorage`), so:
+//!
+//! - it is created `0700`, and a launch is refused ([`BrowserError::Profile`])
+//!   when it is a symlink, is not the current user's or is not `0700`;
+//! - Chrome encrypts its cookies at rest, on macOS with the "Chrome Safe
+//!   Storage" key in the login keychain (on Linux with the desktop keyring,
+//!   where there is one). A site's `localStorage` is not encrypted; the
+//!   directory's mode is what protects it;
+//! - one sign-in uses it at a time: a second is refused while the first
+//!   holds it, and so is a launch while a Chrome is still running in it
+//!   (its `SingletonLock` names a live pid). A lock left by a Chrome that
+//!   is gone is cleared, with the rest of what that Chrome left;
+//! - [`forget_profile`] removes it, so a CLI's `auth logout` signs the
+//!   browser out too, and [`Launch::fresh_profile`] (the `--fresh-profile`
+//!   flag of [`BrowserArgs`]) runs one sign-in in a scratch profile instead:
+//!   created `0700`, exclusively, under an unpredictable name in the temp
+//!   dir, and removed when the window closes, leaving the kept one alone.
+//!
+//! A CLI that signs in more than one account at a provider keeps one
+//! profile per account ([`Launch::profile_name`],
+//! [`forget_named_profile`]), so one account's sign-in never opens already
+//! signed in as another. Nothing outside the profile directory is ever
+//! removed or rewritten.
+//!
 //! # Trust boundary
 //!
 //! The debug port has no authentication: anything that can reach
 //! `127.0.0.1:<port>`, or read `DevToolsActivePort`, can read every cookie
-//! in the window while it is open. The scratch profile, which holds the
-//! port file and the live session, is therefore created `0700`, exclusively,
-//! under an unpredictable name, and removed on every exit path, Ctrl-C
-//! included ([`Launch::ctrl_c`]).
+//! in the window while it is open. The profile, which holds the port file
+//! and the session, is therefore owner-only (above). Chrome is stopped on
+//! every exit path, Ctrl-C included ([`Launch::ctrl_c`]), and a scratch
+//! profile is removed with it; the port file a stopped Chrome leaves in the
+//! kept profile names a port nothing listens on, and is removed before the
+//! next launch.
 //!
 //! # Errors
 //!
@@ -107,11 +148,12 @@
 //! `Display` and is zeroized when dropped. A request's URL comes back
 //! without its query, and a request log keeps no header, body or query, so
 //! neither carries a token. The crate never logs a value, never passes one
-//! on a command line, and never writes one to disk (Chrome's own profile,
-//! deleted at the end, is the only place a session touches the
-//! filesystem). Status lines and errors name hosts, labels, URLs without
-//! queries and cookie names only; a [`Confirm::NotYet`] reason is shown
-//! too, so a CLI writes it the same way.
+//! on a command line, and never writes one to disk: Chrome's own profile is
+//! the only place a session touches the filesystem (kept between sign-ins
+//! unless the CLI asks for a fresh one, above). Status lines and errors
+//! name hosts, labels, URLs without queries and cookie names only; a
+//! [`Confirm::NotYet`] reason is shown too, so a CLI writes it the same
+//! way.
 //!
 //! The [`Capture::confirm`] hook is the CLI's code, run in the CLI's
 //! process with the candidate session: the request it makes is the CLI's
@@ -152,6 +194,7 @@ mod error;
 mod host;
 mod interrupt;
 mod jar;
+mod profile;
 mod watch;
 
 #[cfg(feature = "test-util")]
@@ -162,11 +205,13 @@ pub use error::BrowserError;
 pub use host::HostRule;
 pub use interrupt::cancel;
 pub use jar::JarCookie;
+pub use profile::{forget_named_profile, forget_profile};
 pub use watch::{CapturedRequest, LoggedRequest, RequestKind};
 
-/// The family's `auth login --browser` flag. Flatten it into the CLI's login
-/// arguments beside `pk_cli_auth::LoginArgs`, so every portal CLI spells and
-/// documents it the same way.
+/// The family's `auth login --browser` flags. Flatten them into the CLI's
+/// login arguments beside `pk_cli_auth::LoginArgs`, so every portal CLI
+/// spells and documents them the same way, and pass `fresh_profile` on to
+/// [`Launch::fresh_profile`].
 #[derive(clap::Args, Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct BrowserArgs {
@@ -175,6 +220,13 @@ pub struct BrowserArgs {
     /// in this CLI.
     #[arg(long)]
     pub browser: bool,
+
+    /// With --browser: sign in through a fresh browser profile, deleted
+    /// afterwards, instead of the one this CLI keeps. The provider sees a
+    /// new device (expect its full sign-in), and nothing of this sign-in
+    /// stays on disk.
+    #[arg(long, requires = "browser")]
+    pub fresh_profile: bool,
 }
 
 #[cfg(test)]
@@ -196,5 +248,26 @@ mod tests {
                 .browser
         );
         assert!(!Cli::try_parse_from(["x"]).unwrap().browser.browser);
+    }
+
+    #[test]
+    fn a_fresh_profile_is_asked_for_with_the_browser_flag() {
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            browser: BrowserArgs,
+        }
+        let both = Cli::try_parse_from(["x", "--browser", "--fresh-profile"]).unwrap();
+        assert!(both.browser.browser && both.browser.fresh_profile);
+        assert!(
+            !Cli::try_parse_from(["x", "--browser"])
+                .unwrap()
+                .browser
+                .fresh_profile
+        );
+        // Alone it would do nothing, so it is a usage error (exit 2).
+        let err = Cli::try_parse_from(["x", "--fresh-profile"]).err().unwrap();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert_eq!(err.exit_code(), 2);
     }
 }

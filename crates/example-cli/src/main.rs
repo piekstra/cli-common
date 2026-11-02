@@ -12,8 +12,10 @@
 //! rclone remote (`remote`) behind the stale-while-revalidate read cache,
 //! with `state sync` as the background refresh's child. `auth login
 //! --browser` is the browser sign-in (`pk-cli-browser`) a bot-protected
-//! portal offers: a Chrome window the owner signs in through, and the web
-//! session read back out of it. `mcp` serves the demo devices as MCP tools
+//! portal offers: a Chrome window the owner signs in through, in a profile
+//! the CLI keeps so the portal remembers the device (`--fresh-profile` for
+//! a one-off scratch one, `auth logout` removes it), and the web session
+//! read back out of it. `mcp` serves the demo devices as MCP tools
 //! (`pk-cli-mcp`) over stdio, for Claude and other MCP clients.
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -89,7 +91,8 @@ enum AuthCmd {
     Login(LoginCmd),
     /// Report credential/session state (auth-status/v1).
     Status,
-    /// Clear the session; --forget also removes the stored credential.
+    /// Clear the session and the browser profile a --browser sign-in keeps;
+    /// --forget also removes the stored credential.
     Logout(LogoutArgs),
     /// Raw keychain write for rotation / headless setup.
     SetCredential(SetCredentialArgs),
@@ -450,6 +453,7 @@ fn auth(
                 let session = pk_cli_browser::capture(
                     Launch::new(BIN)
                         .url("https://app.example.com/login")
+                        .fresh_profile(browser.fresh_profile)
                         .quiet(cli.common.quiet),
                     &browser_session()?,
                     pk_cli_browser::DEFAULT_TIMEOUT,
@@ -495,7 +499,19 @@ fn auth(
                 creds.delete(&user)?;
                 store.clear()?;
             }
-            eprintln!("logged out");
+            // The profile a `--browser` sign-in keeps holds the portal's
+            // own cookies (its remembered device and session), so a logout
+            // removes it too: the next sign-in starts signed out. Last, so
+            // a refusal (its window still open) leaves the rest done.
+            let browser = pk_cli_browser::forget_profile(BIN)?;
+            eprintln!(
+                "logged out{}",
+                if browser {
+                    "; browser profile removed"
+                } else {
+                    ""
+                }
+            );
             Ok(())
         }
         AuthCmd::SetCredential(args) => {
