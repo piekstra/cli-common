@@ -22,7 +22,9 @@ ctrlc = { workspace = true }
 # Constructors for what a capture hands over (`Captured::for_test` and its
 # builder, `JarCookie::for_test`, `CapturedRequest::for_test`,
 # `LoggedRequest::for_test`), so a CLI's unit tests can run its confirm hook
-# and its mappings on known values. For a CLI's `[dev-dependencies]` only:
+# and its mappings on known values; and the kept profile's root moved for a
+# test (`Launch::profile_root`, `forget_profile_in`,
+# `forget_named_profile_in`), so a logout test never removes the real one. For a CLI's `[dev-dependencies]` only:
 # off, nothing of it is compiled, and the crate's API and behaviour are
 # unchanged.
 test-util = []

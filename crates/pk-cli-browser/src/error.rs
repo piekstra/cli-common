@@ -25,11 +25,16 @@ pub enum BrowserError {
     /// Chrome could not be started, or exited or stalled before opening its
     /// debug port, or a scratch profile directory could not be made.
     Launch(String),
-    /// The CLI's kept browser profile could not be used or removed: another
-    /// sign-in or a running Chrome has it open, it is not a private (`0700`)
-    /// directory of the current user's, or it could not be located, created
-    /// or removed. The message names the path and what to do.
+    /// The CLI's kept browser profile needs repair before it can be used
+    /// or removed: it is not a private (`0700`) directory of the current
+    /// user's (a symlink, another owner, another mode), or it could not be
+    /// located, created or removed. The message names the path and the fix.
     Profile(String),
+    /// The CLI's kept browser profile is busy: another sign-in, or a Chrome
+    /// still running in it, has it open. Waiting (closing that window) or
+    /// `--fresh-profile` gets past it; the message names the path, and the
+    /// pid of a Chrome.
+    ProfileInUse(String),
     /// Ctrl-C, or [`cancel`](crate::cancel), during the sign-in.
     Canceled,
     /// The sign-in did not finish within the timeout.
@@ -50,6 +55,7 @@ impl fmt::Display for BrowserError {
             | BrowserError::ChromeNotFound(m)
             | BrowserError::Launch(m)
             | BrowserError::Profile(m)
+            | BrowserError::ProfileInUse(m)
             | BrowserError::TimedOut(m)
             | BrowserError::WindowClosed(m) => f.write_str(m),
             BrowserError::Canceled => f.write_str("browser login canceled"),
@@ -104,7 +110,12 @@ mod tests {
                 "launching x: y",
             ),
             (
-                BrowserError::Profile("a Chrome (pid 7) is still running in x".into()),
+                BrowserError::Profile("the browser profile dir x is a symlink".into()),
+                1,
+                "the browser profile dir x is a symlink",
+            ),
+            (
+                BrowserError::ProfileInUse("a Chrome (pid 7) is still running in x".into()),
                 1,
                 "a Chrome (pid 7) is still running in x",
             ),

@@ -19,6 +19,8 @@ sign-in. Additive API; no shape or exit code changes.
   window closes. The trade, stated in the docs: a profile kept on disk for
   far fewer sign-ins. Chrome encrypts its cookies at rest (on macOS with
   the "Chrome Safe Storage" keychain key) but not a site's `localStorage`.
+  - **macOS and Linux.** Elsewhere every sign-in uses a scratch profile,
+    with a one-line note on stderr.
   - **Owner-only.** Created `0700` with any missing parents; a launch is
     refused when the profile is a symlink, is not the current user's or is
     not `0700`.
@@ -26,9 +28,11 @@ sign-in. Additive API; no shape or exit code changes.
     `pk-cli-browser.lock` in the profile (released by the kernel if the
     process dies), so a second is refused before anything launches; a
     Chrome still running in the profile (its `SingletonLock` naming a live
-    pid) refuses the launch too. A lock whose pid is gone is stale: it, the
-    other singleton links and the old `DevToolsActivePort` are removed
-    before Chrome starts.
+    pid whose program is a Chrome) refuses the launch too, and the message
+    names the lock to remove by hand if no Chrome is open there. A lock
+    whose pid is gone, or now runs another program (a pid reused after a
+    reboot), is stale: it, the other singleton links and the old
+    `DevToolsActivePort` are removed before Chrome starts.
   - **`Launch::fresh_profile(bool)`** opts back into the scratch profile
     for one run (created `0700` in the temp dir, removed on drop), leaving
     the kept one alone. **`BrowserArgs` gains `--fresh-profile`**
@@ -41,14 +45,23 @@ sign-in. Additive API; no shape or exit code changes.
     `browser-profile-<name>` per account at the provider, and
     `forget_named_profile(bin, name)` removes it, so one account's sign-in
     never opens signed in as another. Names are 1 to 64 ASCII letters,
-    digits, `-` or `_`, checked and never rewritten.
-  - **`BrowserError::Profile`** (exit 1): the kept profile is in use, is
-    not a private directory of the user's, or cannot be located, created or
-    removed. The enum is `#[non_exhaustive]`, so this is additive.
+    digits, `-` or `_`, checked and never rewritten; uppercase is written as
+    `+` and its lowercase in the directory name, so names that differ only
+    in case keep their own profiles on a case-folding filesystem.
+  - **`BrowserError::Profile`** (exit 1): the kept profile needs repair (not
+    a private directory of the user's, or it cannot be located, created or
+    removed). **`BrowserError::ProfileInUse`** (exit 1): another sign-in or
+    a running Chrome has it. The enum is `#[non_exhaustive]`, so both are
+    additive.
+  - **`test-util`** gains `Launch::profile_root(root)`,
+    `forget_profile_in(root, bin)` and `forget_named_profile_in(root, bin,
+    name)`, so a CLI's logout tests run against a temp dir and never remove
+    the owner's real profile.
   - A second Ctrl-C still kills Chrome and exits 130; it removes a scratch
     profile, never the kept one.
 - `example-cli`: `auth login --browser --fresh-profile` is passed to
-  `Launch::fresh_profile`, and `auth logout` calls `forget_profile`.
+  `Launch::fresh_profile`, and `auth logout` calls `forget_profile` through
+  a seam its test fills with `forget_profile_in`.
 
 ## v0.12.0 — 2026-11-02
 

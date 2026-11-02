@@ -21,7 +21,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use pk_cli_auth::{AuthStatus, LoginArgs, LogoutArgs, SetCredentialArgs};
-use pk_cli_browser::{BrowserArgs, Capture, Captured, Confirm, HostRule, Launch};
+use pk_cli_browser::{BrowserArgs, BrowserError, Capture, Captured, Confirm, HostRule, Launch};
 use pk_cli_config::ConfigStore;
 use pk_cli_core::info::{AuthInfo, CliInfo};
 use pk_cli_core::{confirm, output, resolve, CliError, CommonArgs};
@@ -499,18 +499,11 @@ fn auth(
                 creds.delete(&user)?;
                 store.clear()?;
             }
-            // The profile a `--browser` sign-in keeps holds the portal's
-            // own cookies (its remembered device and session), so a logout
-            // removes it too: the next sign-in starts signed out. Last, so
-            // a refusal (its window still open) leaves the rest done.
-            let browser = pk_cli_browser::forget_profile(BIN)?;
+            // Last, so a refusal (its window still open) leaves the rest
+            // done.
             eprintln!(
-                "logged out{}",
-                if browser {
-                    "; browser profile removed"
-                } else {
-                    ""
-                }
+                "{}",
+                logout_browser(|| pk_cli_browser::forget_profile(BIN))?
             );
             Ok(())
         }
@@ -526,6 +519,24 @@ fn auth(
             Ok(())
         }
     }
+}
+
+/// `auth logout`'s browser step. The profile a `--browser` sign-in keeps
+/// holds the portal's own cookies (its remembered device and session), so a
+/// logout removes it too and the next sign-in starts signed out. The
+/// removal is passed in: the binary binds it to `forget_profile(BIN)`, the
+/// tests to `forget_profile_in` under a temp dir, so a test never removes
+/// the owner's real profile. Returns the status line.
+fn logout_browser(forget: impl FnOnce() -> Result<bool, BrowserError>) -> Result<String, CliError> {
+    let removed = forget()?;
+    Ok(format!(
+        "logged out{}",
+        if removed {
+            "; browser profile removed"
+        } else {
+            ""
+        }
+    ))
 }
 
 fn devices(cli: &Cli, cmd: &DevicesCmd) -> Result<(), CliError> {
@@ -769,5 +780,23 @@ mod tests {
                 other => panic!("{session:?} must keep the wait going: {other:?}"),
             }
         }
+    }
+
+    /// The logout's browser step on a temp dir through `test-util`'s
+    /// `forget_profile_in`, the seam a CLI's logout tests use so they never
+    /// remove the owner's real profile.
+    #[test]
+    fn logout_removes_the_kept_browser_profile() {
+        let root = std::env::temp_dir().join(format!("example-cli-logout-{}", std::process::id()));
+        let profile = root.join("piekstra.example-cli").join("browser-profile");
+        std::fs::create_dir_all(profile.join("Default")).unwrap();
+        let forget = || pk_cli_browser::forget_profile_in(&root, BIN);
+        assert_eq!(
+            logout_browser(forget).unwrap(),
+            "logged out; browser profile removed"
+        );
+        assert!(!profile.exists());
+        assert_eq!(logout_browser(forget).unwrap(), "logged out");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

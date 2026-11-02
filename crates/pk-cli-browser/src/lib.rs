@@ -105,10 +105,12 @@
 //!   Storage" key in the login keychain (on Linux with the desktop keyring,
 //!   where there is one). A site's `localStorage` is not encrypted; the
 //!   directory's mode is what protects it;
-//! - one sign-in uses it at a time: a second is refused while the first
-//!   holds it, and so is a launch while a Chrome is still running in it
-//!   (its `SingletonLock` names a live pid). A lock left by a Chrome that
-//!   is gone is cleared, with the rest of what that Chrome left;
+//! - one sign-in uses it at a time: a second is refused
+//!   ([`BrowserError::ProfileInUse`]) while the first holds it, and so is a
+//!   launch while a Chrome is still running in it (its `SingletonLock` names
+//!   a live pid whose program is a Chrome). A lock left by a Chrome that is
+//!   gone, or whose pid now runs another program, is cleared, with the rest
+//!   of what that Chrome left;
 //! - [`forget_profile`] removes it, so a CLI's `auth logout` signs the
 //!   browser out too, and [`Launch::fresh_profile`] (the `--fresh-profile`
 //!   flag of [`BrowserArgs`]) runs one sign-in in a scratch profile instead:
@@ -118,8 +120,13 @@
 //! A CLI that signs in more than one account at a provider keeps one
 //! profile per account ([`Launch::profile_name`],
 //! [`forget_named_profile`]), so one account's sign-in never opens already
-//! signed in as another. Nothing outside the profile directory is ever
-//! removed or rewritten.
+//! signed in as another; names that differ only in case get their own
+//! profiles even where the filesystem folds case. Nothing outside the
+//! profile directory is ever removed or rewritten.
+//!
+//! The kept profile needs macOS or Linux (the run lock is `flock(2)`, and
+//! Chrome's lock a symlink). Elsewhere every sign-in uses a scratch profile,
+//! with a one-line note on stderr.
 //!
 //! # Trust boundary
 //!
@@ -172,6 +179,17 @@
 //! then runs its confirm hook, and its mapping of a capture onto its own
 //! session, on known values.
 //!
+//! The feature also moves the kept profile for a test. A CLI's
+//! `auth logout` calls [`forget_profile`], which removes the owner's real
+//! profile, so **a logout test must never reach it**: the CLI's logout
+//! takes the call through a seam its tests fill, such as a closure the
+//! binary binds to `|| forget_profile(BIN)` and a test to
+//! `|| forget_profile_in(&temp_dir, BIN)`. `forget_profile_in(root, bin)`
+//! and `forget_named_profile_in(root, bin, name)` look under `root` instead
+//! of the per-user data dir, and `Launch::profile_root(root)` does the same
+//! for a launch (the profile is `<root>/piekstra.<bin>/browser-profile`).
+//! `example-cli`'s logout is the worked example.
+//!
 //! The feature is for a CLI's `[dev-dependencies]` only, at the same tag as
 //! the dependency so both name one crate, which keeps the constructors out
 //! of the binary it ships:
@@ -206,6 +224,8 @@ pub use host::HostRule;
 pub use interrupt::cancel;
 pub use jar::JarCookie;
 pub use profile::{forget_named_profile, forget_profile};
+#[cfg(any(test, feature = "test-util"))]
+pub use profile::{forget_named_profile_in, forget_profile_in};
 pub use watch::{CapturedRequest, LoggedRequest, RequestKind};
 
 /// The family's `auth login --browser` flags. Flatten them into the CLI's

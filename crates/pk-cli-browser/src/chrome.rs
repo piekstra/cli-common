@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 use crate::error::BrowserError;
 use crate::host::parse_url;
 use crate::interrupt;
-use crate::profile::{default_root, invalid_name, profile_name_ok, ProfileDir};
+use crate::profile::{
+    default_root, invalid_name, profile_choice, profile_name_ok, ProfileChoice, ProfileDir,
+    KEPT_SUPPORTED, UNSUPPORTED_NOTE,
+};
 
 /// How long Chrome gets to write `DevToolsActivePort` after launch.
 const PORT_DEADLINE: Duration = Duration::from_secs(20);
@@ -234,11 +237,12 @@ impl Launch {
         self
     }
 
-    /// Keep the profile under `root` instead of the per-user data dir: the
-    /// tests' seam, so no test reads or removes the owner's real profile.
-    #[cfg(test)]
-    #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) fn profile_root(mut self, root: impl Into<PathBuf>) -> Self {
+    /// Keep the profile under `root` instead of the per-user data dir
+    /// (`<root>/piekstra.<bin>/browser-profile`). For a CLI's tests only
+    /// (the `test-util` feature), so a test that launches never reads or
+    /// changes the owner's real profile; `forget_profile_in` removes it.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn profile_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.profile_root = Some(root.into());
         self
     }
@@ -249,10 +253,13 @@ impl Launch {
     /// stays for the next sign-in.
     ///
     /// Before Chrome starts, the kept profile is created `0700` if missing,
-    /// and refused ([`BrowserError::Profile`]) when it is a symlink, is not
-    /// the current user's or is not `0700`, when another sign-in is using
-    /// it, or when a Chrome is still running in it. What a Chrome that is no
-    /// longer running left in it (its lock, the old debug port) is removed.
+    /// and refused as [`BrowserError::Profile`] when it is a symlink, is not
+    /// the current user's or is not `0700`, and as
+    /// [`BrowserError::ProfileInUse`] when another sign-in is using it or a
+    /// Chrome is still running in it. What a Chrome that is no longer
+    /// running left in it (its lock, the old debug port) is removed. Off
+    /// unix there is no kept profile: the sign-in uses a scratch one and
+    /// says so in a note on stderr (unless quiet).
     pub fn spawn(self) -> Result<Browser, BrowserError> {
         if self.urls.is_empty() {
             return Err(BrowserError::Invalid(
@@ -282,18 +289,25 @@ impl Launch {
             }
         }
 
-        let profile = if self.fresh_profile {
-            ProfileDir::create(&self.bin)?
-        } else {
-            let root = match &self.profile_root {
-                Some(root) => root.clone(),
-                None => default_root().map_err(|e| {
-                    BrowserError::Profile(format!(
-                        "{e}; pass --fresh-profile to sign in without it"
-                    ))
-                })?,
-            };
-            ProfileDir::open_kept(&root, &self.bin, self.profile_name.as_deref())?
+        let profile = match profile_choice(self.fresh_profile, KEPT_SUPPORTED) {
+            ProfileChoice::Scratch => ProfileDir::create(&self.bin)?,
+            ProfileChoice::ScratchUnsupported => {
+                if !self.quiet {
+                    eprintln!("{UNSUPPORTED_NOTE}");
+                }
+                ProfileDir::create(&self.bin)?
+            }
+            ProfileChoice::Kept => {
+                let root = match &self.profile_root {
+                    Some(root) => root.clone(),
+                    None => default_root().map_err(|e| {
+                        BrowserError::Profile(format!(
+                            "{e}; pass --fresh-profile to sign in without it"
+                        ))
+                    })?,
+                };
+                ProfileDir::open_kept(&root, &self.bin, self.profile_name.as_deref(), &chrome)?
+            }
         };
         let child = Command::new(&chrome)
             .args(chrome_args(profile.path(), &self.urls))
@@ -673,7 +687,7 @@ mod tests {
         let err = fake_launch("pk-cli-browser-kept", &root)
             .spawn()
             .unwrap_err();
-        assert!(matches!(err, BrowserError::Profile(_)), "{err:?}");
+        assert!(matches!(err, BrowserError::ProfileInUse(_)), "{err:?}");
         let msg = err.to_string();
         assert!(
             msg.contains("another pk-cli-browser-kept browser sign-in"),
@@ -717,10 +731,17 @@ mod tests {
             .profile_name("member_b")
             .spawn()
             .unwrap();
+        // Names that differ only in case are two accounts, even where the
+        // filesystem folds case (APFS): both sign-ins run side by side.
+        let upper = fake_launch("pk-cli-browser-named", &root)
+            .profile_name("Member-A")
+            .spawn()
+            .unwrap();
         let dir = root.join("piekstra.pk-cli-browser-named");
         assert_eq!(a.profile.path(), dir.join("browser-profile-member-a"));
         assert_eq!(b.profile.path(), dir.join("browser-profile-member_b"));
-        drop((a, b));
+        assert_eq!(upper.profile.path(), dir.join("browser-profile-+member-+a"));
+        drop((a, b, upper));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
