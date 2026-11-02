@@ -27,16 +27,22 @@ jobs:
           # pk-cli-mcp's core must build for WebAssembly (make wasm-check).
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      # wasm-host-check runs the ABI's reference host, TypeScript that Node
+      # 22.18+ runs without a build step.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Install Linux keyring build deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
       # The Makefile is the one definition of the gate; `make verify` runs
-      # these seven locally.
+      # these eight locally.
       - run: make fmt-check
       - run: make lint
       - run: make test
       - run: make test-util-check
       - run: make mcp-check
       - run: make wasm-check
+      - run: make wasm-host-check
       - run: make scripts-check
 
   # The platform-specific slivers are the apple-native keyring backend in

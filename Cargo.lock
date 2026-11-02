@@ -1589,6 +1589,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pk-cli-mcp-wasm-demo"
+version = "0.12.0"
+dependencies = [
+ "pk-cli-core",
+ "pk-cli-mcp",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pk-cli-scrape"
 version = "0.12.0"
 

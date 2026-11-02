@@ -17,7 +17,7 @@
 //!
 //! While serving, stdout carries the protocol and nothing else; diagnostics
 //! go to stderr. Each call runs on Tokio's blocking pool through
-//! [`crate::block_on`], outside any Tokio context, so a toolset may call
+//! [`pk_cli_core::block_on`], outside any Tokio context, so a toolset may call
 //! blocking provider code (`reqwest::blocking`) directly, and read-only calls
 //! the client sends together run in parallel.
 
@@ -32,8 +32,8 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
 use serde_json::Value;
 
-use crate::block_on::block_on;
 use crate::toolset::{call_tool, instructions, tools_list, Toolset};
+use pk_cli_core::block_on;
 
 /// Arguments of the `mcp` subcommand.
 #[derive(clap::Args, Debug, Clone, Default)]

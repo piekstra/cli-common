@@ -113,15 +113,25 @@ README.md, "Self-view for family desktop apps". Its macOS effects live in
 - `make verify` (format check, clippy `-D warnings`, tests,
   `test-util-check`: `pk-cli-browser` linted and tested with its
   `test-util` feature off and on, `mcp-check`: `pk-cli-mcp` linted and
-  tested feature by feature, `wasm-check`: `pk-cli-mcp`'s core built for
+  tested feature by feature, `wasm-check`: `pk-cli-core` and
+  `pk-cli-mcp` (core and `wasm` feature) built and linted for
   `wasm32-unknown-unknown` (`rustup target add wasm32-unknown-unknown`
-  once), and `scripts-check`: shellcheck plus the self-view tests; the
+  once), `wasm-host-check`: the demo module run under the reference
+  JavaScript host in Node 22.18 or later, and `scripts-check`: shellcheck
+  plus the self-view tests; the
   `Makefile` defines them and CI runs the same targets) and
   `cargo deny check` must be clean before committing.
 - **`pk-cli-mcp`'s default features stay WebAssembly-clean**: no Tokio,
   keyring, processes or blocking I/O outside its `stdio` and `test-util`
   features, so a CLI's toolset can run in a deploy-your-own Worker
-  (DESIGN.md §1.9, §2.3).
+  (DESIGN.md §1.9, §2.3). Its `wasm` feature has no dependencies at all:
+  a module's only imports are the five `pk_host` functions, so nothing
+  that pulls in `wasm-bindgen` may join it.
+- **The WebAssembly ABI and its host change together.** The ABI is
+  documented in `crates/pk-cli-mcp/src/wasm/mod.rs`; the reference host is
+  `crates/pk-cli-mcp/js/pk-host.ts`, and a Worker copies that file rather
+  than reimplementing it. A change that breaks an existing module bumps
+  `ABI_VERSION`.
 - `example-cli` must keep compiling and demonstrating the full surface — it is
   the template new CLIs copy.
 - Releases: bump `workspace.package.version`, update `CHANGELOG.md`, tag

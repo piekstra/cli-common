@@ -33,6 +33,13 @@ status here.
 - [ ] Tests call `pk_cli_mcp::conformance::assert_conforms` and run each tool through `assert_fits` on scrubbed fixtures, offline; all definitions together stay under 8,000 characters
 - [ ] Releases attach `<bin>-<version>.mcpb` (binary server type; macOS universal, Linux and Windows x86_64; credential as `sensitive` `user_config`), and a `claude-plugins` plugin's `.mcp.json` runs `<bin> mcp`
 
+For path B (the deploy-your-own Worker), an official-API CLI also:
+
+- [ ] Writes its provider client once against `pk_cli_core::transport::Transport` (`pk_cli_http::BlockingTransport` natively, `pk_cli_mcp::wasm::HostTransport` in the Worker), behind a default `native` feature that gates the keychain, clap, self-update and blocking HTTP, and a `wasm` feature with `pk_cli_mcp::export_wasm!`
+- [ ] Takes randomness and time from `pk_cli_mcp::wasm::{fill_random, now_ms}` on wasm32, so no dependency pulls in `wasm-bindgen`; the module imports only `pk_host`
+- [ ] Builds clean with clippy for `wasm32-unknown-unknown` in CI, and tests its Worker toolset natively through `pk_cli_mcp::wasm::testing`
+- [ ] Releases attach `<bin>-mcp-<version>.wasm` and its `.sha256`
+
 ## Family status
 
 Drift notes are from the 2026-07-19 family audit.
@@ -108,13 +115,14 @@ Google Home's, replacing a hand-kept device→room table. Producers declare
 
 ## MCP profile (DESIGN.md §1.9)
 
-| CLI | Tools | Path A packaging |
-|---|---|---|
-| example-cli | demo: `example_devices` (paged read), `example_device_rename` (write) | `mcp` subcommand and a stdio end-to-end test; not released |
-| coinbase-cli (`cbase`) | pilot: `coinbase_accounts`, `coinbase_transactions` | `.mcpb` on each release from v0.2.0; `coinbase-cli` plugin in `claude-plugins` |
+| CLI | Tools | Path A packaging | Path B module |
+|---|---|---|---|
+| example-cli | demo: `example_devices` (paged read), `example_device_rename` (write) | `mcp` subcommand and a stdio end-to-end test; not released | none |
+| pk-cli-mcp-wasm-demo | ABI test tools | none | built and run under the reference host in CI; not released |
+| coinbase-cli (`cbase`) | pilot: `coinbase_accounts`, `coinbase_transactions` | `.mcpb` on each release from v0.2.0; `coinbase-cli` plugin in `claude-plugins` | not yet |
 
-Consumers: Claude Code, Claude Desktop, and (path B, in design) a
-deploy-your-own Cloudflare Worker reached from claude.ai. The `cli-mcp`
+Consumers: Claude Code, Claude Desktop, and (path B) a deploy-your-own
+Cloudflare Worker reached from claude.ai. The `cli-mcp`
 server's generic one-passthrough-tool-per-CLI registration stays for CLIs
 without a profile toolset.
 

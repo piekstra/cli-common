@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -405,12 +405,16 @@ credentials never leave hardware or an account they control.
 | **A: local** `<bin> mcp` | the user's computer, over stdio | Claude Code (a plugin's `.mcp.json`, or `claude mcp add`), Claude Desktop (an `.mcpb` bundle from the CLI's release) | the OS keychain (`<bin> auth login`, §1.7), or environment variables the client fills from its own secure store (an `.mcpb`'s `sensitive` `user_config`) |
 | **B: deploy-your-own Worker** | a Cloudflare Worker in the user's own free account | claude.ai on the web and mobile, as a remote connector | the Worker's secrets, in the user's account. Official-API CLIs run inside the Worker as Rust compiled to WebAssembly; portal CLIs are forwarded through the user's own Cloudflare Tunnel to their computer, which runs path A |
 
-Path B is designed separately (`connector/`). It reuses this profile's core:
-the definitions, argument handling, shaping and errors a CLI writes for path
-A are what B runs, which is why the core of `pk-cli-mcp` builds for
-`wasm32-unknown-unknown`. The provider underneath is per target (blocking
-HTTP and the keychain natively, the Worker's `fetch` in B), so a toolset
-meant for both reaches it through a seam it awaits (§2.3).
+Path B reuses this profile's core: the definitions, argument handling,
+shaping and errors a CLI writes for path A are what B runs, which is why the
+core of `pk-cli-mcp` builds for `wasm32-unknown-unknown`. A CLI releases its
+toolset as one self-contained WebAssembly module (`<bin>-mcp-<version>.wasm`,
+built with `pk_cli_mcp::export_wasm!`), and the Worker runs it through the
+reference host (§2.3). Only the last step of a provider request is per
+target: the provider client is written once against
+`pk_cli_core::transport::Transport`, sent by `pk_cli_http::BlockingTransport`
+natively and by `pk_cli_mcp::wasm::HostTransport` (the Worker's `fetch` and
+WebCrypto) in B, behind a provider seam the toolset awaits (§2.3).
 
 #### Tools
 
@@ -543,14 +547,15 @@ AGENTS.md, same house style as the CLIs.
 | `pk-cli-config` | `~/.config/<bin>/config.toml` load/save, typed get/set, `config` subcommand impl, `--config` override | four `config.rs` variants |
 | `pk-cli-selfupdate` | GitHub-release check + in-place replace, `--check`/`-y`/`--json`, `self-update/v1` DTO, release-asset naming convention | ~580 duplicated lines across 4 repos |
 | `pk-cli-auth` | `AuthCmd` clap enum + driver trait: CLI supplies `verify()`/`login()`, crate supplies status DTO (`auth-status/v1`), logout, prompting rules; `otp`, the one-time-code login (request, park for `--code`, mailbox read or prompt) | four auth command modules; the per-CLI park-and-resume code loops |
-| `pk-cli-http` | reqwest client builder (UA, cookie store, timeouts, retry-with-backoff), `api` passthrough command impl, error→exit-code-5 mapping | per-CLI `client.rs` boilerplate (session logic stays per-CLI) |
+| `pk-cli-http` | reqwest client builder (UA, cookie store, timeouts, retry-with-backoff), `BlockingTransport` (that client behind core's `Transport`), `api` passthrough command impl, error→exit-code-5 mapping | per-CLI `client.rs` boilerplate (session logic stays per-CLI) |
+| `pk-cli-core` (transport) | the seam a provider client is written against so it runs natively and in a WebAssembly Worker: `HttpRequest` (query parameters percent-encoded), `HttpResponse` (status and body text), the async `Transport` trait with no `Send` bound (`send`, and `sign_es256` for platform ECDSA, `None` by default), and `block_on` to drive a blocking transport's futures | a per-CLI `http.rs` seam, and a second copy of every provider client for the Worker |
 | `pk-cli-core` (list) | profile-agnostic list primitives — `Paged<T>` envelope + `RangeArgs` (`--limit`/`--since`/`--until`) — shared by every domain profile | duplicated paging/range structs, and non-utility CLIs depending on `pk-cli-utility` just to page |
 | `pk-cli-utility` | the `utility/v1` domain profile (§1.8): `UtilitySummary`, `Statement`, `Payment`, `UsagePeriod`, `Transaction` (re-exports core's `Paged`/`RangeArgs`) | utiman's per-provider `balance-fields`/`scale`/`items-path` manifest hacks |
 | `pk-cli-documents` | the `documents/v1` domain profile (§1.8): `Document`, `SavedDocument`, `DownloadBatch`, `OpenedDocument` — list & download a portal's published files | `organize-scans`' per-CLI download-command adapter table |
 | `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages: elements, attributes, table rows/cells, entity decoding — all total, never panicking | a DOM-parser dependency, and the ad-hoc `str::find` scraping each portal CLI grows on its own |
 | `pk-cli-drive` | state in the owner's Drive (§2.1): one `Backend` over a mounted folder or an rclone remote, the stale-while-revalidate read cache in front of the remote (`CachedRemote`), its bounded background refresh, and owner-only file output (`private_file`) | tax-cli's `drive.rs` + `cache.rs` + `private_file.rs`, and the copy every other CLI that keeps state in Drive would write |
 | `pk-cli-browser` | browser sign-in (§2.2): a scratch-profile Chrome the owner signs in through (`Launch`, a `Browser` guard that kills it and removes the profile on drop), and the web session read back over the DevTools protocol (`Capture`: exact hosts, an in-page expression, `HttpOnly`-capable cookies, a domain's whole jar, the CLI's `confirm` check, a watched request or a request log, the user agent) as `Secret`s, the tab closed the moment it is read; the `--browser` flag (`BrowserArgs`) | the browser-login module `sfi`, `wfr` and `carta` each embed, and the DevTools-console paste `m1f`, `rhd` and `nlnt` ask of the owner |
-| `pk-cli-mcp` | the MCP profile (§1.9, §2.3): tool definitions with schemars schemas and explicit annotations (`ToolDef`), structured-plus-text results (`ToolOutput`, `CallToolResult`), the `Toolset` trait (async, no `Send` bound), list shaping (`ListArgs`, `PageRequest`, `Page`: limits, filter-bound cursors, `response_format`, the size budget), exit codes as actionable tool errors (`ToolError`), the standard server instructions; a core that builds for WebAssembly, a `stdio` feature (`<bin> mcp` on rmcp) and a `test-util` conformance check | per-CLI MCP wrappers, and the `cli-mcp` server's one generic passthrough tool per CLI |
+| `pk-cli-mcp` | the MCP profile (§1.9, §2.3): tool definitions with schemars schemas and explicit annotations (`ToolDef`), structured-plus-text results (`ToolOutput`, `CallToolResult`), the `Toolset` trait (async, no `Send` bound), list shaping (`ListArgs`, `PageRequest`, `Page`: limits, filter-bound cursors, `response_format`, the size budget), exit codes as actionable tool errors (`ToolError`), the standard server instructions; a core that builds for WebAssembly, a `stdio` feature (`<bin> mcp` on rmcp), a `wasm` feature (the toolset as a self-contained WebAssembly module on a raw ABI, `HostTransport`, and the reference JavaScript host `js/pk-host.ts`) and a `test-util` conformance check | per-CLI MCP wrappers, the `cli-mcp` server's one generic passthrough tool per CLI, and per-CLI `wasm-bindgen` glue |
 
 Each crate is small and independent; a CLI adopts them piecemeal. Provider
 scraping/session logic (tojfl's DNN dance, xfin's browser-session replay) stays
@@ -768,15 +773,17 @@ impl<S: Source> Toolset for MyTools<S> {
 | Part | |
 |---|---|
 | Core (default features) | builds for `wasm32-unknown-unknown`: no Tokio, keyring, processes or blocking I/O (`make wasm-check`, in CI). `Toolset::call` is an `async fn` without a `Send` bound, so a single-threaded WebAssembly host awaits it directly |
-| The provider seam | what the two hosts share stops at the provider. Natively (`stdio`) the `call` future is polled with **no Tokio reactor**, so blocking code works and reactor-bound code (async `reqwest`, `tokio::time`) panics; a Worker has no blocking I/O at all. A toolset meant for both awaits a provider trait (async methods, no `Send` bound) with one implementation per target; one that only runs natively may block in `call` directly |
+| The provider seam | what the two hosts share stops at the provider. Natively (`stdio`) the `call` future is polled with **no Tokio reactor**, so blocking code works and reactor-bound code (async `reqwest`, `tokio::time`) panics; a Worker has no blocking I/O at all. A toolset meant for both awaits a provider trait (async methods, no `Send` bound) with one implementation per target; one that only runs natively may block in `call` directly. For an HTTP provider the per-target part shrinks to the transport: write the client once, generic over `pk_cli_core::transport::Transport`, give it `pk_cli_http::BlockingTransport` natively (its futures finish on the first poll; commands drive them with `pk_cli_core::block_on`) and `pk_cli_mcp::wasm::HostTransport` in the Worker |
 | The WASM boundary | MCP-shaped JSON, so a host passes it through: `tools_list_json` is the `tools/list` result (`{"tools": [...]}`), `call_tool_json(&toolset, &params)` the `tools/call` result (`CallToolResult` JSON, or a JSON-RPC error object for an unknown tool), `Server::server_info_json` and `instructions` the rest of what a server announces. Protocol-version envelope fields (2026-07-28's `resultType`, `ttlMs`, `cacheScope`, `_meta` identity) are the host's. The crate docs hold the full contract |
 | `stdio` feature | the `mcp` subcommand: `McpArgs` (with `--list-tools`) and `run`, on the official Rust SDK (`rmcp` 3.8) over stdin/stdout. Each call runs on Tokio's blocking pool through the crate's own executor, outside any Tokio context, so blocking provider code (`reqwest::blocking`) runs unchanged and parallel read-only calls run in parallel |
+| `wasm` feature | the toolset as a WebAssembly module for path B. `export_wasm!(factory)` exports ABI version 1 (documented in `src/wasm/mod.rs`): the module imports only five `pk_host` functions (`now_ms`, `random`, `fetch`, `sign_es256`, `log`) and exports `pk_describe` (serverInfo, instructions, tools), `pk_call`/`pk_poll`/`pk_complete`/`pk_drop` (a `tools/call` as a task the host polls while it settles the `fetch` and signature operations the task started) and buffer management. No `wasm-bindgen`: a module is one `.wasm` with no JavaScript glue, pinned by its SHA-256, and one host serves every module. The factory builds the toolset from the host's per-call config JSON (credentials from the Worker's secrets) and is also called with `null` to describe, so it must not fail; `InWorker` gives every instruction and auth remedy the Worker's wording (credentials are Worker secrets, not `<bin> auth login`). `HostTransport` sends through the host's `fetch` (never following a redirect) and signs ES256 with its WebCrypto, falling back to Rust where the host has none. A module's randomness and clock are `wasm::fill_random` and `wasm::now_ms` (`getrandom`'s `wasm_js` backend and `SystemTime` are unavailable). `js/pk-host.ts` is the reference host: it checks a module's imports, exports and ABI version, runs calls concurrently, caches imported keys per isolate, and replaces an instance that traps (a panic, logged first) with a fresh one. Build a module with `cargo rustc --lib --crate-type cdylib --release --target wasm32-unknown-unknown --no-default-features --features wasm`; `make wasm-host-check` runs `pk-cli-mcp-wasm-demo` that way under the host in Node. With `test-util`, `wasm::testing::call` runs a Worker toolset natively through the same ABI functions, the test answering each operation |
 | `test-util` feature | `conformance::assert_conforms` (names, titles, all four hints, `requiresUserInteraction` on writes, three-sentence descriptions, a flat input object with every argument described, output schemas, definitions under 8,000 characters, stable order, the standard instructions) and `conformance::assert_fits` (a fixture-driven result is a success, under the size budget, and matches its output schema with no undeclared field), plus `conformance::call` and `block_on`. A dev-dependency only |
 
-The crate needs Rust 1.88 (`rmcp`). `example-cli mcp` is the worked example:
-a paged read (`example_devices`) and a write (`example_device_rename`), its
-unit tests run the conformance check, and `tests/mcp_stdio.rs` drives the
-real binary over stdio as a client would.
+The crate needs Rust 1.88 (`rmcp`; `Waker::noop` in `wasm`). `example-cli
+mcp` is the worked example for path A: a paged read (`example_devices`) and
+a write (`example_device_rename`), its unit tests run the conformance check,
+and `tests/mcp_stdio.rs` drives the real binary over stdio as a client
+would. `pk-cli-mcp-wasm-demo` is the worked example for path B's module.
 
 ### Versioning & consumption
 

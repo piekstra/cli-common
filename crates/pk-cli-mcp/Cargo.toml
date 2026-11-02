@@ -29,6 +29,13 @@ tokio = { workspace = true, optional = true }
 default = []
 # The rmcp stdio server and the clap `mcp` subcommand. Native only.
 stdio = ["dep:clap", "dep:rmcp", "dep:tokio"]
+# `wasm::*` and `export_wasm!`: the toolset as a WebAssembly module for the
+# deploy-your-own Worker, on a raw ABI with no JavaScript glue, and
+# `HostTransport`, the host's `fetch` and WebCrypto behind
+# `pk_cli_core::transport::Transport`. No dependencies: it builds natively too,
+# where the host is a stand-in a CLI's tests drive (`wasm::testing`, with
+# `test-util`).
+wasm = []
 # The conformance checks and call helpers a CLI's tests use. Declare it under
 # `[dev-dependencies]` only, so the shipped binary never carries it.
 test-util = []

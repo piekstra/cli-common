@@ -136,7 +136,7 @@ impl Server {
 /// argument parsing, filtering, shaping and errors. The provider itself is
 /// per target, because the two hosts accept different I/O:
 ///
-/// - **stdio (native):** the future is polled by the crate's own `block_on`
+/// - **stdio (native):** the future is polled by `pk_cli_core::block_on`
 ///   on a Tokio blocking thread, **with no Tokio reactor**. Blocking code
 ///   (`reqwest::blocking`, the keychain) works; anything that needs a
 ///   reactor (async `reqwest`, `tokio::time`) panics.
@@ -164,6 +164,22 @@ pub trait Toolset {
     fn server(&self) -> Server;
     fn tools(&self) -> Vec<ToolDef>;
     async fn call(&self, name: &str, args: Value) -> Result<ToolOutput, ToolError>;
+}
+
+/// A borrowed toolset is a toolset, so a wrapper (a host's own wording,
+/// a test double) can hold one by reference.
+impl<T: Toolset + ?Sized> Toolset for &T {
+    fn server(&self) -> Server {
+        (**self).server()
+    }
+
+    fn tools(&self) -> Vec<ToolDef> {
+        (**self).tools()
+    }
+
+    async fn call(&self, name: &str, args: Value) -> Result<ToolOutput, ToolError> {
+        (**self).call(name, args).await
+    }
 }
 
 /// The standard server instructions, plus the server's own.
@@ -360,8 +376,8 @@ fn kind_of(v: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_on::block_on;
     use crate::shape::{ListArgs, PageRequest};
+    use pk_cli_core::block_on;
     use schemars::JsonSchema;
     use serde::Deserialize;
 

@@ -13,6 +13,7 @@ members = [
     "crates/pk-cli-drive",
     "crates/pk-cli-browser",
     "crates/pk-cli-mcp",
+    "crates/pk-cli-mcp-wasm-demo",
     "crates/example-cli",
 ]
 
