@@ -130,7 +130,7 @@ Who holds what:
 | Cloudflare | runs your Worker | the access any hosting provider has to what it runs |
 | Claude (Anthropic) | an access token (1 hour) and a refresh token for your Worker | call the read-only tools while connected; sees the results in your conversation |
 | Coinbase | the key's public half | check the Worker's signed requests |
-| The authors of this code | nothing: no service, no telemetry | publish new versions, which reach your Worker only when you update `modules.json` or merge them |
+| The authors of this code | nothing: no service, no telemetry | publish new versions, which reach your Worker only when you update `modules.json` or copy them in |
 | Anyone else | your Worker's URL | open the passphrase page; ten wrong passphrases in an hour lock it and `/revoke` until the hour ends |
 
 **The key is read-only twice over.** Coinbase refuses any trade or transfer

@@ -17,7 +17,13 @@ node mock/coinbase-mock.mjs 8788 >.e2e/mock.log 2>&1 &
 MOCK=$!
 BASE=http://127.0.0.1:8787
 DEV=
-trap 'kill $MOCK $DEV 2>/dev/null || true' EXIT INT TERM
+# A process and everything under it, children first: killing npx alone can
+# leave wrangler's workerd serving the port (it does on Linux).
+kill_tree() {
+  for child in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$child"; done
+  kill "$1" 2>/dev/null || true
+}
+trap 'kill_tree $MOCK; [ -z "$DEV" ] || kill_tree $DEV' EXIT INT TERM
 
 # The base URL is passed here as well as in .dev.vars, so no edit there can
 # send test traffic to the real API. Local KV persists in .e2e/state, so a
@@ -39,11 +45,17 @@ start_worker() {
 }
 
 stop_worker() {
-  kill "$DEV" 2>/dev/null || true
+  kill_tree "$DEV"
   wait "$DEV" 2>/dev/null || true
-  # workerd can outlive wrangler for a moment; wait for the port to close.
+  DEV=
+  # Until the port closes: a Worker still answering there would be the old
+  # one, and the checks after a restart would test nothing.
   i=0
-  while curl -s -o /dev/null "$BASE/" && [ $i -lt 30 ]; do i=$((i + 1)); sleep 1; done
+  while curl -s -o /dev/null --max-time 2 "$BASE/"; do
+    i=$((i + 1))
+    [ $i -lt 30 ] || failed "the Worker still answers on $BASE after it was stopped"
+    sleep 1
+  done
 }
 
 failed() {
