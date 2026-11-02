@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- `pk-cli-core`: `NO_COLOR` follows no-color.org — any non-empty value
+  disables color. `CommonArgs` read it through clap's `env`, which parses a
+  boolean, so the conventional `NO_COLOR=1` failed every command with a
+  usage error (exit 2). It is now the `--no-color` flag's default.
+  `example-cli`'s `tests/no_color.rs` runs the binary under each value.
+- `pk-cli-auth`: `GroMailbox::credential_ref` passes the ref to `gro` as
+  `<SERVICE>_CREDENTIAL_REF` in the child's environment
+  (`GOOGLE_READONLY_CREDENTIAL_REF` for `google-readonly/<profile>`), which
+  gro 1.x and 2.x both read. It passed `--ref`, which gro 2.x rejects, so a
+  named mailbox profile failed every look. The ref must now be
+  `<service>/<profile>`.
+- `pk-cli-auth`: the code extractor treats "one-time" as introducing a code,
+  so an email reading "your one-time password is: 123456" yields its code
+  even when it carries other code-length numbers.
+
 ## v0.15.0 — 2026-11-02
 
 - **`pk-cli-mcp` feature `http`** (includes `stdio`): `<bin> mcp --http

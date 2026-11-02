@@ -123,8 +123,10 @@ impl Default for CodeShape {
 }
 
 /// Words that introduce a code in a provider's email ("your verification code
-/// is 123456"). Matched case-insensitively.
-const KEYWORDS: &[&str] = &["code", "passcode", "otp", "pin", "verification"];
+/// is 123456", "your one-time password is: 123456"). Matched
+/// case-insensitively. `password` alone is left out: it introduces a password
+/// reset link far more often than a code.
+const KEYWORDS: &[&str] = &["code", "passcode", "otp", "pin", "verification", "one-time"];
 
 /// How far after a keyword a code may sit and still count as introduced by it.
 const KEYWORD_REACH: usize = 40;
@@ -277,5 +279,13 @@ mod tests {
             extract_code(text, CodeShape::default()).unwrap().expose(),
             "246810"
         );
+    }
+
+    #[test]
+    fn a_one_time_password_is_introduced_even_beside_other_numbers() {
+        let text = "Your requested one-time password is: 482917. Questions? Call \
+                    support at 800 555 0100 or quote ticket 731905.";
+        let code = extract_code(text, CodeShape::digits(6, 6)).unwrap();
+        assert_eq!(code.expose(), "482917");
     }
 }
