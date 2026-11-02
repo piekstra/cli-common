@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.15.0 — 2026-11-02
 
 - **`pk-cli-mcp` feature `http`** (includes `stdio`): `<bin> mcp --http
   --port <PORT>` serves the CLI's tools over stateless Streamable HTTP
