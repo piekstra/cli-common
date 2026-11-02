@@ -1,0 +1,65 @@
+[
+  {
+    "id": "20260814000000000::00000000-0000-4000-8000-000000000031",
+    "activity_type": "FILL",
+    "transaction_time": "2026-08-14T13:31:02.000Z",
+    "type": "fill",
+    "price": "105.1000",
+    "qty": "2",
+    "side": "sell",
+    "symbol": "SMPL",
+    "leaves_qty": "0",
+    "order_id": "00000000-0000-4000-8000-000000000041",
+    "cum_qty": "2",
+    "order_status": "filled"
+  },
+  {
+    "id": "20260630000000000::00000000-0000-4000-8000-000000000032",
+    "activity_type": "DIV",
+    "date": "2026-06-30",
+    "net_amount": "12.34",
+    "symbol": "ETFX",
+    "qty": "25",
+    "per_share_amount": "0.4936",
+    "status": "executed"
+  },
+  {
+    "id": "20260630000000001::00000000-0000-4000-8000-000000000033",
+    "activity_type": "DIVNRA",
+    "date": "2026-06-30",
+    "net_amount": "-1.85",
+    "description": "REV: Dividend adjusted (NRA Withheld)",
+    "symbol": "ETFX",
+    "status": "executed"
+  },
+  {
+    "id": "20260401000000000::00000000-0000-4000-8000-000000000034",
+    "activity_type": "INT",
+    "date": "2026-04-01",
+    "net_amount": "0.42",
+    "description": "Interest on credit balance",
+    "status": "executed"
+  },
+  {
+    "id": "20260314000000000::00000000-0000-4000-8000-000000000035",
+    "activity_type": "FILL",
+    "transaction_time": "2026-03-14T14:00:00.000Z",
+    "type": "partial_fill",
+    "price": "100.2500",
+    "qty": "6",
+    "side": "buy",
+    "symbol": "SMPL",
+    "leaves_qty": "4",
+    "order_id": "00000000-0000-4000-8000-000000000042",
+    "cum_qty": "6",
+    "order_status": "partially_filled"
+  },
+  {
+    "id": "20260131000000000::00000000-0000-4000-8000-000000000036",
+    "activity_type": "FEE",
+    "date": "2026-01-31",
+    "net_amount": "-0.02",
+    "description": "REG fee",
+    "status": "executed"
+  }
+]

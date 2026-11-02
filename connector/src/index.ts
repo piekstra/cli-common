@@ -6,12 +6,19 @@
 //   /revoke              disconnect every client (passphrase)
 //   /oauth/token, /oauth/register, /.well-known/*   workers-oauth-provider
 //
-// The tools are the CLIs' own Rust, compiled to WebAssembly and published
-// with each CLI's release (src/modules.ts). This file never interprets them:
-// `tools/list` is what the modules describe, a `tools/call` goes to the
-// module that owns the tool with the Worker secrets it reads, and the
-// module's CallToolResult comes back unchanged. src/pk-host.ts runs the
-// modules; it is a copy of cli-common's reference host.
+// The tools come from two kinds of module, and every module is optional:
+//
+// - In-Worker modules (src/modules.ts): an official-API CLI's own Rust,
+//   compiled to WebAssembly and published with its release. One is on when
+//   any of its secrets is set (not empty, not `none`). src/pk-host.ts runs
+//   them; it is a copy of cli-common's reference host.
+// - Home modules (src/home.ts): a portal CLI running `<bin> mcp --http` on
+//   the owner's own computer, reached through the owner's Cloudflare Tunnel.
+//   One is on when its HOME_<NAME>_TOKEN secret is set.
+//
+// This file never interprets a tool: `tools/list` is what the modules
+// describe, a `tools/call` goes to the module that owns the tool, and its
+// CallToolResult comes back unchanged.
 
 import { OAuthProvider, AuthorizationError, OAuthError } from "@cloudflare/workers-oauth-provider";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
@@ -21,6 +28,8 @@ import type { CallToolResult, Tool } from "@modelcontextprotocol/server";
 import { WasmToolset } from "./pk-host.ts";
 import { MODULES } from "./modules.ts";
 import type { ToolModule } from "./modules.ts";
+import { isSet, moduleEnabled } from "./settings.ts";
+import { callHome, homeInstructions, homeModules, knownListing, listing, problemResult } from "./home.ts";
 import { PAGE_CSP, authorizePage, messagePage, revokePage } from "./pages.ts";
 import {
   MIN_PASSPHRASE,
@@ -41,11 +50,12 @@ export interface Env {
    * loopback ones (src/owner.ts). */
   EXTRA_REDIRECT_URIS?: string;
   /** The modules' own secrets and vars (src/modules.ts), e.g.
-   * CBASE_API_KEY_NAME. */
+   * CBASE_API_KEY_NAME, and the home modules' (src/home.ts): HOME_<NAME>_TOKEN
+   * with a HOME_<NAME> VPC service binding or HOME_<NAME>_URL. */
   [moduleConfig: string]: unknown;
 }
 
-const CONNECTOR_VERSION = "0.1.0";
+const CONNECTOR_VERSION = "0.2.0";
 /** The one user: whoever knows the passphrase. */
 const OWNER = "owner";
 const INVALID_PARAMS = -32602;
@@ -55,24 +65,29 @@ interface Loaded {
   toolset: WasmToolset;
 }
 
-interface Catalog {
+interface Described {
+  loaded: Loaded;
   tools: Tool[];
-  owner: Map<string, Loaded>;
   instructions: string;
 }
 
-// One instance of each module per isolate, made on first use. A module that
-// traps is replaced by pk-host on its next call.
+interface Catalog {
+  modules: Described[];
+  owner: Map<string, Loaded>;
+}
+
+// One instance of each module per isolate, made on first use. Every module
+// is described, set up or not, so two that define the same tool fail at once.
+// A module that traps is replaced by pk-host on its next call.
 let catalog: Catalog | null = null;
 function tools(): Catalog {
   if (catalog) return catalog;
   const owner = new Map<string, Loaded>();
-  const list: Tool[] = [];
-  const instructions: string[] = [];
+  const modules: Described[] = [];
   for (const module of MODULES) {
     const loaded = { module, toolset: new WasmToolset(module.wasm, { label: module.name }) };
     const description = loaded.toolset.describe();
-    instructions.push(description.instructions);
+    const list: Tool[] = [];
     for (const tool of description.tools) {
       const other = owner.get(tool.name);
       if (other) throw new Error(`the ${module.name} and ${other.module.name} modules both define ${tool.name}`);
@@ -80,8 +95,9 @@ function tools(): Catalog {
       // The module's JSON is the contract; the cast only names it.
       list.push(tool as unknown as Tool);
     }
+    modules.push({ loaded, tools: list, instructions: description.instructions });
   }
-  catalog = { tools: list, owner, instructions: instructions.join("\n\n") };
+  catalog = { modules, owner };
   return catalog;
 }
 
@@ -90,25 +106,69 @@ function configFor(module: ToolModule, env: Env): Record<string, string> {
   const config: Record<string, string> = {};
   for (const key of module.config) {
     const value = env[key];
-    if (typeof value === "string" && value !== "") config[key] = value;
+    if (isSet(value)) config[key] = value;
   }
   return config;
 }
 
-/** A fresh low-level MCP server per request, wired straight to the modules. */
-function mcpServer(env: Env): Server {
-  const { tools: list, owner, instructions } = tools();
+const NOTHING_SET_UP =
+  "No tools are set up in this connector yet. Its owner turns a module on by setting its secrets in the " +
+  "Worker's settings (Variables and Secrets); the connector's README lists them.";
+
+/** A fresh low-level MCP server per request, wired straight to the modules
+ * the owner set up. */
+async function mcpServer(env: Env): Promise<Server> {
+  const { modules, owner } = tools();
+  const enabled = modules.filter((m) => moduleEnabled(m.loaded.module, env));
+  const on = new Set(enabled.map((m) => m.loaded.module.name));
+  const local = new Set(enabled.flatMap((m) => m.tools.map((t) => t.name)));
+  const home = homeModules(env);
+
+  // Each home CLI's own instructions, from the last list it gave; asking
+  // the computer here would cost every request a round trip.
+  const known = await Promise.all(home.modules.map((m) => knownListing(env, m)));
+  const instructions = [
+    ...enabled.map((m) => m.instructions),
+    ...known.flatMap((l) => (l?.instructions ? [l.instructions] : [])),
+    homeInstructions(home.modules, home.problems),
+  ].filter((text) => text !== "");
+  if (enabled.length === 0 && home.modules.length === 0) instructions.unshift(NOTHING_SET_UP);
+
   const server = new Server(
     { name: "pk-cli-connector", title: "Personal CLI connector", version: CONNECTOR_VERSION },
-    { capabilities: { tools: {} }, instructions },
+    { capabilities: { tools: {} }, instructions: instructions.join("\n\n") },
   );
-  server.setRequestHandler("tools/list", async () => ({ tools: list }));
+  server.setRequestHandler("tools/list", async () => {
+    const list = enabled.flatMap((m) => m.tools);
+    const listings = await Promise.all(home.modules.map((m) => listing(env, m)));
+    const seen = new Set(local);
+    for (const l of listings) {
+      for (const tool of l?.tools ?? []) {
+        // An in-Worker tool keeps its name; a home server cannot shadow it.
+        if (seen.has(tool.name)) continue;
+        seen.add(tool.name);
+        list.push(tool);
+      }
+    }
+    return { tools: list };
+  });
   server.setRequestHandler("tools/call", async (request) => {
-    const loaded = owner.get(request.params.name);
-    if (!loaded) throw new ProtocolError(INVALID_PARAMS, `Unknown tool: ${request.params.name}`);
-    const answer = await loaded.toolset.call(request.params, configFor(loaded.module, env));
-    if ("error" in answer) throw new ProtocolError(answer.error.code, answer.error.message);
-    return answer.result as CallToolResult;
+    const name = request.params.name;
+    const loaded = owner.get(name);
+    if (loaded && on.has(loaded.module.name)) {
+      const answer = await loaded.toolset.call(request.params, configFor(loaded.module, env));
+      if ("error" in answer) throw new ProtocolError(answer.error.code, answer.error.message);
+      return answer.result as CallToolResult;
+    }
+    const module = local.has(name) ? undefined : home.modules.find((m) => name.startsWith(m.prefix));
+    if (module) {
+      const answer = await callHome(module, request.params);
+      if ("rpcError" in answer) throw new ProtocolError(answer.rpcError.code, answer.rpcError.message);
+      return answer.result;
+    }
+    const problem = home.problems.find((p) => name.startsWith(p.prefix));
+    if (problem) return problemResult(problem);
+    throw new ProtocolError(INVALID_PARAMS, `Unknown tool: ${name}`);
   });
   return server;
 }

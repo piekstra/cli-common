@@ -412,9 +412,16 @@ toolset as one self-contained WebAssembly module (`<bin>-mcp-<version>.wasm`,
 built with `pk_cli_mcp::export_wasm!`), and the Worker runs it through the
 reference host (§2.3). The Worker is [`connector/`](connector/): a template
 each user deploys with Cloudflare's Deploy button, which pins each module by
-release URL and SHA-256, serves every listed CLI's tools as one connector,
-and lets a client connect only with the owner's passphrase (OAuth with
-dynamic registration, codes sent only to Claude's callback or loopback). Only the last step of a provider request is per
+release URL and SHA-256, serves the tools of every module its owner turned
+on (a module is on when its secrets are set; the Deploy form offers each
+pre-filled with `none`) as one connector, and lets a client connect only
+with the owner's passphrase (OAuth with dynamic registration, codes sent
+only to Claude's callback or loopback). A portal CLI is a "home" module
+instead: `<bin> mcp --http` (the `http` feature, §2.3) serves its read-only
+tools on the user's computer at 127.0.0.1, behind a bearer token, and the
+Worker forwards calls for its tool prefix through a Workers VPC binding to
+the user's Cloudflare Tunnel, keeping the last tool list (memory and KV) and
+answering `offline:` at once when the computer does not. Only the last step of a provider request is per
 target: the provider client is written once against
 `pk_cli_core::transport::Transport`, sent by `pk_cli_http::BlockingTransport`
 natively and by `pk_cli_mcp::wasm::HostTransport` (the Worker's `fetch` and

@@ -6,3 +6,4 @@ dist/
 modules/
 mock/.keys/
 .e2e/
+wrangler.e2e.jsonc

@@ -1,6 +1,6 @@
 {
   "name": "pk-cli-connector",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Deploy-your-own Cloudflare Worker that serves piekstra-family CLI tools to Claude (web, desktop, mobile) as a custom MCP connector.",
@@ -10,6 +10,7 @@
     "dev": "wrangler dev --local --ip 127.0.0.1 --port 8787",
     "keys": "node scripts/gen-dummy-key.mjs",
     "mock": "node mock/coinbase-mock.mjs",
+    "mock:alpaca": "node mock/alpaca-mock.mjs",
     "smoke": "sh scripts/smoke.sh",
     "e2e": "sh scripts/e2e.sh",
     "test": "node --test 'test/*.test.ts'",
@@ -32,10 +33,16 @@
         "description": "A long random passphrase, 20 characters or more (for example the output of `openssl rand -base64 24`). You type it on this connector's approval page when you connect Claude; nobody without it can connect. Keep it in your password manager."
       },
       "CBASE_API_KEY_NAME": {
-        "description": "Your Coinbase CDP API key's name, `organizations/…/apiKeys/…`, from the key file Coinbase gives you. Create the key at https://portal.cdp.coinbase.com/projects/api-keys with the View permission only."
+        "description": "Coinbase (optional; leave `none` to skip): your CDP API key's name, `organizations/…/apiKeys/…`, from the key file Coinbase gives you. Create the key at https://portal.cdp.coinbase.com/projects/api-keys with the View permission only."
       },
       "CBASE_API_PRIVATE_KEY": {
-        "description": "That key's private key: the `privateKey` value from the key file, the whole PEM including the BEGIN and END lines. Pasting it on one line is fine."
+        "description": "Coinbase (optional; leave `none` to skip): that key's private key, the `privateKey` value from the key file, the whole PEM including the BEGIN and END lines. Pasting it on one line is fine."
+      },
+      "ALP_API_KEY_ID": {
+        "description": "Alpaca (optional; leave `none` to skip): an API Key ID from your Alpaca dashboard (https://app.alpaca.markets, API Keys). The connector only reads; for paper-trading keys, add a variable ALP_ENV=paper after deploying."
+      },
+      "ALP_API_SECRET_KEY": {
+        "description": "Alpaca (optional; leave `none` to skip): the Secret Key shown with that Key ID (Alpaca shows it once)."
       },
       "OAUTH_KV": {
         "description": "Where the connector keeps OAuth clients, grants and hashed tokens. A new namespace is right."

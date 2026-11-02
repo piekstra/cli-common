@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- `connector/` 0.2.0: every module is optional. A module is on when any of
+  its secrets is set (not empty, not `none`); the Deploy form offers each
+  module's secrets pre-filled with `none`, and a deployer who fills in only
+  Coinbase's gets only Coinbase's tools. With nothing set up, the
+  instructions say so.
+- `connector/`: alpaca-cli's `alpaca_portfolio` and `alpaca_activities`, from
+  its v0.3.0 module (`ALP_API_KEY_ID`, `ALP_API_SECRET_KEY`, optional
+  `ALP_ENV`), with a localhost Alpaca mock that checks the key headers and
+  pages the activity feed.
+- `connector/`: home modules. A portal CLI running `<bin> mcp --http` on the
+  owner's computer is reached through a Workers VPC service binding
+  (`HOME_<NAME>`) to the owner's Cloudflare Tunnel, or a tunnel hostname
+  behind an Access service token (`HOME_<NAME>_URL`), with the bearer token
+  in `HOME_<NAME>_TOKEN`; it serves the tools named `<name>_…`. The tool
+  list is kept in memory and KV, so the tools stay listed while the computer
+  sleeps, and a call pings first, so a sleeping computer answers `offline:`
+  at once. README: the owner's steps (tunnel, VPC service, launchd agent,
+  token) and the home path's threat model.
+- `make connector-check` builds example-cli and runs the e2e with it as a
+  home module behind a local stand-in for the VPC binding, stops it to check
+  the offline answer, and restarts the Worker with each module turned off.
+
 ## v0.15.0 — 2026-11-02
 
 - **`pk-cli-mcp` feature `http`** (includes `stdio`): `<bin> mcp --http
