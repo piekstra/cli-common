@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.12.0 — 2026-11-02
 
 Additive: a new crate and an `example-cli mcp` subcommand; no existing
 crate's API or behaviour changes.
