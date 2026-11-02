@@ -31,13 +31,14 @@ test-util-check:
 	$(CARGO) test -p pk-cli-browser --features test-util
 
 # pk-cli-mcp feature by feature, on the crate alone: the workspace runs
-# above build it with `stdio` and `test-util` both on (example-cli asks for
-# both), so the core alone, the server alone and the test helpers alone
+# above build it with `stdio`, `http` and `test-util` all on (example-cli
+# asks for them), so the core alone, the server alone and the test helpers alone
 # would otherwise go unchecked.
 mcp-check:
 	$(CARGO) clippy -p pk-cli-mcp --all-targets -- -D warnings
 	$(CARGO) test -p pk-cli-mcp
 	$(CARGO) clippy -p pk-cli-mcp --all-targets --features stdio -- -D warnings
+	$(CARGO) clippy -p pk-cli-mcp --all-targets --features http -- -D warnings
 	$(CARGO) clippy -p pk-cli-mcp --all-targets --features test-util -- -D warnings
 	$(CARGO) clippy -p pk-cli-mcp --all-targets --features wasm -- -D warnings
 	$(CARGO) test -p pk-cli-mcp --all-features

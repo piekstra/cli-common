@@ -62,6 +62,12 @@
 //!
 //! - `stdio` (native): `run` and `McpArgs`, the `<bin> mcp` subcommand
 //!   on the official Rust SDK (`rmcp`).
+//! - `http` (native, includes `stdio`): `<bin> mcp --http --port <PORT>`,
+//!   the same tools over stateless Streamable HTTP on 127.0.0.1 behind a
+//!   bearer token, read-only unless `--allow-writes`, for a tunnel from the
+//!   user's own Cloudflare Worker (the connector's "home" modules); and
+//!   `<bin> mcp --new-token`, which makes that token. See [`http`] for the
+//!   rules it enforces.
 //! - `wasm`: [`wasm`] and [`export_wasm!`], the toolset as a WebAssembly
 //!   module for the deploy-your-own Worker on a raw ABI (one `.wasm`, no
 //!   JavaScript glue; the reference host is `js/pk-host.ts`), and
@@ -80,6 +86,8 @@ pub mod toolset;
 
 #[cfg(any(feature = "test-util", test))]
 pub mod conformance;
+#[cfg(feature = "http")]
+pub mod http;
 #[cfg(feature = "stdio")]
 mod stdio;
 #[cfg(feature = "wasm")]
