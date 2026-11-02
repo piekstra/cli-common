@@ -140,12 +140,28 @@ stopped 41234
 `make scripts-check` lints the scripts and runs `scripts/test/self-view.test.sh`,
 which stubs the window list and so needs no display.
 
+## Claude on the web and mobile: deploy your own connector
+
+[`connector/`](connector/) is a Cloudflare Worker each user deploys into their
+own Cloudflare account and adds to Claude as a custom connector. It serves
+official-API CLIs' MCP tools (today coinbase-cli's), each the CLI's own Rust
+compiled to a WebAssembly module and pinned by version and SHA-256. The
+provider keys are the Worker's secrets; only the owner's passphrase connects
+a client. No shared service holds anyone's credentials.
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/piekstra/cli-common/tree/main/connector)
+
+[connector/README.md](connector/README.md) has the walkthrough and the
+threat model.
+
 ## Development
 
 ```console
 cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo run -p example-cli -- --help
+make verify            # the whole Rust gate CI runs
+make connector-check   # connector/: typecheck, tests, local OAuth + MCP e2e (needs Node 22.18+)
 ```
 
 ## License

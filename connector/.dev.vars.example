@@ -1,0 +1,14 @@
+# The Worker's secrets. The Deploy to Cloudflare button asks for each one;
+# for local development, `npm run keys` writes a .dev.vars with dummy values.
+
+# A long random passphrase, 20 characters or more (for example the output of
+# `openssl rand -base64 24`). You type it on the connector's approval page
+# when you connect Claude; nobody without it can connect.
+OWNER_PASSPHRASE=
+
+# Your Coinbase CDP API key, from the key file Coinbase gives you when you
+# create it: its "name" (organizations/.../apiKeys/...) and its "privateKey"
+# (the whole PEM, BEGIN and END lines included; a one-line paste is fine).
+# Give the key the View permission only.
+CBASE_API_KEY_NAME=
+CBASE_API_PRIVATE_KEY=

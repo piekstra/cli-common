@@ -410,7 +410,11 @@ shaping and errors a CLI writes for path A are what B runs, which is why the
 core of `pk-cli-mcp` builds for `wasm32-unknown-unknown`. A CLI releases its
 toolset as one self-contained WebAssembly module (`<bin>-mcp-<version>.wasm`,
 built with `pk_cli_mcp::export_wasm!`), and the Worker runs it through the
-reference host (§2.3). Only the last step of a provider request is per
+reference host (§2.3). The Worker is [`connector/`](connector/): a template
+each user deploys with Cloudflare's Deploy button, which pins each module by
+release URL and SHA-256, serves every listed CLI's tools as one connector,
+and lets a client connect only with the owner's passphrase (OAuth with
+dynamic registration, codes sent only to Claude's callback or loopback). Only the last step of a provider request is per
 target: the provider client is written once against
 `pk_cli_core::transport::Transport`, sent by `pk_cli_http::BlockingTransport`
 natively and by `pk_cli_mcp::wasm::HostTransport` (the Worker's `fetch` and

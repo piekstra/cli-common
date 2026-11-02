@@ -1,0 +1,45 @@
+{
+  "name": "pk-cli-connector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deploy-your-own Cloudflare Worker that serves piekstra-family CLI tools to Claude (web, desktop, mobile) as a custom MCP connector.",
+  "scripts": {
+    "build": "node scripts/fetch-modules.mjs",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --local --ip 127.0.0.1 --port 8787",
+    "keys": "node scripts/gen-dummy-key.mjs",
+    "mock": "node mock/coinbase-mock.mjs",
+    "smoke": "sh scripts/smoke.sh",
+    "e2e": "sh scripts/e2e.sh",
+    "test": "node --test 'test/*.test.ts'",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.4",
+    "@modelcontextprotocol/server": "2.4.0",
+    "agents": "0.32.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261101.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.156.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "OWNER_PASSPHRASE": {
+        "description": "A long random passphrase, 20 characters or more (for example the output of `openssl rand -base64 24`). You type it on this connector's approval page when you connect Claude; nobody without it can connect. Keep it in your password manager."
+      },
+      "CBASE_API_KEY_NAME": {
+        "description": "Your Coinbase CDP API key's name, `organizations/…/apiKeys/…`, from the key file Coinbase gives you. Create the key at https://portal.cdp.coinbase.com/projects/api-keys with the View permission only."
+      },
+      "CBASE_API_PRIVATE_KEY": {
+        "description": "That key's private key: the `privateKey` value from the key file, the whole PEM including the BEGIN and END lines. Pasting it on one line is fine."
+      },
+      "OAUTH_KV": {
+        "description": "Where the connector keeps OAuth clients, grants and hashed tokens. A new namespace is right."
+      }
+    }
+  }
+}
