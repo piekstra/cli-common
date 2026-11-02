@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.14.0 — 2026-11-02
 
 Additive: new modules, a new feature and a new example crate. One move:
 `block_on` now lives in `pk-cli-core` (`pk_cli_core::block_on`);
