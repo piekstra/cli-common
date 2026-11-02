@@ -1,6 +1,6 @@
 [package]
 name = "pk-cli-mcp"
-description = "MCP tools for the piekstra CLI family: a WASM-ready core (tool definitions, results, output shaping, error mapping) a stdio server for `<bin> mcp`, and the same server on 127.0.0.1 for a tunnel (`<bin> mcp --http`)."
+description = "MCP tools for the piekstra CLI family: a WASM-ready core (tool definitions, results, output shaping, error mapping), a stdio server for `<bin> mcp`, and the same server on 127.0.0.1 for a tunnel (`<bin> mcp --http`)."
 version.workspace = true
 edition.workspace = true
 # rmcp 3.8 (the `stdio` feature) needs 1.88. The core alone builds on the
@@ -39,7 +39,7 @@ getrandom = { workspace = true, optional = true }
 [features]
 default = []
 # The rmcp stdio server and the clap `mcp` subcommand. Native only.
-stdio = ["dep:clap", "dep:rmcp", "dep:tokio"]
+stdio = ["dep:clap", "dep:rmcp", "dep:tokio", "tokio/time"]
 # `<bin> mcp --http`: stateless Streamable HTTP on 127.0.0.1 behind a bearer
 # token, read-only tools unless `--allow-writes`, for the connector's "home"
 # modules. Native only; adds the flags to `McpArgs`.

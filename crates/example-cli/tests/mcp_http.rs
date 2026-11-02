@@ -33,24 +33,47 @@ struct Server {
 }
 
 impl Server {
+    /// The server on a free port, listening. A port taken in the moment
+    /// between `free_port` and the server's bind is retried on another; any
+    /// other early exit fails at once with the server's stderr.
     fn start(extra: &[&str]) -> Self {
-        let port = free_port();
-        let child = bin()
-            .args(["mcp", "--http", "--port", &port.to_string()])
-            .args(extra)
-            .env(TOKEN_VAR, TOKEN)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("example-cli starts");
-        let s = Self { child, port };
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while TcpStream::connect(s.addr()).is_err() {
-            assert!(Instant::now() < deadline, "the server did not listen");
-            std::thread::sleep(Duration::from_millis(50));
+        for _ in 0..3 {
+            let port = free_port();
+            let mut child = bin()
+                .args(["mcp", "--http", "--port", &port.to_string()])
+                .args(extra)
+                .env(TOKEN_VAR, TOKEN)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("example-cli starts");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).is_ok() {
+                    return Self { child, port };
+                }
+                if let Some(status) = child.try_wait().unwrap() {
+                    let mut stderr = String::new();
+                    child
+                        .stderr
+                        .take()
+                        .unwrap()
+                        .read_to_string(&mut stderr)
+                        .unwrap();
+                    if stderr.contains("listening on") {
+                        break; // the port was taken: try another
+                    }
+                    panic!("the server exited ({status}) before listening: {stderr}");
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    panic!("the server did not listen on {port} within 20 s");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
         }
-        s
+        panic!("no free port could be bound in three tries");
     }
 
     fn addr(&self) -> SocketAddr {
@@ -296,32 +319,42 @@ fn requests_without_the_token_or_from_elsewhere_are_refused() {
 #[test]
 fn it_listens_on_loopback_only() {
     let s = Server::start(&[]);
-    // Every non-loopback address of this machine that can be found cheaply:
-    // connecting to the port there must fail.
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("192.0.2.1:9").is_ok() {
-            if let Ok(local) = socket.local_addr() {
-                if !local.ip().is_loopback() && !local.ip().is_unspecified() {
-                    let there = SocketAddr::new(local.ip(), s.port);
-                    assert!(
-                        TcpStream::connect_timeout(&there, Duration::from_secs(2)).is_err(),
-                        "the server answered on {there}"
-                    );
-                }
-            }
-        }
-    }
+    // This machine's address on its default route, when it has one: the
+    // server must not answer there. (The bind address itself is unit-tested
+    // in pk-cli-mcp's http.rs.)
+    let Some(local) = std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|socket| {
+            socket.connect("192.0.2.1:9")?;
+            socket.local_addr()
+        })
+        .ok()
+        .map(|a| a.ip())
+        .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+    else {
+        eprintln!(
+            "skipped: this machine has no non-loopback address on a default route to try the \
+             port on"
+        );
+        return;
+    };
+    let there = SocketAddr::new(local, s.port);
+    assert!(
+        TcpStream::connect_timeout(&there, Duration::from_secs(2)).is_err(),
+        "the server answered on {there}"
+    );
 }
 
 #[test]
 fn it_refuses_to_start_without_a_usable_token() {
-    for token in ["", "too-short"] {
+    // Set but empty is the family's usage error for any secret variable
+    // (exit 2); set but too short, an auth error (exit 3). Both name it.
+    for (token, code) in [("", 2), ("too-short", 3)] {
         let out = bin()
             .args(["mcp", "--http", "--port", &free_port().to_string()])
             .env(TOKEN_VAR, token)
             .output()
             .unwrap();
-        assert_eq!(out.status.code(), Some(3), "{token:?}");
+        assert_eq!(out.status.code(), Some(code), "{token:?}");
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(err.contains(TOKEN_VAR), "{err}");
     }
@@ -329,8 +362,8 @@ fn it_refuses_to_start_without_a_usable_token() {
 
 #[test]
 fn bad_flags_fail_before_any_token_is_read() {
-    // --http without a port, and port 0: usage errors, exit 2, whatever the
-    // token.
+    // --http without a port, port 0, and flags that need another: usage
+    // errors, exit 2, whatever the token.
     for args in [
         vec!["mcp", "--http"],
         vec!["mcp", "--http", "--port", "0"],
@@ -338,6 +371,8 @@ fn bad_flags_fail_before_any_token_is_read() {
         vec!["mcp", "--allow-writes"],
         vec!["mcp", "--http", "--list-tools", "--port", "8731"],
         vec!["mcp", "--http", "--new-token", "--port", "8731"],
+        vec!["mcp", "--overwrite"],
+        vec!["mcp", "--http", "--port", "8731", "--overwrite"],
     ] {
         let out = bin().args(&args).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "{args:?}");

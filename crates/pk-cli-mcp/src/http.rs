@@ -13,8 +13,9 @@
 //! - **Bind:** 127.0.0.1 only. There is no flag for another address.
 //! - **Token:** `Authorization: Bearer <token>`, compared in constant time.
 //!   It comes from `<BIN>_MCP_TOKEN` or the OS keychain (`piekstra.<bin>`,
-//!   item `mcp-http-token`, written by `--new-token`), is at least 32
-//!   visible ASCII characters, and the server refuses to start without one.
+//!   item `mcp-http-token`, written by `--new-token`, which will not replace
+//!   a saved one without `--overwrite`), is at least 32 visible ASCII
+//!   characters, and the server refuses to start without one.
 //! - **Host and Origin (DNS rebinding):** `Host` must name 127.0.0.1 or
 //!   localhost (on this port, if it names one), and a request that carries
 //!   an `Origin` header at all is refused: no browser is ever a client.
@@ -25,7 +26,8 @@
 //! - **Stateless:** no MCP sessions; each `POST /mcp` is answered on its own,
 //!   as JSON.
 //! - **Bounded calls:** a call still running after [`CALL_TIMEOUT`] is
-//!   answered with an error, inside Claude's own limit for a tool call.
+//!   answered with an error, inside Claude's own limit for a tool call: a
+//!   read may be retried, a write's outcome is reported as unknown.
 //! - **Quiet:** stderr gets a start line and one line per refused request
 //!   (the reason, never a header value or the arguments).
 
@@ -40,27 +42,30 @@ use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
 use pk_cli_core::CliError;
-use pk_cli_secrets::{CredentialStore, Secret};
+use pk_cli_secrets::{
+    CredentialStore, KeychainRead, Secret, SecretResolver, SecretSpec, SourceKind, SourceOrder,
+};
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use serde_json::Value;
 
+use crate::adapter::Adapter;
+use crate::command::McpArgs;
 use crate::error::ToolError;
 use crate::result::ToolOutput;
-use crate::stdio::{Adapter, McpArgs};
 use crate::tool::ToolDef;
 use crate::toolset::{Server, Toolset};
 
 /// The keychain item (`piekstra.<bin>`) that holds the bearer token.
-pub const TOKEN_ACCOUNT: &str = "mcp-http-token";
+const TOKEN_ACCOUNT: &str = "mcp-http-token";
 
 /// The shortest token the server accepts. `--new-token` makes 64 hex
 /// characters (256 bits).
-pub const MIN_TOKEN_LEN: usize = 32;
+const MIN_TOKEN_LEN: usize = 32;
 
 /// How long a call may run before the Worker is answered with an error.
 /// Claude gives a remote tool call 240 s in all.
-pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The largest request body accepted: a `tools/call` is a few hundred bytes.
 const MAX_BODY: usize = 256 * 1024;
@@ -68,7 +73,7 @@ const MAX_BODY: usize = 256 * 1024;
 /// The environment variable that carries the token: `<BIN>_MCP_TOKEN`, the
 /// binary's name upper-cased with anything but letters and digits as `_`
 /// (`m1f` → `M1F_MCP_TOKEN`).
-pub fn token_env_var(bin: &str) -> String {
+fn token_env_var(bin: &str) -> String {
     let name: String = bin
         .chars()
         .map(|c| {
@@ -82,6 +87,11 @@ pub fn token_env_var(bin: &str) -> String {
     format!("{name}_MCP_TOKEN")
 }
 
+/// The address `--http` listens on: loopback, and nothing else.
+fn bind_addr(port: u16) -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+}
+
 /// `--http` or `--new-token`. Everything checkable without the keychain is
 /// checked first (SPEC v1 §1.2).
 pub(crate) fn run<T: Toolset + Send + Sync + 'static>(
@@ -89,8 +99,18 @@ pub(crate) fn run<T: Toolset + Send + Sync + 'static>(
     toolset: T,
 ) -> Result<(), CliError> {
     let server = toolset.server();
+    let store = CredentialStore::for_binary(&server.bin);
     if args.new_token {
-        return new_token(&server.bin);
+        let token = save_new_token(&store, &server.bin, args.overwrite, fresh_token()?)?;
+        eprintln!(
+            "Saved a new token for `{bin} mcp --http` in the keychain ({service}, \
+             {TOKEN_ACCOUNT}). Set the same value as the bearer-token secret in your Worker, \
+             then (re)start `{bin} mcp --http`. It is shown once:",
+            bin = server.bin,
+            service = store.service(),
+        );
+        println!("{}", token.expose());
+        return Ok(());
     }
     let port = match args.port {
         Some(0) => {
@@ -107,9 +127,7 @@ pub(crate) fn run<T: Toolset + Send + Sync + 'static>(
             )))
         }
     };
-    let token = resolve_token(&server.bin, env_token(&server.bin), || {
-        CredentialStore::for_binary(&server.bin).get(TOKEN_ACCOUNT)
-    })?;
+    let token = resolve_token(&store, &server.bin)?;
     serve(
         Scoped {
             inner: toolset,
@@ -120,47 +138,46 @@ pub(crate) fn run<T: Toolset + Send + Sync + 'static>(
     )
 }
 
-/// The token from `<BIN>_MCP_TOKEN`, when it is set.
-fn env_token(bin: &str) -> Result<Option<String>, CliError> {
+/// The token to require, through the family's resolver (DESIGN.md §1.7):
+/// `<BIN>_MCP_TOKEN` when set, else the keychain item. A bad value is an
+/// error, never a fall back to the next source; none anywhere is an error
+/// too: the server never starts open.
+fn resolve_token<K: KeychainRead + ?Sized>(store: &K, bin: &str) -> Result<Secret, CliError> {
     let var = token_env_var(bin);
-    match std::env::var(&var) {
-        Ok(value) => Ok(Some(value)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(CliError::Auth(format!(
-            "{var} is set but is not valid UTF-8"
-        ))),
-    }
-}
-
-/// The token to require: the environment's when set (a bad one is an error,
-/// never a fall back to the keychain), else the keychain's. None anywhere is
-/// an error: the server never starts open.
-fn resolve_token(
-    bin: &str,
-    env: Result<Option<String>, CliError>,
-    keychain: impl FnOnce() -> Result<Option<Secret>, CliError>,
-) -> Result<Secret, CliError> {
-    let var = token_env_var(bin);
-    if let Some(value) = env? {
-        check_token(&value).map_err(|why| CliError::Auth(format!("{var} {why}")))?;
-        return Ok(Secret::new(value));
-    }
-    match keychain()? {
-        Some(secret) => {
-            check_token(secret.expose()).map_err(|why| {
-                CliError::Auth(format!(
-                    "the token in the keychain (piekstra.{bin}, {TOKEN_ACCOUNT}) {why}; make a \
-                     new one with `{bin} mcp --new-token`"
-                ))
-            })?;
-            Ok(secret)
+    let order =
+        SourceOrder::new(&[SourceKind::Env, SourceKind::Keychain]).map_err(CliError::Other)?;
+    let spec = SecretSpec::new(TOKEN_ACCOUNT).env(var.clone());
+    let replace = format!("make a new one with `{bin} mcp --new-token --overwrite`");
+    let resolved = match SecretResolver::new(store).order(order).resolve(&spec) {
+        Ok(found) => found,
+        // With only the env and the keychain in the order, the resolver's
+        // one auth error is an empty keychain item; its stock remedy names
+        // `auth login`, which does not make this token.
+        Err(CliError::Auth(_)) => {
+            return Err(CliError::Auth(format!(
+                "the token in the keychain ({}, {TOKEN_ACCOUNT}) is empty; {replace}",
+                store.service()
+            )))
         }
-        None => Err(CliError::Auth(format!(
+        Err(e) => return Err(e),
+    };
+    let Some(resolved) = resolved else {
+        return Err(CliError::Auth(format!(
             "`{bin} mcp --http` will not start without a bearer token: run `{bin} mcp \
              --new-token` (it saves one in the keychain and prints it for your Worker), or set \
              {var}"
-        ))),
-    }
+        )));
+    };
+    check_token(resolved.secret.expose()).map_err(|why| {
+        CliError::Auth(match resolved.source {
+            SourceKind::Env => format!("{var} {why}"),
+            _ => format!(
+                "the token in the keychain ({}, {TOKEN_ACCOUNT}) {why}; {replace}",
+                store.service()
+            ),
+        })
+    })?;
+    Ok(resolved.secret)
 }
 
 /// Why a token is unusable, or `Ok`.
@@ -177,23 +194,52 @@ fn check_token(token: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// `--new-token`: 256 bits from the OS's CSPRNG, as 64 hex characters,
-/// saved in the keychain and printed once on stdout (the instructions on
-/// stderr), for the Worker's secret.
-fn new_token(bin: &str) -> Result<(), CliError> {
+/// 256 bits from the OS's CSPRNG, as 64 lower-case hex characters.
+fn fresh_token() -> Result<Secret, CliError> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes)
         .map_err(|e| CliError::Other(format!("reading the OS random source: {e}")))?;
     let token = Secret::new(bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
     bytes.fill(0);
-    CredentialStore::for_binary(bin).set(TOKEN_ACCOUNT, &token)?;
-    eprintln!(
-        "Saved a new token for `{bin} mcp --http` in the keychain (piekstra.{bin}, \
-         {TOKEN_ACCOUNT}), replacing any earlier one. Set the same value as the bearer-token \
-         secret in your Worker, then restart `{bin} mcp --http`. It is shown once:"
-    );
-    println!("{}", token.expose());
-    Ok(())
+    Ok(token)
+}
+
+/// Where `--new-token` keeps the token: the keychain, or a map in tests.
+trait TokenStore: KeychainRead {
+    fn set(&self, account: &str, secret: &Secret) -> Result<(), CliError>;
+}
+
+impl TokenStore for CredentialStore {
+    fn set(&self, account: &str, secret: &Secret) -> Result<(), CliError> {
+        CredentialStore::set(self, account, secret)
+    }
+}
+
+/// `--new-token`: save `token`, refusing to replace a saved one without
+/// `--overwrite` (the Worker holds the old one), then read it back, so the
+/// token printed is the one the server will require.
+fn save_new_token<S: TokenStore + ?Sized>(
+    store: &S,
+    bin: &str,
+    overwrite: bool,
+    token: Secret,
+) -> Result<Secret, CliError> {
+    if !overwrite && store.get(TOKEN_ACCOUNT)?.is_some() {
+        return Err(CliError::Usage(format!(
+            "a token for `{bin} mcp --http` is already saved ({}, {TOKEN_ACCOUNT}); pass \
+             --overwrite to replace it, then update the Worker's secret to the new one",
+            store.service()
+        )));
+    }
+    store.set(TOKEN_ACCOUNT, &token)?;
+    match store.get(TOKEN_ACCOUNT)? {
+        Some(kept) if kept.expose() == token.expose() => Ok(token),
+        _ => Err(CliError::Keychain(format!(
+            "the keychain did not keep the new token ({}, {TOKEN_ACCOUNT}); nothing was printed, \
+             try `{bin} mcp --new-token --overwrite` again",
+            store.service()
+        ))),
+    }
 }
 
 /// The toolset as the HTTP server serves it: the read-only tools only,
@@ -243,7 +289,7 @@ fn serve<T: Toolset + Send + Sync + 'static>(
         .build()
         .map_err(|e| CliError::Other(format!("starting the MCP runtime: {e}")))?;
     runtime.block_on(async move {
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let addr = bind_addr(port);
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| CliError::Other(format!("listening on {addr}: {e}")))?;
@@ -538,37 +584,137 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_environment_wins_and_a_bad_value_never_falls_back_to_the_keychain() {
-        let never = || -> Result<Option<Secret>, CliError> {
-            panic!("the keychain must not be read when the environment holds a token")
-        };
-        let got = resolve_token("m1f", Ok(Some(TOKEN.into())), never).unwrap();
-        assert_eq!(got.expose(), TOKEN);
-        for bad in ["", "short", &format!("{} x", &TOKEN[..40])] {
-            let e = resolve_token("m1f", Ok(Some(bad.into())), never).unwrap_err();
-            assert_eq!(e.exit_code(), 3, "{bad:?}");
-            assert!(e.to_string().contains("M1F_MCP_TOKEN"), "{e}");
+    /// The keychain, as a map. `writes_lost` drops every write, as a
+    /// keychain that failed silently would.
+    #[derive(Default)]
+    struct MemStore {
+        items: std::cell::RefCell<std::collections::HashMap<String, String>>,
+        reads: std::cell::Cell<usize>,
+        writes_lost: bool,
+    }
+
+    impl MemStore {
+        fn holding(token: &str) -> Self {
+            let store = MemStore::default();
+            store
+                .items
+                .borrow_mut()
+                .insert(TOKEN_ACCOUNT.into(), token.into());
+            store
         }
+    }
+
+    impl KeychainRead for MemStore {
+        fn service(&self) -> &str {
+            "piekstra.test"
+        }
+        fn get(&self, account: &str) -> Result<Option<Secret>, CliError> {
+            self.reads.set(self.reads.get() + 1);
+            Ok(self.items.borrow().get(account).map(Secret::new))
+        }
+    }
+
+    impl TokenStore for MemStore {
+        fn set(&self, account: &str, secret: &Secret) -> Result<(), CliError> {
+            if !self.writes_lost {
+                self.items
+                    .borrow_mut()
+                    .insert(account.into(), secret.expose().into());
+            }
+            Ok(())
+        }
+    }
+
+    // A binary name whose `<BIN>_MCP_TOKEN` no test environment sets, so
+    // these reach the keychain side. The environment side runs end to end
+    // in example-cli's tests/mcp_http.rs, which sets the variable.
+    const BIN: &str = "pk-mcp-unit-test";
+
+    #[test]
+    fn the_keychain_token_is_used_when_the_environment_has_none() {
+        assert!(std::env::var(token_env_var(BIN)).is_err());
+        let got = resolve_token(&MemStore::holding(TOKEN), BIN).unwrap();
+        assert_eq!(got.expose(), TOKEN);
     }
 
     #[test]
     fn without_a_token_anywhere_the_server_refuses_to_start() {
-        let e = resolve_token("m1f", Ok(None), || Ok(None)).unwrap_err();
+        let e = resolve_token(&MemStore::default(), BIN).unwrap_err();
         assert_eq!(e.exit_code(), 3);
         let text = e.to_string();
         assert!(text.contains("will not start"), "{text}");
-        assert!(text.contains("m1f mcp --new-token") && text.contains("M1F_MCP_TOKEN"));
+        assert!(text.contains("pk-mcp-unit-test mcp --new-token"), "{text}");
+        assert!(text.contains("PK_MCP_UNIT_TEST_MCP_TOKEN"), "{text}");
+    }
 
-        let e = resolve_token("m1f", Ok(None), || Ok(Some(Secret::new("short")))).unwrap_err();
-        assert!(e.to_string().contains("keychain"), "{e}");
+    #[test]
+    fn an_unusable_keychain_token_names_the_item_and_the_remedy() {
+        for bad in ["", "short", "0123456789abcdef 0123456789abcdef0123"] {
+            let e = resolve_token(&MemStore::holding(bad), BIN).unwrap_err();
+            assert_eq!(e.exit_code(), 3, "{bad:?}");
+            let text = e.to_string();
+            assert!(
+                text.contains("keychain (piekstra.test, mcp-http-token)"),
+                "{text}"
+            );
+            assert!(text.contains("--new-token --overwrite"), "{text}");
+            assert!(!text.contains("auth login"), "{text}");
+        }
+    }
 
-        let got = resolve_token("m1f", Ok(None), || Ok(Some(Secret::new(TOKEN)))).unwrap();
+    #[test]
+    fn a_new_token_is_saved_read_back_and_returned() {
+        let store = MemStore::default();
+        let got = save_new_token(&store, BIN, false, Secret::new(TOKEN)).unwrap();
         assert_eq!(got.expose(), TOKEN);
+        assert_eq!(store.items.borrow()[TOKEN_ACCOUNT], TOKEN);
+    }
 
-        let e = resolve_token("m1f", Ok(None), || Err(CliError::Keychain("locked".into())))
-            .unwrap_err();
-        assert_eq!(e.exit_code(), 1);
+    #[test]
+    fn a_saved_token_is_replaced_only_with_overwrite() {
+        let store = MemStore::holding("an-earlier-token-the-worker-already-holds");
+        let e = save_new_token(&store, BIN, false, Secret::new(TOKEN)).unwrap_err();
+        assert_eq!(e.exit_code(), 2);
+        assert!(e.to_string().contains("--overwrite"), "{e}");
+        assert_eq!(
+            store.items.borrow()[TOKEN_ACCOUNT],
+            "an-earlier-token-the-worker-already-holds",
+            "refused before anything was written"
+        );
+
+        save_new_token(&store, BIN, true, Secret::new(TOKEN)).unwrap();
+        assert_eq!(store.items.borrow()[TOKEN_ACCOUNT], TOKEN);
+    }
+
+    #[test]
+    fn a_token_the_keychain_did_not_keep_is_never_printed() {
+        let store = MemStore {
+            writes_lost: true,
+            ..MemStore::default()
+        };
+        let e = save_new_token(&store, BIN, false, Secret::new(TOKEN)).unwrap_err();
+        assert!(e.to_string().contains("did not keep"), "{e}");
+        assert!(store.reads.get() >= 2, "it read the item back");
+    }
+
+    #[test]
+    fn a_fresh_token_is_64_hex_characters_and_never_repeats() {
+        let a = fresh_token().unwrap();
+        let b = fresh_token().unwrap();
+        assert_eq!(a.expose().len(), 64);
+        assert!(a
+            .expose()
+            .bytes()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(a.expose(), b.expose());
+        assert_eq!(check_token(a.expose()), Ok(()));
+    }
+
+    #[test]
+    fn it_binds_loopback_only() {
+        let addr = bind_addr(8731);
+        assert!(addr.ip().is_loopback(), "{addr}");
+        assert_eq!(addr.port(), 8731);
     }
 
     #[test]
