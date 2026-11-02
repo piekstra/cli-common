@@ -7,7 +7,7 @@ use std::fmt;
 use serde_json::json;
 
 /// Errors every family CLI maps onto the shared exit-code contract.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliError {
     /// Bad usage / missing required input. Exit 2 (clap's convention).
     Usage(String),

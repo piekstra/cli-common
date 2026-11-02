@@ -2,10 +2,13 @@
 //!
 //! Provides the shared error/exit-code contract, the text/JSON output
 //! renderer, common global flags, small date/money helpers, the §1.3
-//! confirmation gate, and reference resolution. See the repository's
-//! `DESIGN.md` for the full specification.
+//! confirmation gate, reference resolution, and the [`transport`] seam a
+//! provider client is written against so it runs natively and in a
+//! WebAssembly host alike. See the repository's `DESIGN.md` for the full
+//! specification.
 
 pub mod args;
+mod block_on;
 pub mod confirm;
 pub mod dates;
 pub mod error;
@@ -14,8 +17,10 @@ pub mod list;
 pub mod money;
 pub mod output;
 pub mod resolve;
+pub mod transport;
 
 pub use args::CommonArgs;
+pub use block_on::block_on;
 pub use error::CliError;
 pub use list::{Paged, RangeArgs};
 pub use money::Money;

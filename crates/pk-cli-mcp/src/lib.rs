@@ -62,8 +62,15 @@
 //!
 //! - `stdio` (native): `run` and `McpArgs`, the `<bin> mcp` subcommand
 //!   on the official Rust SDK (`rmcp`).
+//! - `wasm`: [`wasm`] and [`export_wasm!`], the toolset as a WebAssembly
+//!   module for the deploy-your-own Worker on a raw ABI (one `.wasm`, no
+//!   JavaScript glue; the reference host is `js/pk-host.ts`), and
+//!   [`wasm::HostTransport`], the host's `fetch` and WebCrypto behind
+//!   `pk_cli_core::transport::Transport`.
 //! - `test-util`: `conformance`, the checks every CLI's tests run, and
-//!   `block_on` for calling a toolset synchronously.
+//!   `block_on` for calling a toolset synchronously; with `wasm`,
+//!   `wasm::testing`, which runs a Worker toolset natively with the test
+//!   playing the host.
 
 pub mod error;
 pub mod result;
@@ -71,16 +78,17 @@ pub mod shape;
 pub mod tool;
 pub mod toolset;
 
-#[cfg(any(feature = "stdio", feature = "test-util", test))]
-mod block_on;
 #[cfg(any(feature = "test-util", test))]
 pub mod conformance;
 #[cfg(feature = "stdio")]
 mod stdio;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
-#[cfg(feature = "test-util")]
-pub use block_on::block_on;
 pub use error::{ErrorKind, ToolError};
+/// `pk_cli_core::block_on`, re-exported for a CLI's tests.
+#[cfg(feature = "test-util")]
+pub use pk_cli_core::block_on;
 pub use result::{CallToolResult, ToolOutput};
 pub use shape::{ListArgs, Page, PageInfo, PageRequest, ResponseFormat};
 #[cfg(feature = "stdio")]

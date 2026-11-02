@@ -1,5 +1,77 @@
 # Changelog
 
+## Unreleased
+
+Additive: new modules, a new feature and a new example crate. One move:
+`block_on` now lives in `pk-cli-core` (`pk_cli_core::block_on`);
+`pk_cli_mcp::block_on` (feature `test-util`) re-exports it, so existing
+callers are unchanged.
+
+- **`pk-cli-core::transport`** — the seam a provider client is written
+  against so the same client runs in the terminal binary and in the
+  deploy-your-own Worker: `HttpRequest` (builder; `query` percent-encodes
+  everything but RFC 3986's unreserved characters; `user_agent(bin,
+  version)` for the family's `User-Agent`; `origin()`, without userinfo),
+  `HttpResponse` (status, headers shaped as `fetch` gives them, and body
+  text; `new`, `header_value`),
+  both `#[non_exhaustive]` with a `Debug` that shows no header value, query
+  or body; the async `Transport` trait with no `Send` bound and one contract
+  for every implementation: no redirects followed (a 3xx comes back with its
+  `Location`), no state or default headers between sends, and a request
+  with no HTTP answer is
+  `CliError::Upstream` naming the origin only; and `PlatformSigner`
+  (`sign_es256`: ECDSA P-256 / SHA-256 by the platform's own crypto, `None`
+  where it has none), a separate trait so a wrapper around a transport
+  cannot drop it unnoticed. Both implemented for `&T`. Builds for
+  `wasm32-unknown-unknown`. `pk_cli_core::block_on` drives a blocking
+  transport's futures, which finish on their first poll.
+- **`pk-cli-http::BlockingTransport`** — the family's blocking `reqwest`
+  client behind `Transport` and `PlatformSigner` (always `None`). `new()`
+  keeps the transport contract (no redirects, cookie store or default
+  headers; a 60 s timeout); `with_client` takes a client that must do the
+  same. Repeated response headers are joined as `fetch` joins them.
+- **`pk-cli-mcp` feature `wasm`** (no dependencies) — a `Toolset` as a
+  self-contained WebAssembly module for the deploy-your-own Worker
+  (DESIGN.md §1.9 path B, §2.3):
+  - `export_wasm!(factory)` exports ABI version 1, documented in
+    `src/wasm/mod.rs`. A module imports only five `pk_host` functions
+    (`now_ms`, `random`, `fetch`, `sign_es256`, `log`) and exports
+    `pk_describe` (serverInfo, instructions, tools) and
+    `pk_call`/`pk_poll`/`pk_complete`/`pk_drop`, which run a `tools/call` as
+    a task the host polls while it settles the operations the task started,
+    with several calls in flight at once. No `wasm-bindgen`: a module is one
+    `.wasm` with no JavaScript glue, so a release ships one file pinned by
+    its SHA-256, and one host serves every module.
+  - The factory builds the toolset from the host's per-call config JSON;
+    every instruction and auth remedy the module sends has the Worker's
+    wording (`Server::hosted`: the credentials are Worker secrets).
+  - `HostTransport`: the host's `fetch` (redirects never followed; the
+    response headers come back framed ahead of the body) behind
+    `Transport`, and its WebCrypto ES256 behind `PlatformSigner`, `None`
+    where the host has no WebCrypto ECDSA. `fill_random` and `now_ms` replace
+    `getrandom` and `SystemTime`, which do not work on
+    `wasm32-unknown-unknown` without `wasm-bindgen`. `log` writes to the
+    Worker's logs; a panic is logged before the module traps.
+  - `js/pk-host.ts`, the reference host: checks a module's imports, exports
+    and ABI version, runs calls concurrently, caches imported keys per
+    isolate, and replaces an instance that traps with a fresh one. Plain
+    TypeScript that Node 22.18+ runs and wrangler bundles as is.
+  - With `test-util`, `wasm::testing::{call, describe}` run a Worker
+    toolset natively through the same ABI functions, the test answering
+    each `fetch` and signature.
+- `pk-cli-core`: `CliError` is `Clone`, `PartialEq` and `Eq`, so a
+  provider client that failed to build can hand every call the same error.
+- `pk-cli-mcp`: `impl Toolset for &T`.
+- **`pk-cli-mcp-wasm-demo`** (new, not published): a toolset exported as a
+  module. `make wasm-host-check` builds it for wasm32 the way a CLI's
+  release does and runs `js/pk-host.test.ts` over it in Node: fetch,
+  WebCrypto signatures verified against the public key, concurrent
+  operations and calls, the clock and random source, a panic survived, and
+  the error kinds.
+- `make wasm-check` also lints `pk-cli-core` and `pk-cli-mcp --features
+  wasm` for wasm32; `make mcp-check` lints the `wasm` feature natively; CI
+  sets up Node 24 and runs `make wasm-host-check`.
+
 ## v0.12.0 — 2026-11-02
 
 Additive: a new crate and an `example-cli mcp` subcommand; no existing
