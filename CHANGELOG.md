@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.15.1 — 2026-11-02
 
 - `pk-cli-core`: `NO_COLOR` follows no-color.org — any non-empty value
   disables color. `CommonArgs` read it through clap's `env`, which parses a
