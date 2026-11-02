@@ -163,11 +163,12 @@ impl fmt::Debug for HttpResponse {
 /// - **No redirects are followed.** A 3xx comes back as the response, with
 ///   its `Location` header: a signed request is never re-sent to wherever a
 ///   redirect points.
-/// - **No state is kept between sends.** No cookie jar, no default headers
-///   (not even a `User-Agent`: [`HttpRequest::user_agent`] sets the
-///   family's): what the request says is all that goes out, plus what the
-///   platform adds to every request (`Host`, `Content-Length`, connection
-///   handling).
+/// - **No state is kept between sends, and nothing identifies the
+///   caller but the request.** No cookie jar, no session or identifying
+///   headers (not even a `User-Agent`: [`HttpRequest::user_agent`] sets the
+///   family's). The platform may add protocol defaults (`Host`,
+///   `Content-Length`, connection handling, a default `Accept`), so a client
+///   that depends on a header's value sets it.
 /// - **Response headers have one shape**: see [`HttpResponse::headers`].
 /// - **Only a request that got no HTTP answer is an error**, and it is
 ///   [`CliError::Upstream`] naming the origin only (no path, no query): no

@@ -9,10 +9,10 @@
 //!
 //! and releases the `.wasm`. The deploy-your-own Worker loads it with the
 //! reference host, `js/pk-host.ts` in this crate, and serves its tools to
-//! claude.ai. Provider requests go through
-//! [`HostTransport`], the host's `fetch` and WebCrypto behind
-//! `pk_cli_core::transport::Transport`, so the provider client the native
-//! binary uses runs here unchanged.
+//! claude.ai. Provider requests go through [`HostTransport`]: the host's
+//! `fetch` behind `pk_cli_core::transport::Transport` and its WebCrypto
+//! behind `pk_cli_core::transport::PlatformSigner`, so the provider client
+//! the native binary uses runs here unchanged.
 //!
 //! # Why a raw ABI and not `wasm-bindgen`
 //!
