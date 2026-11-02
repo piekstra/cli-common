@@ -29,7 +29,12 @@ sign-in. Additive API; no shape or exit code changes.
     process dies), so a second is refused before anything launches; a
     Chrome still running in the profile (its `SingletonLock` naming a live
     pid whose program is a Chrome) refuses the launch too, and the message
-    names the lock to remove by hand if no Chrome is open there. A lock
+    names the lock to remove by hand if no Chrome is open there. A program
+    is a Chrome when the profile's record names it or its name is in the
+    Chromium family: each sign-in records in `pk-cli-browser.lock` the
+    program it spawns and, once Chrome is up, the program Chrome runs as,
+    so a browser picked with `Launch::chrome` or `<PREFIX>_CHROME` (or
+    started by a wrapper script) is known to a later launch or logout. A lock
     whose pid is gone, or now runs another program (a pid reused after a
     reboot), is stale: it, the other singleton links and the old
     `DevToolsActivePort` are removed before Chrome starts.

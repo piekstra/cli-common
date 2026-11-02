@@ -237,7 +237,7 @@ fn a_chrome_is_known_by_its_program() {
     for exe in ["/bin/sleep", "/usr/bin/zsh", "/opt/brave/brave", "/"] {
         assert!(!is_chrome_exe(Path::new(exe), &[]), "{exe}");
     }
-    // Whatever the CLI launches counts, whatever its name.
+    // A recorded or launched program counts, whatever its name.
     let known = [PathBuf::from("/opt/brave/brave")];
     assert!(is_chrome_exe(Path::new("/opt/brave/brave"), &known));
     assert!(!is_chrome_exe(Path::new("/opt/brave/brave-helper"), &known));
@@ -399,21 +399,29 @@ fn assert_leftovers(path: &Path, present: bool) {
     }
 }
 
+/// The stand-in is outside the Chromium family by name, so it counts as a
+/// Chrome only when the profile's record names it: what a browser picked
+/// with `Launch::chrome` or `<PREFIX>_CHROME` relies on.
 #[cfg(unix)]
 #[test]
-fn a_running_chrome_keeps_the_profile_and_a_stale_locks_leftovers_are_cleared() {
+fn a_recorded_browser_keeps_the_profile_and_a_stale_locks_leftovers_are_cleared() {
     let root = temp_root("singleton");
     let path = kept_profile_path(&root, "t", None);
-    drop(ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap());
+    assert!(
+        !is_chrome_exe(Path::new(STAND_IN), &[]),
+        "not a family name"
+    );
+    // An earlier sign-in launched the stand-in: its open recorded it.
+    drop(ProfileDir::open_kept(&root, "t", None, Path::new(STAND_IN)).unwrap());
     let outside = root.join("chrome-socket-dir");
     std::fs::write(&outside, "not ours to touch").unwrap();
-    let chrome = Path::new(STAND_IN);
 
-    // A live pid running the Chrome this launch uses holds the profile.
+    // It is still running (its CLI was killed, say). Neither this launch's
+    // own Chrome nor a logout knows the stand-in: the record does.
     let mut process = running_process();
     let pid = process.id();
     plant_chrome_leftovers(&path, &format!("some-host.local-{pid}"), &outside);
-    let err = ProfileDir::open_kept(&root, "t", None, chrome).unwrap_err();
+    let err = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap_err();
     assert!(matches!(err, BrowserError::ProfileInUse(_)), "{err:?}");
     let msg = err.to_string();
     assert!(
@@ -429,36 +437,116 @@ fn a_running_chrome_keeps_the_profile_and_a_stale_locks_leftovers_are_cleared() 
     );
     assert!(msg.ends_with(&by_hand), "{msg}");
     assert_leftovers(&path, true);
-    // Nor can it be forgotten from under the running Chrome.
-    let err = forget_in(&root, "t", None, &[chrome.to_path_buf()]).unwrap_err();
+    // A refused open leaves the record as it was, so a logout is refused
+    // too and the profile is not removed from under the running browser.
+    let err = forget_in(&root, "t", None).unwrap_err();
     assert!(matches!(err, BrowserError::ProfileInUse(_)), "{err:?}");
     assert!(err.to_string().contains(&format!("pid {pid}")), "{err}");
     assert!(err.to_string().ends_with(&by_hand), "{err}");
     assert!(path.is_dir());
 
-    // The same live pid running something that is not a Chrome (a pid
+    // The same live pid in a profile whose record does not name it (a pid
     // reused after a reboot): the lock is stale, cleared, and the launch
     // goes on.
-    let profile = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap();
-    assert_leftovers(&path, false);
+    let other = kept_profile_path(&root, "t", Some("other"));
+    drop(ProfileDir::open_kept(&root, "t", Some("other"), Path::new(NO_CHROME)).unwrap());
+    plant_chrome_leftovers(&other, &format!("some-host.local-{pid}"), &outside);
+    drop(ProfileDir::open_kept(&root, "t", Some("other"), Path::new(NO_CHROME)).unwrap());
+    assert_leftovers(&other, false);
     assert_eq!(
         std::fs::read_to_string(&outside).unwrap(),
         "not ours to touch",
         "a link is removed, never what it points to"
     );
-    drop(profile);
 
-    // A pid that is gone: stale too.
+    // A pid that is gone: stale, even though the record names its program.
     process.kill().unwrap();
     process.wait().unwrap();
-    plant_chrome_leftovers(&path, &format!("some-host.local-{pid}"), &outside);
-    drop(ProfileDir::open_kept(&root, "t", None, chrome).unwrap());
+    drop(ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap());
     assert_leftovers(&path, false);
 
     // A lock that is not a symlink names no pid: stale too.
     std::fs::write(path.join(SINGLETON_LOCK), "x").unwrap();
-    drop(ProfileDir::open_kept(&root, "t", None, chrome).unwrap());
+    drop(ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap());
     assert!(!path.join(SINGLETON_LOCK).exists());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A launcher that starts the browser under another program (a wrapper
+/// script): once the browser is up, the program its lock's pid runs is
+/// added to the record, so the next check knows it.
+#[cfg(unix)]
+#[test]
+fn the_program_chrome_runs_as_is_recorded_once_it_is_up() {
+    let root = temp_root("note");
+    let mut profile = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap();
+    let mut process = running_process();
+    let pid = process.id();
+    std::os::unix::fs::symlink(
+        format!("some-host.local-{pid}"),
+        profile.path().join(SINGLETON_LOCK),
+    )
+    .unwrap();
+    profile.note_running_chrome();
+    profile.note_running_chrome();
+    let mut record = std::fs::File::open(profile.path().join(RUN_LOCK)).unwrap();
+    assert_eq!(
+        read_record(&mut record),
+        [
+            PathBuf::from(NO_CHROME),
+            std::fs::canonicalize(STAND_IN).unwrap()
+        ],
+        "what was spawned, then what runs, once"
+    );
+    drop(profile);
+
+    let err = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap_err();
+    assert!(matches!(err, BrowserError::ProfileInUse(_)), "{err:?}");
+    process.kill().unwrap();
+    process.wait().unwrap();
+    // Gone now: the next sign-in goes ahead and the record names only what
+    // it launches.
+    let profile = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap();
+    let mut record = std::fs::File::open(profile.path().join(RUN_LOCK)).unwrap();
+    assert_eq!(read_record(&mut record), [PathBuf::from(NO_CHROME)]);
+    drop(profile);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_record_holds_absolute_paths_one_per_line() {
+    let root = temp_root("record");
+    let file_path = root.join("record");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&file_path)
+        .unwrap();
+    assert!(read_record(&mut file).is_empty());
+    let chrome = PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+    write_record(
+        &mut file,
+        &[
+            PathBuf::from("/opt/brave/brave"),
+            PathBuf::from("relative/browser"),
+            PathBuf::from("/a\nb"),
+            chrome.clone(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        read_record(&mut file),
+        [PathBuf::from("/opt/brave/brave"), chrome]
+    );
+    // A shorter record replaces a longer one whole.
+    write_record(&mut file, &[PathBuf::from("/x")]).unwrap();
+    assert_eq!(read_record(&mut file), [PathBuf::from("/x")]);
+    // Anything but an absolute path in the file is skipped.
+    std::fs::write(&file_path, "junk\n\n/y\nrelative\n").unwrap();
+    assert_eq!(read_record(&mut file), [PathBuf::from("/y")]);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -491,7 +579,7 @@ fn names_that_differ_only_in_case_keep_their_own_profiles() {
 fn forgetting_removes_only_the_profile_and_says_whether_there_was_one() {
     let root = temp_root("forget");
     // None there: nothing to do, and nothing created.
-    assert!(!forget_in(&root, "t", None, &[]).unwrap());
+    assert!(!forget_in(&root, "t", None).unwrap());
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
 
     let path = kept_profile_path(&root, "t", None);
@@ -507,7 +595,7 @@ fn forgetting_removes_only_the_profile_and_says_whether_there_was_one() {
 
     // While a sign-in holds it, it stays.
     let held = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap();
-    let err = forget_in(&root, "t", None, &[]).unwrap_err();
+    let err = forget_in(&root, "t", None).unwrap_err();
     assert!(matches!(err, BrowserError::ProfileInUse(_)), "{err:?}");
     assert!(
         err.to_string()
@@ -517,7 +605,7 @@ fn forgetting_removes_only_the_profile_and_says_whether_there_was_one() {
     assert!(path.join("Default").join("Cookies").exists());
     drop(held);
 
-    assert!(forget_in(&root, "t", None, &[]).unwrap());
+    assert!(forget_in(&root, "t", None).unwrap());
     assert!(!path.exists());
     assert!(outside.exists(), "a link's target is never removed");
     assert!(sibling.exists(), "nothing beside the profile is touched");
@@ -525,13 +613,13 @@ fn forgetting_removes_only_the_profile_and_says_whether_there_was_one() {
         kept_profile_path(&root, "t", Some("other")).is_dir(),
         "a named profile is forgotten on its own"
     );
-    assert!(!forget_in(&root, "t", None, &[]).unwrap(), "already gone");
-    assert!(forget_in(&root, "t", Some("other"), &[]).unwrap());
+    assert!(!forget_in(&root, "t", None).unwrap(), "already gone");
+    assert!(forget_in(&root, "t", Some("other")).unwrap());
 
     // An exposed profile is still removed: it is the one most worth it.
     std::fs::create_dir(&path).unwrap();
     set_mode(&path, 0o755);
-    assert!(forget_in(&root, "t", None, &[]).unwrap());
+    assert!(forget_in(&root, "t", None).unwrap());
     assert!(!path.exists());
 
     // A symlink in its place is refused, and what it points to untouched.
@@ -539,7 +627,7 @@ fn forgetting_removes_only_the_profile_and_says_whether_there_was_one() {
     std::fs::create_dir(&elsewhere).unwrap();
     std::fs::write(elsewhere.join("keep"), "x").unwrap();
     std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
-    let err = forget_in(&root, "t", None, &[]).unwrap_err();
+    let err = forget_in(&root, "t", None).unwrap_err();
     assert!(
         err.to_string()
             .contains("is a symlink; refusing to remove it"),

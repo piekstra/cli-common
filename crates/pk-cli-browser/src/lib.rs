@@ -108,9 +108,10 @@
 //! - one sign-in uses it at a time: a second is refused
 //!   ([`BrowserError::ProfileInUse`]) while the first holds it, and so is a
 //!   launch while a Chrome is still running in it (its `SingletonLock` names
-//!   a live pid whose program is a Chrome). A lock left by a Chrome that is
-//!   gone, or whose pid now runs another program, is cleared, with the rest
-//!   of what that Chrome left;
+//!   a live pid whose program is a Chrome: one recorded in the profile when
+//!   a sign-in launched it, or one named like the Chromium family). A lock
+//!   left by a Chrome that is gone, or whose pid now runs another program,
+//!   is cleared, with the rest of what that Chrome left;
 //! - [`forget_profile`] removes it, so a CLI's `auth logout` signs the
 //!   browser out too, and [`Launch::fresh_profile`] (the `--fresh-profile`
 //!   flag of [`BrowserArgs`]) runs one sign-in in a scratch profile instead:

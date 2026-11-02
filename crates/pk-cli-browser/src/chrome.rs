@@ -226,12 +226,16 @@ impl Launch {
     /// (`rhd --profile <NAME>`): each account gets its own remembered
     /// device and session, and one account's sign-in never opens already
     /// signed in as another. The profile is
-    /// `<data dir>/piekstra.<bin>/browser-profile-<name>`, removed by
-    /// [`forget_named_profile`](crate::forget_named_profile). `name` is 1 to
-    /// 64 ASCII letters, digits, `-` or `_`, checked and never rewritten;
-    /// anything else fails [`spawn`](Launch::spawn) as
-    /// [`BrowserError::Invalid`]. No effect with
-    /// [`fresh_profile(true)`](Launch::fresh_profile).
+    /// `<data dir>/piekstra.<bin>/browser-profile-<name>`, with each
+    /// uppercase letter of `name` written as `+` and its lowercase
+    /// (`Alice` is `browser-profile-+alice`, `alice` is
+    /// `browser-profile-alice`), so names that differ only in case keep
+    /// their own profiles where the filesystem folds case (APFS). It is
+    /// removed by [`forget_named_profile`](crate::forget_named_profile).
+    /// `name` is 1 to 64 ASCII letters, digits, `-` or `_`; the account name
+    /// is checked, never rewritten into another name, and anything else
+    /// fails [`spawn`](Launch::spawn) as [`BrowserError::Invalid`]. No
+    /// effect with [`fresh_profile(true)`](Launch::fresh_profile).
     pub fn profile_name(mut self, name: impl Into<String>) -> Self {
         self.profile_name = Some(name.into());
         self
@@ -328,6 +332,7 @@ impl Launch {
         let (port, path) = browser.read_active_port()?;
         browser.port = port;
         browser.ws_path = path;
+        browser.profile.note_running_chrome();
         Ok(browser)
     }
 }

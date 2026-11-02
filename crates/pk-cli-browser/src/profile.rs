@@ -27,9 +27,13 @@ use crate::error::BrowserError;
 /// The kept profile's directory name under `piekstra.<bin>`.
 const KEPT_PROFILE: &str = "browser-profile";
 /// The file a sign-in holds an advisory lock on while it uses the kept
-/// profile.
+/// profile, and the record of the programs that ran there: one absolute
+/// path per line ([`read_record`]).
 #[cfg_attr(not(unix), allow(dead_code))]
 const RUN_LOCK: &str = "pk-cli-browser.lock";
+/// The most of the record that is read: far more than the two paths a
+/// sign-in writes.
+const RECORD_LIMIT: u64 = 16 * 1024;
 /// Whether this platform can keep a profile between sign-ins with the
 /// guarantees the docs give (owner-only, one sign-in at a time).
 pub(crate) const KEPT_SUPPORTED: bool = cfg!(unix);
@@ -61,7 +65,8 @@ pub(crate) struct ProfileDir {
     path: PathBuf,
     kept: bool,
     // Held while a kept profile is in use; closing it releases the lock.
-    _run_lock: Option<File>,
+    // The record of what runs there is written through it.
+    run_lock: Option<File>,
 }
 
 impl ProfileDir {
@@ -80,7 +85,7 @@ impl ProfileDir {
         Ok(ProfileDir {
             path,
             kept: false,
-            _run_lock: None,
+            run_lock: None,
         })
     }
 
@@ -91,10 +96,12 @@ impl ProfileDir {
     /// Refused as [`BrowserError::Profile`] when the directory is a
     /// symlink, is not a directory, is not owned by the current user or is
     /// not `0700`, and as [`BrowserError::ProfileInUse`] when another
-    /// sign-in holds it or Chrome's lock in it names a running Chrome. A
-    /// lock whose pid is gone, or now runs another program, is stale: it is
-    /// removed, with the rest of what that Chrome left behind, and the
-    /// sign-in goes ahead.
+    /// sign-in holds it or Chrome's lock in it names a running Chrome: a
+    /// program the profile's record names (what earlier sign-ins ran there),
+    /// `chrome` itself, or one named like the Chromium family. A lock whose
+    /// pid is gone, or now runs another program, is stale: it is removed,
+    /// with the rest of what that Chrome left behind, the record is
+    /// replaced by `chrome`'s path, and the sign-in goes ahead.
     pub fn open_kept(
         root: &Path,
         bin: &str,
@@ -103,7 +110,7 @@ impl ProfileDir {
     ) -> Result<Self, BrowserError> {
         let path = kept_profile_path(root, bin, name);
         ensure_kept_dir(&path)?;
-        let run_lock = match lock_for_run(&path)? {
+        let mut run_lock = match lock_for_run(&path)? {
             RunLock::Acquired(file) => file,
             RunLock::Busy => {
                 return Err(BrowserError::ProfileInUse(format!(
@@ -113,7 +120,10 @@ impl ProfileDir {
             }
             RunLock::Unsupported => return Err(unsupported()),
         };
-        if let Some(pid) = chrome_holder(&path, &[chrome.to_path_buf()])? {
+        let launched = canonical(chrome);
+        let mut known = read_record(&mut run_lock);
+        known.push(launched.clone());
+        if let Some(pid) = chrome_holder(&path, &known)? {
             return Err(BrowserError::ProfileInUse(format!(
                 "{}; close that window, then run this again (or pass --fresh-profile). {}",
                 held_message(bin, &path, Some(pid)),
@@ -121,11 +131,42 @@ impl ProfileDir {
             )));
         }
         remove_leftovers(&path)?;
+        write_record(&mut run_lock, &[launched]).map_err(|e| {
+            BrowserError::Profile(format!(
+                "recording the browser in {}: {e}",
+                path.join(RUN_LOCK).display()
+            ))
+        })?;
         Ok(ProfileDir {
             path,
             kept: true,
-            _run_lock: Some(run_lock),
+            run_lock: Some(run_lock),
         })
+    }
+
+    /// Once Chrome is up, add the program it runs as, read from the pid its
+    /// `SingletonLock` names, to the kept profile's record. What was
+    /// spawned is recorded already; this covers a launcher that starts the
+    /// browser under another program (Linux's `google-chrome` script, a
+    /// wrapper set in `<PREFIX>_CHROME`), so a later check knows that
+    /// browser by its own program. Best effort: without a lock or a
+    /// readable program, the record keeps what was spawned.
+    pub fn note_running_chrome(&mut self) {
+        let Some(file) = self.run_lock.as_mut() else {
+            return;
+        };
+        let pid = std::fs::read_link(self.path.join(SINGLETON_LOCK))
+            .ok()
+            .and_then(|target| lock_pid(&target.to_string_lossy()));
+        let Some(exe) = pid.and_then(process_exe) else {
+            return;
+        };
+        let exe = canonical(&exe);
+        let mut programs = read_record(file);
+        if !programs.contains(&exe) {
+            programs.push(exe);
+            let _ = write_record(file, &programs);
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -259,7 +300,7 @@ fn unsupported() -> BrowserError {
 /// the logout takes this call through a seam the tests fill with
 /// `forget_profile_in` (the `test-util` feature) and a temp dir.
 pub fn forget_profile(bin: &str) -> Result<bool, BrowserError> {
-    forget_in(&default_root()?, bin, None, &known_chromes(bin))
+    forget_in(&default_root()?, bin, None)
 }
 
 /// [`forget_profile`] for a profile kept under `name`
@@ -270,7 +311,7 @@ pub fn forget_named_profile(bin: &str, name: &str) -> Result<bool, BrowserError>
     if !profile_name_ok(name) {
         return Err(invalid_name(name));
     }
-    forget_in(&default_root()?, bin, Some(name), &known_chromes(bin))
+    forget_in(&default_root()?, bin, Some(name))
 }
 
 /// [`forget_profile`] under `root` instead of the per-user data dir: the
@@ -279,7 +320,7 @@ pub fn forget_named_profile(bin: &str, name: &str) -> Result<bool, BrowserError>
 /// and never removes the owner's real profile.
 #[cfg(any(test, feature = "test-util"))]
 pub fn forget_profile_in(root: &Path, bin: &str) -> Result<bool, BrowserError> {
-    forget_in(root, bin, None, &known_chromes(bin))
+    forget_in(root, bin, None)
 }
 
 /// [`forget_named_profile`] under `root` instead of the per-user data dir.
@@ -289,13 +330,7 @@ pub fn forget_named_profile_in(root: &Path, bin: &str, name: &str) -> Result<boo
     if !profile_name_ok(name) {
         return Err(invalid_name(name));
     }
-    forget_in(root, bin, Some(name), &known_chromes(bin))
-}
-
-/// The Chrome `bin` would launch, if one is found: a running process with
-/// that program holds a profile however it is named.
-fn known_chromes(bin: &str) -> Vec<PathBuf> {
-    crate::chrome::find_chrome(bin).ok().into_iter().collect()
+    forget_in(root, bin, Some(name))
 }
 
 pub(crate) fn invalid_name(name: &str) -> BrowserError {
@@ -336,8 +371,9 @@ pub(crate) fn name_dir(name: &str) -> String {
 }
 
 /// A profile name is 1 to 64 ASCII letters, digits, `-` or `_`; upper and
-/// lower case are told apart ([`name_dir`]). It is checked, never
-/// rewritten, so two names can never map onto one profile.
+/// lower case are told apart ([`name_dir`]). The account name is checked,
+/// never rewritten into another name, so two names can never map onto one
+/// profile.
 pub(crate) fn profile_name_ok(name: &str) -> bool {
     (1..=64).contains(&name.len())
         && name
@@ -348,15 +384,10 @@ pub(crate) fn profile_name_ok(name: &str) -> bool {
 /// Remove `bin`'s kept profile under `root` (the default one, or `name`'s).
 /// `Ok(false)` when there was none. Refused when the path is a symlink, is
 /// not a directory or is another user's, and while a sign-in or a running
-/// Chrome (one of `known`, or named like one) is using the profile. Removes
-/// the profile directory only, never its parent or anything a link in it
-/// points to.
-pub(crate) fn forget_in(
-    root: &Path,
-    bin: &str,
-    name: Option<&str>,
-    known: &[PathBuf],
-) -> Result<bool, BrowserError> {
+/// Chrome (a program the profile's record names, or one named like the
+/// Chromium family) is using the profile. Removes the profile directory
+/// only, never its parent or anything a link in it points to.
+pub(crate) fn forget_in(root: &Path, bin: &str, name: Option<&str>) -> Result<bool, BrowserError> {
     let path = kept_profile_path(root, bin, name);
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
@@ -377,8 +408,11 @@ pub(crate) fn forget_in(
     }
     #[cfg(not(unix))]
     let _ = meta;
-    let run_lock = match lock_for_run(&path)? {
-        RunLock::Acquired(file) => Some(file),
+    let (run_lock, known) = match lock_for_run(&path)? {
+        RunLock::Acquired(mut file) => {
+            let known = read_record(&mut file);
+            (Some(file), known)
+        }
         RunLock::Busy => {
             return Err(BrowserError::ProfileInUse(format!(
                 "{}; finish or cancel it, then log out again",
@@ -387,9 +421,9 @@ pub(crate) fn forget_in(
         }
         // No sign-in runs in a kept profile here (each uses a scratch one),
         // so none can be using this one.
-        RunLock::Unsupported => None,
+        RunLock::Unsupported => (None, Vec::new()),
     };
-    if let Some(pid) = chrome_holder(&path, known)? {
+    if let Some(pid) = chrome_holder(&path, &known)? {
         return Err(BrowserError::ProfileInUse(format!(
             "{}; close that window, then log out again. {}",
             held_message(bin, &path, Some(pid)),
@@ -579,6 +613,53 @@ fn lock_for_run(_profile: &Path) -> Result<RunLock, BrowserError> {
     Ok(RunLock::Unsupported)
 }
 
+/// The programs recorded as run in a kept profile, read from its run lock
+/// file: each line that is an absolute path, in UTF-8. Anything else in the
+/// file is skipped; a record is only ever a reason to treat a running
+/// program as a Chrome, never to treat one as gone.
+pub(crate) fn read_record(file: &mut File) -> Vec<PathBuf> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut bytes = Vec::new();
+    if file.seek(SeekFrom::Start(0)).is_err()
+        || file
+            .by_ref()
+            .take(RECORD_LIMIT)
+            .read_to_end(&mut bytes)
+            .is_err()
+    {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .collect()
+}
+
+/// Replace the record with `programs`. A path that is not absolute, or not
+/// UTF-8, or holds a line break, cannot be written as a line and is left
+/// out; the program is then known by its family name only.
+pub(crate) fn write_record(file: &mut File, programs: &[PathBuf]) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut text = String::new();
+    for program in programs.iter().filter(|p| p.is_absolute()) {
+        if let Some(line) = program.to_str().filter(|l| !l.contains(['\n', '\r'])) {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(text.as_bytes())?;
+    file.flush()
+}
+
+/// `path` with its links resolved, or as given when it cannot be (it no
+/// longer exists).
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// What Chrome's `SingletonLock` says about a profile.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ChromeLock {
@@ -617,22 +698,27 @@ pub(crate) fn judge_chrome_lock(
     let Some(target) = target else {
         return ChromeLock::Free;
     };
-    let pid = target
-        .rsplit_once('-')
-        .and_then(|(_, pid)| pid.parse::<u32>().ok())
-        .filter(|pid| *pid > 0);
-    match pid {
+    match lock_pid(target) {
         Some(pid) if pid_now(pid) == PidNow::Chrome => ChromeLock::Held(pid),
         _ => ChromeLock::Stale,
     }
 }
 
+/// The pid in a `SingletonLock` target, `<host>-<pid>`: after the last `-`,
+/// and never 0.
+fn lock_pid(target: &str) -> Option<u32> {
+    target
+        .rsplit_once('-')
+        .and_then(|(_, pid)| pid.parse::<u32>().ok())
+        .filter(|pid| *pid > 0)
+}
+
 /// Whether `exe`, a running process's program, is a Chrome: one of `known`
-/// (the Chrome the CLI launches; links resolved on both sides), or named
-/// like the Chromium family (`Google Chrome`, `Chromium`, `chrome`,
-/// `chromium-browser`, `Microsoft Edge`, `msedge`). The name has to count
-/// too: Linux's `/usr/bin/google-chrome` is a script that runs
-/// `/opt/google/chrome/chrome`, so the launched path is not the program.
+/// (the programs the profile's record names and the one being launched;
+/// links resolved on both sides), or named like the Chromium family
+/// (`Google Chrome`, `Chromium`, `chrome`, `chromium-browser`,
+/// `Microsoft Edge`, `msedge`). The name counts too for a Chrome whose
+/// program was never recorded (one started before the record existed).
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn is_chrome_exe(exe: &Path, known: &[PathBuf]) -> bool {
     let resolve = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -650,7 +736,7 @@ pub(crate) fn is_chrome_exe(exe: &Path, known: &[PathBuf]) -> bool {
 }
 
 /// The pid of a Chrome still running in `profile`, from its `SingletonLock`,
-/// with `known` the Chrome binaries a program is compared against.
+/// with `known` the programs a running pid's program is compared against.
 fn chrome_holder(profile: &Path, known: &[PathBuf]) -> Result<Option<u32>, BrowserError> {
     let lock = profile.join(SINGLETON_LOCK);
     let target = match std::fs::read_link(&lock) {
@@ -718,17 +804,23 @@ fn process_exe(pid: u32) -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(&buf)))
 }
 
-/// The program `pid` runs, from `/proc/<pid>/exe`.
+/// The program `pid` runs, from `/proc/<pid>/exe`, without the
+/// ` (deleted)` Linux adds once the file is replaced (a browser updated
+/// while it runs), so it still matches the recorded path.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn process_exe(pid: u32) -> Option<PathBuf> {
-    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let bytes = exe.as_os_str().as_bytes();
+    Some(match bytes.strip_suffix(b" (deleted)") {
+        Some(kept) => PathBuf::from(std::ffi::OsString::from_vec(kept.to_vec())),
+        None => exe,
+    })
 }
 
-/// No portable way to read it: a running pid then counts as a Chrome.
-#[cfg(all(
-    unix,
-    not(any(target_os = "macos", target_os = "linux", target_os = "android"))
-))]
+/// No way to read it here: a running pid then counts as a Chrome, and
+/// nothing is added to the record.
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
 fn process_exe(_pid: u32) -> Option<PathBuf> {
     None
 }
