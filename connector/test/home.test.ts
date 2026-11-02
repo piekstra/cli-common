@@ -99,7 +99,6 @@ test("a setting is set unless it is empty or the Deploy form's `none`", () => {
 test("a home module is on when its token is set, through a VPC binding or a URL", () => {
   const { fetcher } = computer();
   const vpc = only({ HOME_M1_TOKEN: TOKEN, HOME_M1: fetcher });
-  assert.equal(vpc.via, "vpc");
   assert.equal(vpc.prefix, "m1_");
   assert.equal(vpc.endpoint, "http://localhost/mcp");
   assert.deepEqual(vpc.headers, { Authorization: `Bearer ${TOKEN}` });
@@ -110,7 +109,6 @@ test("a home module is on when its token is set, through a VPC binding or a URL"
     HOME_ROBINHOOD_ACCESS_CLIENT_ID: "id.access",
     HOME_ROBINHOOD_ACCESS_CLIENT_SECRET: "secret",
   });
-  assert.equal(url.via, "url");
   assert.equal(url.prefix, "robinhood_");
   assert.equal(url.endpoint, "https://rhd.example.com/mcp");
   assert.equal(url.headers["CF-Access-Client-Id"], "id.access");

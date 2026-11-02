@@ -48,8 +48,6 @@ export interface HomeModule {
   name: string;
   /** `m1_`: the tools this module serves. */
   prefix: string;
-  /** How the computer is reached. */
-  via: "vpc" | "url";
   /** What is fetched: `http://localhost/mcp` through the VPC binding (its
    * host becomes the Host header; the binding's own host and port are
    * what is dialed), or HOME_<NAME>_URL. */
@@ -122,7 +120,6 @@ export function homeModules(env: HomeEnv): { modules: HomeModule[]; problems: Ho
       modules.push({
         name,
         prefix,
-        via: "vpc",
         endpoint: "http://localhost/mcp",
         fetch: (url, init) => binding.fetch(url, init),
         headers,
@@ -149,7 +146,7 @@ export function homeModules(env: HomeEnv): { modules: HomeModule[]; problems: Ho
       headers["CF-Access-Client-Id"] = id.trim();
       headers["CF-Access-Client-Secret"] = secret.trim();
     }
-    modules.push({ name, prefix, via: "url", endpoint, fetch: (u, init) => fetch(u, init), headers });
+    modules.push({ name, prefix, endpoint, fetch: (u, init) => fetch(u, init), headers });
   }
   return { modules, problems };
 }
@@ -160,7 +157,6 @@ export interface Listing {
   instructions: string;
   /** Its `serverInfo.name`, the CLI binary (`m1f`), for messages. */
   bin: string;
-  at: number;
 }
 
 /** Why a request to the computer failed, in the owner's terms. */
@@ -176,8 +172,6 @@ export class HomeError extends Error {
 export interface Failure {
   kind: HomeError["kind"];
   message: string;
-  /** When it first failed since it last answered. */
-  since: number;
 }
 
 interface State {
@@ -307,8 +301,8 @@ function asHomeError(module: HomeModule, error: unknown): HomeError {
 }
 
 /** Remember that the computer failed to answer, and why. */
-function record(s: State, e: HomeError, now: number): void {
-  s.failure = { kind: e.kind, message: e.message, since: s.failure?.since ?? now };
+function record(s: State, e: HomeError): void {
+  s.failure = { kind: e.kind, message: e.message };
 }
 
 /** The module's tools, from the computer when it is due a re-read and
@@ -359,14 +353,13 @@ export async function listing(
       tools,
       instructions: typeof info.instructions === "string" ? info.instructions : "",
       bin: typeof info.serverInfo?.name === "string" ? info.serverInfo.name : "",
-      at: now,
     };
     await toKv(env, module.name, s.listing, fresh);
     s.listing = fresh;
     s.failure = undefined;
   } catch (error) {
     const e = asHomeError(module, error);
-    record(s, e, now);
+    record(s, e);
     console.warn(`[home ${module.name}] no tool list (${e.kind}): ${e.message}`);
   }
   return s.listing;
@@ -384,12 +377,14 @@ export async function knownListing(
   return s.listing;
 }
 
-/** The kept list, as an isolate that has not asked yet finds it. */
+/** The kept list, as an isolate that has not asked yet finds it. A list
+ * that cannot be read counts as none kept, and is logged. */
 async function fromKv(env: HomeEnv, name: string): Promise<Listing | undefined> {
   try {
     const raw = await env.OAUTH_KV?.get(`${KV_PREFIX}${name}`);
     return raw ? (JSON.parse(raw) as Listing) : undefined;
-  } catch {
+  } catch (error) {
+    console.warn(`[home ${name}] could not read the kept tool list: ${describe(error)}`);
     return undefined;
   }
 }
@@ -458,14 +453,13 @@ export async function callHome(
   module: HomeModule,
   params: { name: string; arguments?: unknown },
   cache: HomeCache,
-  now = Date.now(),
 ): Promise<{ result: CallToolResult } | { rpcError: { code: number; message: string } }> {
   const s = cache.state(module.name);
   try {
     await rpc(module, "ping", undefined, PROBE_TIMEOUT_MS);
   } catch (error) {
     const e = asHomeError(module, error);
-    record(s, e, now);
+    record(s, e);
     // No answer to a ping within seconds: as good as offline.
     const shown = e.kind === "timeout" ? { kind: "offline" as const, message: e.message } : e;
     return { result: toolError(explain(module, s.listing?.bin, shown)) };
@@ -487,7 +481,7 @@ export async function callHome(
     // The ping got through, so only a lost tunnel counts against the
     // computer; a slow or malformed answer is this call's alone.
     const e = asHomeError(module, error);
-    if (e.kind === "offline") record(s, e, now);
+    if (e.kind === "offline") record(s, e);
     return { result: toolError(explain(module, s.listing?.bin, e)) };
   }
 }
