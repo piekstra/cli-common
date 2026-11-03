@@ -26,8 +26,8 @@ use pk_cli_core::CliError;
 /// Run `op`; if it fails because the session has lapsed, re-authenticate with
 /// `reauth` and run `op` exactly once more.
 ///
-/// Only [`CliError::Auth`] triggers recovery — an upstream error, a not-found,
-/// or a usage error is returned untouched, because retrying those either
+/// Only an auth error ([`CliError::is_auth`], typed or not) triggers recovery — an
+/// upstream error, a not-found, or a usage error is returned untouched, because retrying those either
 /// changes nothing or repeats a side effect.
 ///
 /// # Guarantees

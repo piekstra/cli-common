@@ -12,10 +12,11 @@
   not see through it, so a CLI that types a cause moves its own patterns to `is_auth()`
   or `base()`. The shared crates' own errors stay plain.
 - `pk-cli-mcp`: a remedy kept apart stays out of a tool's text, with nothing searched for
-  in the message. A plain `CliError::Auth` still has its closing remedy cut from the text,
-  for messages not yet moved.
+  in the message. An auth message with no remedy kept apart still has its closing remedy
+  cut from the text, for messages not yet moved.
 - `pk-cli-auth`: `with_reauth` and the one-time-code flow treat any exit-3 error as auth,
-  typed or not.
+  typed or not. `pk-cli-drive`'s `is_stale_write_refusal` and `pk-cli-utility`'s masking
+  of account ids look through a typed error too.
 
 ## v0.25.0 — 2026-11-03
 

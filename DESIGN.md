@@ -594,8 +594,8 @@ Worker) sets its own with `Server::hosted`, which replaces it.
 
 A tool's text carries one remedy. An error's `with_remedy` (§1.5) is for a terminal and
 stays out of it, and a tool that answers differently by cause reads `CliError::reason`
-in its `tool_err`. A plain `CliError::Auth` whose message closes on its own remedy has
-that cut from the text, for messages not yet moved to `with_remedy`.
+in its `tool_err`. An auth message with no remedy kept apart has a closing remedy cut
+from its text, for messages not yet moved to `with_remedy`.
 
 #### A tool never signs in
 

@@ -216,11 +216,15 @@ impl From<CliError> for ToolError {
             CliError::Keychain(m) => Self::other(format!("the OS keychain could not be used: {m}")),
             CliError::Other(m) => Self::other(m),
             // A message with its remedy kept apart holds only what went wrong, so no
-            // text is searched: an auth message may say `Run` in its own right.
-            detailed @ CliError::Detailed(_) => match detailed.into_base() {
-                CliError::Auth(m) => Self::auth(m),
-                plain => plain.into(),
-            },
+            // text is searched: it may say `Run` in its own right. One given only a
+            // reason may still close on its remedy, so it goes the plain way.
+            detailed @ CliError::Detailed(_) => {
+                let remedy_apart = detailed.remedy().is_some();
+                match detailed.into_base() {
+                    CliError::Auth(m) if remedy_apart => Self::auth(m),
+                    plain => plain.into(),
+                }
+            }
         }
     }
 }
@@ -280,6 +284,18 @@ mod tests {
         );
         let text = tool.render(&server("svc"));
         assert!(text.contains("`svc auth login`"), "{text}");
+        assert!(!text.contains("old init"), "{text}");
+    }
+
+    /// Typing a cause is likely a message's first step, ahead of moving its remedy, and
+    /// must not put a second command into the tool's text.
+    #[test]
+    fn a_reason_alone_still_has_a_closing_remedy_cut_from_the_text() {
+        let e = CliError::Auth("the session lapsed; run `old init`".into())
+            .because(pk_cli_core::Reason::CredentialRefused);
+        let tool = ToolError::from(e);
+        assert_eq!(tool.message(), "the session lapsed");
+        let text = tool.render(&server("svc"));
         assert!(!text.contains("old init"), "{text}");
     }
 

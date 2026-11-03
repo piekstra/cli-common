@@ -527,7 +527,7 @@ const STALE_WRITE_REFUSED: &str = "changed on the remote after this command read
 /// on it, asks here instead of matching the text. Nothing was written, and
 /// the cache now holds the current copy.
 pub fn is_stale_write_refusal(err: &CliError) -> bool {
-    matches!(err, CliError::Other(message) if message.contains(STALE_WRITE_REFUSED))
+    matches!(err.base(), CliError::Other(message) if message.contains(STALE_WRITE_REFUSED))
 }
 
 /// The source of truth was unreachable but a cached copy exists — surface that
@@ -940,6 +940,8 @@ mod tests {
         let err = c.confirm_stale_reads().unwrap_err();
         assert_eq!(err.exit_code(), 1);
         assert!(is_stale_write_refusal(&err), "{err}");
+        let typed = err.clone().because(pk_cli_core::Reason::Provider("stale"));
+        assert!(is_stale_write_refusal(&typed), "{typed}");
         // The exact text is a contract: adopters document it.
         assert!(
             matches!(&err, CliError::Other(m) if m == "fake:notes.md changed on the remote after \
