@@ -1373,7 +1373,9 @@ mod tests {
 
     /// The whole run: nothing of the site storage is there when Chrome
     /// starts, and what a Chrome writes while it runs, and as it stops, is
-    /// gone once the guard has dropped. The cookies stay throughout.
+    /// gone once the guard has dropped. The cookies stay throughout. Nothing
+    /// listens on this fake's port, so this is the signal path, and
+    /// `what_chrome_writes_as_it_closes_over_the_port_is_removed` is the close.
     #[cfg(unix)]
     #[test]
     fn site_storage_goes_before_chrome_starts_and_again_once_it_stops() {
@@ -1399,6 +1401,7 @@ mod tests {
         plant_site_storage(&kept);
         drop(browser);
         assert!(!alive(pid), "Chrome is stopped");
+        assert!(stopped_by_signal(&kept));
         assert!(
             kept.join("flushed-on-stop").exists(),
             "Chrome wrote to its storage as it stopped"
@@ -1415,6 +1418,75 @@ mod tests {
                 .unwrap(),
         );
         assert_cookies_kept(&kept);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The close waits for Chrome's exit before the storage goes, so the removal
+    /// takes what that exit wrote.
+    #[cfg(unix)]
+    #[test]
+    fn what_chrome_writes_as_it_closes_over_the_port_is_removed() {
+        let root = temp_root("storage-close");
+        let bin = "pk-cli-browser-storage-close";
+        let kept = kept_profile_with_storage(&root, bin);
+        let debug = FakeDebugPort::start(kept.clone(), OnClose::AnswerAndExit);
+
+        let browser = fake_launch(bin, &root)
+            .url(close_url(debug.port))
+            .url("https://flush-on-stop.example/")
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap();
+        let found = default_at_launch(&kept);
+        for name in SITE_STORAGE {
+            assert!(!found.iter().any(|f| f == name), "{name} in {found:?}");
+        }
+
+        plant_site_storage(&kept);
+        drop(browser);
+        assert_eq!(debug.methods(), ["Browser.close"]);
+        assert!(closed_over_the_port(&kept));
+        assert!(!stopped_by_signal(&kept));
+        assert!(
+            kept.join("flushed-on-stop").exists(),
+            "Chrome wrote to its storage as it closed"
+        );
+        assert_eq!(storage_left(&kept), [] as [&str; 0]);
+        assert_cookies_kept(&kept);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The check for a running Chrome comes after the close, not before it: the
+    /// process asked to quit exits, the browser holding the profile does not
+    /// (a relaunch to update), and its storage is not removed under it.
+    #[cfg(unix)]
+    #[test]
+    fn a_chrome_left_running_after_the_close_keeps_its_storage() {
+        let root = temp_root("storage-close-holder");
+        let bin = "pk-cli-browser-storage-close-holder";
+        let kept = kept_profile_with_storage(&root, bin);
+        let debug = FakeDebugPort::start(kept.clone(), OnClose::AnswerAndExit);
+        let mut holder = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+
+        let browser = fake_launch(bin, &root)
+            .url(close_url(debug.port))
+            .url(format!("https://leave-holder-{}.example/", holder.id()))
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap();
+        plant_site_storage(&kept);
+        drop(browser);
+        assert_eq!(debug.methods(), ["Browser.close"]);
+        assert!(closed_over_the_port(&kept));
+        assert!(alive(holder.id()));
+        assert_eq!(storage_left(&kept), SITE_STORAGE, "not removed under it");
+        assert_cookies_kept(&kept);
+
+        holder.kill().unwrap();
+        holder.wait().unwrap();
         std::fs::remove_dir_all(&root).unwrap();
     }
 
