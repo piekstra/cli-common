@@ -336,10 +336,11 @@ fn origin_and_path(url: &str) -> (String, &str) {
 /// Refuse a URL a credential must not travel to: anything but `https`, except
 /// plain `http` to this machine, which a stub or a local tunnel uses.
 ///
-/// Call it before sending when the URL or host came from outside the binary:
-/// a raw `api` passthrough, a host override, a URL in a provider's response.
-/// The message names only the scheme and host, since the rest can carry an
-/// account id or a token.
+/// Call it before sending when the user supplied the URL or host: a raw `api`
+/// passthrough or a host override. For a URL in a provider's response, map the
+/// error to [`CliError::Upstream`], since the provider is at fault and not the
+/// command line. The message names only the scheme and host, since the rest can
+/// carry an account id or a token.
 pub fn require_secure_url(url: &str) -> Result<(), CliError> {
     if is_secure_url(url) {
         return Ok(());
@@ -625,13 +626,13 @@ mod tests {
         fn a_refused_redirect_says_why_and_stops_before_the_next_hop() {
             let (base, hits) = redirecting_server("http://www.example.invalid/next?token=dummy");
             let err = client()
-                .get(format!("{base}/accounts/1234?token=dummy-token"))
+                .get(format!("{base}/accounts/acct-xyz?token=dummy-token"))
                 .send()
                 .unwrap_err();
             assert!(err.is_redirect(), "{err}");
             let message = CliError::from(err).to_string();
             assert!(message.contains("leaves https"), "{message}");
-            for leak in ["1234", "dummy", "www.example.invalid"] {
+            for leak in ["acct-xyz", "dummy", "www.example.invalid"] {
                 assert!(!message.contains(leak), "{leak} printed: {message}");
             }
             assert_eq!(hits.load(Ordering::SeqCst), 1);

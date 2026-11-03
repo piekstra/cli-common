@@ -129,12 +129,12 @@ mod tests {
             .expect("a free port")
             .port();
         let err = reqwest::blocking::get(format!(
-            "http://127.0.0.1:{port}/accounts/1234?token=dummy-token"
+            "http://127.0.0.1:{port}/accounts/acct-xyz?token=dummy-token"
         ))
         .unwrap_err();
         let message = CliError::from(err).to_string();
         assert!(message.contains(&format!("127.0.0.1:{port}")), "{message}");
-        for leak in ["accounts", "1234", "dummy-token"] {
+        for leak in ["accounts", "acct-xyz", "dummy-token"] {
             assert!(!message.contains(leak), "{leak} printed: {message}");
         }
     }
