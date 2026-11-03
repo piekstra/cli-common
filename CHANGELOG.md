@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- `pk-cli-browser`: `Launch::clear_site_storage(bool)`, default off, for a CLI
+  whose provider keeps tokens in site storage. A kept profile retains that
+  storage, so on the next launch the site's own script can present a retired
+  refresh token, which reuse detection answers by revoking the whole token
+  family, a capture can read a stale bundle, and the token sits unencrypted on
+  disk between runs. With the option on, a kept profile keeps its cookies and
+  never `Default/Local Storage`, `Session Storage`, `IndexedDB`, `WebStorage`,
+  `Service Worker`, `File System` or `databases`. They are removed once the run
+  lock is held and no Chrome is running there, before Chrome starts (a failure
+  is `BrowserError::Profile` naming the path, and no Chrome starts), and again,
+  best effort, once the `Browser` guard has stopped Chrome. A crash or a second
+  Ctrl-C skips the second removal, as does a Chrome still running in the profile
+  once the spawned process has ended, with a warning; the next launch's removal
+  covers each. A symlink is
+  removed as a link and its target never touched; a `Default` that is a symlink
+  refuses the launch. No effect on a scratch profile.
+- `pk-cli-browser`: `profile_exists(bin)` and `named_profile_exists(bin, name)`
+  say whether a kept profile exists, for `auth status`. They answer and refuse
+  as `forget_profile` and `forget_named_profile` do, take no lock and create
+  nothing. `test-util` adds `profile_exists_in` and `named_profile_exists_in`.
+- `pk-cli-browser`: `BrowserArgs` refuses `--fresh-profile` without `--browser`
+  (exit 2) when the CLI marks `browser` as conflicting with another argument.
+  Clap counts a `requires` as satisfied when the required argument conflicts with
+  one given, so `--fresh-profile --stdin` parsed and the flag was ignored. A CLI
+  needs no change beyond the new tag; `BrowserArgs` is the same flags, argument
+  ids and group, and implements `clap::Args` and `FromArgMatches` by hand.
+- `pk-cli-browser`: a kept profile that belongs to another user is refused with
+  a message that says so, without printing uid numbers.
+- `pk-cli-browser`: dropping a kept profile unlocks its run lock explicitly. On
+  a close alone, the lock lasted as long as a copy of the descriptor in a process
+  another thread was spawning, which refused the next sign-in as `ProfileInUse`.
 - `pk-cli-browser`: dropping the `Browser` guard on a kept profile asks Chrome to
   quit over its debug port (`Browser.close`) and waits up to 5 s for it to exit,
   so a persistent cookie the provider set just before the close is on disk for
@@ -11,6 +42,15 @@
   80 ms, up from about 55 ms. A second Ctrl-C stays immediate, and a scratch
   profile is stopped as before. Measured in headless Chrome 156 only: a visible
   window is unverified (DESIGN.md §2.2).
+- `pk-cli-auth`: `AuthStatus` gains an optional `browser_profile`, left off the
+  wire when unset, within `auth-status/v1`. `AuthStatus` is `#[non_exhaustive]`,
+  so it must be built with `AuthStatus::new` or `not_required`: a struct literal,
+  or a pattern without `..`, no longer compiles. The JSON shape does not change.
+- `example-cli`: `auth status` reports the kept profile through a seam its tests
+  fill with `profile_exists_in`, and `auth login --browser` turns on
+  `clear_site_storage`, since its demo portal keeps tokens in `localStorage`.
+- `DESIGN.md` §1.4, §1.7, §2.2, `conformance.md`, `README.md`: these calls, and
+  when a CLI turns the option on.
 
 ## v0.18.0 — 2026-11-03
 
