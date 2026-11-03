@@ -174,6 +174,29 @@ impl Updater {
     /// The full standard `self-update` command: check, report, and (unless
     /// `--check`) install. `json_mode` is the global/local `--json` OR.
     pub fn run(&self, args: &SelfUpdateArgs, json_mode: bool, quiet: bool) -> Result<(), CliError> {
+        self.run_inner(args, json_mode, quiet, None)
+    }
+
+    /// [`run`](Self::run), and once a new binary is in place, `note` on stderr
+    /// (unless `quiet`): what the owner still has to do for it to take effect.
+    /// `--check` and an up-to-date binary print no note.
+    pub fn run_noting(
+        &self,
+        args: &SelfUpdateArgs,
+        json_mode: bool,
+        quiet: bool,
+        note: &str,
+    ) -> Result<(), CliError> {
+        self.run_inner(args, json_mode, quiet, Some(note))
+    }
+
+    fn run_inner(
+        &self,
+        args: &SelfUpdateArgs,
+        json_mode: bool,
+        quiet: bool,
+        note: Option<&str>,
+    ) -> Result<(), CliError> {
         let json_mode = json_mode || args.json;
         let check = self.check()?;
 
@@ -206,7 +229,7 @@ impl Updater {
         }
         self.install(&check)?;
         if !quiet {
-            eprintln!("updated to {}", check.latest);
+            eprintln!("{}", installed_message(&check.latest, note));
         }
         if json_mode {
             output::json(&json!({ "updated": true, "version": check.latest }));
@@ -409,9 +432,26 @@ fn version_gt(a: &str, b: &str) -> bool {
     false
 }
 
+/// What `self-update` says once the new binary is in place.
+fn installed_message(version: &str, note: Option<&str>) -> String {
+    match note {
+        Some(note) => format!("updated to {version}\n{note}"),
+        None => format!("updated to {version}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_install_says_the_version_and_then_any_note() {
+        assert_eq!(installed_message("0.2.0", None), "updated to 0.2.0");
+        assert_eq!(
+            installed_message("0.2.0", Some("restart the server")),
+            "updated to 0.2.0\nrestart the server"
+        );
+    }
 
     #[test]
     fn version_compare() {

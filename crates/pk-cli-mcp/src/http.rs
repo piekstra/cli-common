@@ -263,6 +263,36 @@ impl<T: Toolset> Toolset for Scoped<T> {
     }
 }
 
+/// What a running server prints once. It names the version because the server
+/// outlives `self-update` (see [`restart_note`]), so its log is where to check
+/// which code is running.
+fn start_line(server: &Server, addr: SocketAddr, tools: usize, writes: usize) -> String {
+    format!(
+        "{bin} {version} mcp: serving {tools} tool{s} ({kind}) at http://{addr}/mcp to holders \
+         of the bearer token",
+        bin = server.bin,
+        version = server.version,
+        s = if tools == 1 { "" } else { "s" },
+        kind = if writes == 0 {
+            "read-only".to_string()
+        } else {
+            format!("{writes} of them can change data")
+        },
+    )
+}
+
+/// The note for `pk_cli_selfupdate::Updater::run_noting`: `self-update` swaps
+/// the binary on disk, but `<bin> mcp --http` runs until it is stopped, and the
+/// launchd agent in `connector/`'s README restarts it only when it exits. So it
+/// keeps serving the old code until someone restarts it.
+pub fn restart_note(bin: &str) -> String {
+    format!(
+        "note: a running `{bin} mcp --http` keeps serving the old version until it restarts. \
+         Under its launchd agent:\n  \
+         launchctl kickstart -k gui/$(id -u)/com.piekstra.{bin}-mcp-http"
+    )
+}
+
 /// Serve on 127.0.0.1:`port` until the process is stopped.
 fn serve<T: Toolset + Send + Sync + 'static>(
     toolset: Scoped<T>,
@@ -297,18 +327,7 @@ fn serve<T: Toolset + Send + Sync + 'static>(
             config,
         );
         let gate = Arc::new(Gate { token, port });
-        eprintln!(
-            "{bin} mcp: serving {n} tool{s} ({kind}) at http://{addr}/mcp to holders of the \
-             bearer token",
-            bin = server.bin,
-            n = tools.len(),
-            s = if tools.len() == 1 { "" } else { "s" },
-            kind = if writes == 0 {
-                "read-only".to_string()
-            } else {
-                format!("{writes} of them can change data")
-            },
-        );
+        eprintln!("{}", start_line(&server, addr, tools.len(), writes));
         loop {
             let (stream, _) = match listener.accept().await {
                 Ok(accepted) => accepted,
@@ -481,6 +500,33 @@ mod tests {
 
     fn bearer() -> String {
         format!("Bearer {TOKEN}")
+    }
+
+    #[test]
+    fn the_start_line_names_the_version() {
+        let line = start_line(
+            &Server::new("svc", "1.2.3", "Service", "svc"),
+            bind_addr(8731),
+            2,
+            0,
+        );
+        assert_eq!(
+            line,
+            "svc 1.2.3 mcp: serving 2 tools (read-only) at http://127.0.0.1:8731/mcp to holders \
+             of the bearer token"
+        );
+    }
+
+    /// The label is the one the connector's README installs and restarts.
+    #[test]
+    fn the_restart_note_uses_the_connectors_launchd_label() {
+        let kickstart = "launchctl kickstart -k gui/$(id -u)/com.piekstra.m1f-mcp-http";
+        assert!(restart_note("m1f").contains(kickstart));
+        let readme =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../connector/README.md");
+        let readme = std::fs::read_to_string(readme).unwrap();
+        assert!(readme.contains(kickstart));
+        assert!(readme.contains("<string>com.piekstra.m1f-mcp-http</string>"));
     }
 
     #[test]
