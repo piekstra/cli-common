@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.26.0 — 2026-11-03
+
 - `pk-cli-config`: `~` is `HOME`, then `USERPROFILE`, so a config resolves on Windows, where
   Claude Desktop starts a server with no `HOME`. It failed with "$HOME unset".
   An empty variable counts as unset.
