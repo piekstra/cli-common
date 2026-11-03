@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.20.0 — 2026-11-03
 
 - `pk-cli-browser`: `Confirm::Undecided { reason, retry_after }` and
   `Confirm::undecided(reason)`, for a confirm hook's read that could not decide (a
