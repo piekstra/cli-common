@@ -7,9 +7,10 @@
   secret is read, so a stuck or unusable lock fails while nothing is lost.
   `store_signin` is the write: it waits four times as long as a renewal, and its
   error says the sign-in worked and the session was not stored.
-  `forget_for_binary` and `forget` are a logout's delete,
-  which runs with or without the lock: past a held lock it exits 5 saying to run
-  it again, and past an unusable lock or no home directory it warns on stderr.
+  `forget_for_binary` and `forget` are a logout's delete, which runs with or
+  without the lock. If another process holds it, the delete runs at once and again
+  when the lock frees; past the wait, or with no home directory to find the lock
+  in, it exits 5 saying to run it again. Past an unusable lock it warns on stderr.
   `try_hold` runs its closure only if the lock is free right now, for a caller
   that does something different when it is not first. `hold` is unchanged in
   behaviour, and its contention text is the same.

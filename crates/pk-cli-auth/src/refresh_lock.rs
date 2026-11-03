@@ -194,36 +194,50 @@ impl RefreshLock {
     /// names. `delete` runs however the lock turns out, because the lock must not
     /// be what keeps a credential on the machine:
     ///
-    /// - Lock taken: `delete`'s result.
-    /// - Another process holds it past the wait: `delete` runs, and the result is
-    ///   [`CliError::Upstream`] (exit 5) saying so, because a renewal in flight can
-    ///   store the session again. Running the logout again settles it.
-    /// - Lock unusable, or no home directory to find it in: `delete`'s result, with
-    ///   a warning on stderr. A process resolving the same path cannot be holding
-    ///   it either.
+    /// - Lock free: `delete`'s result.
+    /// - Another process holds it: `delete` runs at once, so nothing that interrupts
+    ///   the wait leaves the credential behind, and again once the lock is free, to
+    ///   remove whatever a renewal in flight stored. `delete` must tolerate finding
+    ///   nothing. Past the wait the result is [`CliError::Upstream`] (exit 5) saying
+    ///   so, because a renewal can still store the session; running the logout again
+    ///   settles it.
+    /// - Lock unusable: `delete`'s result, with a warning on stderr. A process
+    ///   resolving the same path cannot be holding it either.
+    /// - No home directory: `delete` runs, and the result is [`CliError::Upstream`],
+    ///   because this process resolved no path and one with a home directory can hold
+    ///   the real lock.
     ///
     /// An error from `delete` passes through unchanged: the session is still stored.
     pub fn forget_for_binary<T>(
         bin: &str,
-        delete: impl FnOnce() -> Result<T, CliError>,
+        delete: impl Fn() -> Result<T, CliError>,
     ) -> Result<T, CliError> {
         match Self::for_binary(bin) {
             Ok(lock) => lock.forget(delete),
-            Err(no_home) => forget_unlocked(&no_home.to_string(), delete),
+            Err(no_home) => forget_without_home(&no_home, delete),
         }
     }
 
     /// [`forget_for_binary`](Self::forget_for_binary) for this lock.
-    pub fn forget<T>(&self, delete: impl FnOnce() -> Result<T, CliError>) -> Result<T, CliError> {
+    pub fn forget<T>(&self, delete: impl Fn() -> Result<T, CliError>) -> Result<T, CliError> {
+        match self.acquire_within(Duration::ZERO, || {}) {
+            Ok(_held) => return delete(),
+            Err(Refused::Broken(why)) => return forget_unlocked(&why, delete),
+            Err(Refused::Held(_)) => {}
+        }
+        delete()?;
+        eprintln!(
+            "the stored session is deleted; waiting up to {:?} for another process to release \
+             {}, in case it is renewing",
+            self.wait,
+            self.path.display()
+        );
         match self.acquire() {
             Ok(_held) => delete(),
-            Err(Refused::Held(why)) => {
-                delete()?;
-                Err(CliError::Upstream(format!(
-                    "the stored session is deleted, but {why}, and a renewal in flight can \
-                     store it again: run this logout again in a minute"
-                )))
-            }
+            Err(Refused::Held(why)) => Err(CliError::Upstream(format!(
+                "the stored session is deleted, but {why}, and a renewal in flight can store it \
+                 again: run this logout again in a minute"
+            ))),
             Err(Refused::Broken(why)) => forget_unlocked(&why, delete),
         }
     }
@@ -269,7 +283,7 @@ impl RefreshLock {
                 Ok(()) => return Ok(file),
                 Err(TryLockError::Error(e)) => {
                     return Err(Refused::Broken(format!(
-                        "locking {} before renewing the session: {e}",
+                        "locking {}: {e}",
                         self.path.display()
                     )))
                 }
@@ -337,6 +351,17 @@ fn forget_unlocked<T>(
     let deleted = delete()?;
     eprintln!("warning: deleted the stored session without the token-refresh lock: {why}");
     Ok(deleted)
+}
+
+fn forget_without_home<T>(
+    no_home: &CliError,
+    delete: impl FnOnce() -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    delete()?;
+    Err(CliError::Upstream(format!(
+        "the stored session is deleted, but {no_home}, so a renewal in another process cannot be \
+         ruled out: run this logout again from an environment with a home directory"
+    )))
 }
 
 fn path_under(home: &Path, bin: &str) -> PathBuf {
@@ -762,14 +787,14 @@ mod tests {
         let (holder, contender) = contended(&dir);
         holder
             .hold(|| {
-                let mut deleted = false;
+                let deleted = std::cell::Cell::new(false);
                 let err = contender
                     .forget(|| {
-                        deleted = true;
+                        deleted.set(true);
                         Ok(())
                     })
                     .unwrap_err();
-                assert!(deleted, "the lock must not keep the credential");
+                assert!(deleted.get(), "the lock must not keep the credential");
                 assert_eq!(err.exit_code(), 5, "{err}");
                 let message = err.to_string();
                 assert!(message.contains("is deleted"), "{message}");
@@ -780,10 +805,61 @@ mod tests {
     }
 
     #[test]
-    fn a_logout_past_a_broken_lock_or_no_home_deletes_and_succeeds() {
+    fn a_logout_deletes_before_it_waits_and_again_once_the_lock_is_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token-refresh.lock");
+        let holder = RefreshLock::at(&path);
+        let deletes = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let (locked, go) = std::sync::mpsc::channel();
+            let (seen, release) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                holder
+                    .hold(|| {
+                        locked.send(()).unwrap();
+                        release.recv().unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+            });
+            go.recv().unwrap();
+            RefreshLock::at(&path)
+                .wait_at_most(Duration::from_secs(30))
+                .forget(|| {
+                    let this_one = deletes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if this_one == 0 {
+                        // The first delete happens with the lock still held.
+                        seen.send(()).unwrap();
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        });
+        assert_eq!(deletes.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_logout_past_a_broken_lock_deletes_and_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         assert!(broken(&dir).forget(|| Ok(true)).unwrap());
-        assert!(forget_unlocked("dummy: no home directory", || Ok(true)).unwrap());
+    }
+
+    #[test]
+    fn a_logout_with_no_home_deletes_and_does_not_read_as_settled() {
+        let no_home = CliError::Other("dummy: no home directory".into());
+        let mut deleted = false;
+        let err = forget_without_home(&no_home, || {
+            deleted = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(deleted, "the lock must not keep the credential");
+        assert_eq!(err.exit_code(), 5, "{err}");
+        assert!(err.to_string().contains("is deleted"), "{err}");
+        assert!(
+            err.to_string().contains("dummy: no home directory"),
+            "{err}"
+        );
     }
 
     #[test]

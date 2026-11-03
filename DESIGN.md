@@ -200,7 +200,9 @@ conventions alone; TOML manifests stay as the escape hatch for non-conforming CL
   (`before_signin`) and says the session was not stored if the write cannot get
   it (`store_signin`). A logout's delete runs with or without the lock
   (`forget_for_binary`), because the lock must not be what keeps a credential on
-  the machine; past a held lock it exits 5 saying to run it again. The lock is an
+  the machine: at once if another process holds it, and again when the lock frees.
+  Past the wait, or with no home directory to find the lock in, it exits 5 saying
+  to run it again. The lock is an
   empty file, `~/.config/<bin>/token-refresh.lock`, whatever `--config` or
   `XDG_CONFIG_HOME` say, because the keychain item is the same whatever they say.
   The wait is bounded (75 s, then exit 5 naming the lock), and without the lock
