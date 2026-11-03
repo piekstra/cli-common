@@ -124,21 +124,25 @@ Stdout = data only; progress/confirmation/diagnostics = stderr.
   "credential_in_keychain": true,
   "session_valid": true,
   "expires_at": "2026-07-12T03:00:00Z",
-  "browser_profile": true
+  "browser_profile": true,
+  "verified": true
 }
 ```
 (`username`/`account`/`expires_at` optional. `browser_profile` is for a CLI
 with `auth login --browser`: whether it keeps a browser profile, not whether
-that profile is signed in; §2.2.) This retires utiman's
+that profile is signed in; §2.2. `verified` is set only by a login that answers
+with this schema, below.) This retires utiman's
 `authenticated-field` per-provider config.
 
 **A login result under `--json` (schema `auth-login/v1`):**
 ```json
 { "schema": "auth-login/v1", "stored": true, "verified": true }
 ```
-`auth login`, and any other command that stores a session (`set-credential`,
-`set-session`), answers with this. A CLI whose login already answers with its own
-schema (`auth-status/v1`, `session-import/v1`) adds `verified` there. `verified` is
+A CLI with `auth login --browser` answers with this, through
+`pk_cli_auth::AuthLogin`, from `auth login` and any other command that stores a
+session (`auth set-credential`, or a CLI's own `set-session`). One whose login
+already answers with its own schema (`auth-status/v1`, through
+`AuthStatus::verified`, or `session-import/v1`) adds `verified` there. `verified` is
 `true` when a provider read accepted the session and `false` otherwise, including
 `--no-verify` and any other store with no read. It is present on both values rather
 than omitted when `true`, because a driver tests for it. A consumer treats an absent
@@ -740,13 +744,17 @@ and a 403 with an HTML page and carries the `Retry-After`, and judges any other
 answer by the provider's own rule. A 2xx alone is not acceptance, because an edge
 interstitial or an app's shell page can answer 200 to anyone. Those helpers read
 the status and headers only, so the hook looks in the body for what only a
-signed-in answer has, and answers `Undecided` on a 2xx whose body is empty, HTML or
-unparseable.
+signed-in answer has. A parseable answer the provider gives an anonymous visitor is
+that provider's refusal and answers `NotYet`. `Undecided` is for a 2xx that is
+empty, unparseable or an edge page. Where a provider's shell page looks the same to
+a visitor and from an edge block, the CLI records which it is in its `docs/api.md`.
 
 A stored, unverified session exits 0, because the session is stored, and its login
 result says `verified: false` (§1.4). The stderr warning prints even under `-q`, names the cause, says
 the session is unverified, and names the way out: `<bin> auth login --browser
---overwrite`. An `auth status` that makes no provider read reports `session_valid`
+--overwrite`. When the cause is an edge block it says first that a new sign-in may
+not clear it, because the block is on the client rather than the session, and to
+wait or try another network. An `auth status` that makes no provider read reports `session_valid`
 from local facts (an expiry, a refresh token), so an unverified session can read
 as valid until a read says otherwise.
 
@@ -836,10 +844,11 @@ let capture = Capture::new("Example", HostRule::exact("www.example.com")?)
         if !(200..300).contains(&status) {
             return Confirm::NotYet(format!("GET /api/me answered HTTP {status}"));
         }
-        // A 2xx alone proves nothing: an edge page or an app's shell answers 200.
+        // A 2xx alone proves nothing: an edge page answers 200, and so can a visitor.
         match answer.json::<serde_json::Value>() {
-            Ok(me) if me.get("email").is_some() => Confirm::Ready,
-            _ => Confirm::undecided("GET /api/me answered 200 with no account in it"),
+            Ok(me) if me.get("email").and_then(|v| v.as_str()).is_some() => Confirm::Ready,
+            Ok(_) => Confirm::NotYet("GET /api/me answered with no account in it".into()),
+            Err(_) => Confirm::undecided("GET /api/me answered 200 with no JSON in it"),
         }
     });
 ```

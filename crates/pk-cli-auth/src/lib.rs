@@ -54,6 +54,39 @@ pub struct AuthStatus {
     /// out by a CLI with no browser sign-in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_profile: Option<bool>,
+    /// Whether a provider read accepted the session just stored. Only a login
+    /// that answers with this schema sets it (DESIGN.md §1.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+}
+
+/// The `--json` result of a login, or of any other command that stores a
+/// session (`auth-login/v1`, DESIGN.md §1.4). `verified` is present on both
+/// values, because a driver tests for it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AuthLogin {
+    pub schema: String,
+    /// A session is in the keychain.
+    pub stored: bool,
+    /// A provider read accepted it. `false` for `--no-verify`, an inconclusive
+    /// read and any other store with no read.
+    pub verified: bool,
+}
+
+impl AuthLogin {
+    /// A session was stored, proven by a read or not.
+    pub fn stored(verified: bool) -> Self {
+        AuthLogin {
+            schema: "auth-login/v1".into(),
+            stored: true,
+            verified,
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
 }
 
 impl AuthStatus {
@@ -69,6 +102,7 @@ impl AuthStatus {
             session_valid: None,
             expires_at: None,
             browser_profile: None,
+            verified: None,
         }
     }
 
@@ -187,6 +221,24 @@ mod tests {
 
     /// An optional field added within `auth-status/v1`: left off the wire by
     /// a CLI that does not set it, and missing from an older payload.
+    #[test]
+    fn a_login_result_says_verified_on_both_values() {
+        for verified in [true, false] {
+            let v = AuthLogin::stored(verified).to_json();
+            assert_eq!(v["schema"], "auth-login/v1");
+            assert_eq!(v["stored"], true);
+            assert_eq!(v["verified"], verified);
+        }
+    }
+
+    #[test]
+    fn only_a_login_sets_verified_on_a_status() {
+        let mut s = AuthStatus::new(true, true, AuthMethod::BrowserSession);
+        assert!(s.to_json().get("verified").is_none());
+        s.verified = Some(false);
+        assert_eq!(s.to_json()["verified"], false);
+    }
+
     #[test]
     fn the_browser_profile_is_reported_only_when_set() {
         let mut s = AuthStatus::new(true, true, AuthMethod::BrowserSession);

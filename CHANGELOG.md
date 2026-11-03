@@ -20,11 +20,14 @@
   `parse_retry_after(value, now)` reads `Retry-After` in seconds or as an IMF-fixdate.
   `pk-cli-http`: `inconclusive(&response)` and `retry_after(&headers)` do the same for
   a `reqwest` response.
+- `pk-cli-auth`: `AuthLogin`, the `auth-login/v1` result, and an optional
+  `AuthStatus::verified` for a login that answers with `auth-status/v1`.
 - `DESIGN.md` §2.2 and `conformance.md` state what a window capture does when its
   verifying read cannot decide. A refusal stores nothing. A value that can only be
   this sign-in's stores with a warning and exit 0. A value that could predate the
-  sign-in answers `Confirm::Undecided`. A 2xx alone is not acceptance. §1.4 defines a
-  `--json` login result, `auth-login/v1`, which always carries `verified`.
+  sign-in answers `Confirm::Undecided`. A 2xx alone is not acceptance. §1.4 defines
+  `auth-login/v1` for a CLI with `auth login --browser`, which always carries
+  `verified`.
 
 ## v0.19.0 — 2026-11-03
 
