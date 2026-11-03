@@ -10,6 +10,14 @@
   cannot put a value together is an error naming the item, and `delete` removes every part.
   macOS and Linux have no such limit, and there each call stays the one keychain operation
   it was. A new workflow runs this on the real Credential Manager, on any change to the crate.
+
+## v0.26.0 — 2026-11-03
+
+- `pk-cli-config`: `~` is `HOME`, then `USERPROFILE`, so a config resolves on Windows, where
+  Claude Desktop starts a server with no `HOME`. It failed with "$HOME unset".
+  An empty variable counts as unset.
+- `pk-cli-selfupdate`: a release archive's binary may be `<binary>.exe`. Every Windows install
+  failed with "the release archive did not contain" it.
 - `pk-cli-mcp`: a position cursor. `PositionRequest`, beside `PageRequest`, takes every
   matching row paired with its `PositionKey` and an `Order`, sorts them, and returns a cursor
   holding the last row's position instead of a count of rows, so a row that arrives between
