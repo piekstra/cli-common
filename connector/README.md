@@ -4,7 +4,8 @@ A Cloudflare Worker that you deploy into **your own** Cloudflare account and
 add to Claude (web, mobile and desktop) as a custom connector. It gives Claude
 read-only tools over your own accounts, built from the same open-source code
 as the family's command-line tools. A smart-home CLI's module can also change your
-lights and plugs, only if you start it with `--allow-writes`. There is no service in between: your API
+lights and plugs, and `myq`'s can open and close your garage door, only if you start it with
+`--allow-writes`. There is no service in between: your API
 keys are secrets in your Worker, and only someone with your passphrase can
 connect a client to it.
 
@@ -20,6 +21,7 @@ Tools it can serve. Every module is optional: you turn on the ones you use.
 | `fpl_…`, `jupiter_…`, `loxahatchee_…`, `xfinity_…` | [fpl-cli](https://github.com/piekstra/fpl-cli), [town-of-jupiter-fl-cli](https://github.com/piekstra/town-of-jupiter-fl-cli), [loxahatchee-river-fl-cli](https://github.com/piekstra/loxahatchee-river-fl-cli), [xfinity-cli](https://github.com/piekstra/xfinity-cli) | on your computer, through your tunnel ([home modules](#tools-from-your-computer-home-modules)) | What do I owe, and when is it due? What did past bills come to? Which payments posted? How much did I use? |
 | `schwab_…`, `nelnet_…`, `chase_…`, `lofty_…` | [schwab-cli](https://github.com/piekstra/schwab-cli), [nelnet-cli](https://github.com/piekstra/nelnet-cli), [chase-cli](https://github.com/piekstra/chase-cli), [lofty-cli](https://github.com/piekstra/lofty-cli) | on your computer, through your tunnel ([home modules](#tools-from-your-computer-home-modules)) | What do I hold, and what happened over a period? What do I owe on my loans? What did I spend, in the Chase activity I downloaded? |
 | `govee_…`, `tplink_…`, `ghome_…` | [govee-cli](https://github.com/piekstra/govee-cli), [tplink-cloud-cli](https://github.com/piekstra/tplink-cloud-cli), [google-home-cli](https://github.com/piekstra/google-home-cli) | on your computer, through your tunnel ([home modules](#tools-from-your-computer-home-modules)) | What lights and plugs do I have, and are they on? What does this plug draw? |
+| `myq_…` | [my-q-cli](https://github.com/piekstra/my-q-cli) | on your computer, through your tunnel ([home modules](#tools-from-your-computer-home-modules)), which needs the Android phone it drives connected | Is the garage door open or closed? |
 | `campbell_…`, `rpm_…`, `loftypm_…`, `kin_…` | [campbell-property-management-hoa-cli](https://github.com/piekstra/campbell-property-management-hoa-cli), [rpm-fl-cli](https://github.com/piekstra/rpm-fl-cli), [lofty-pm-cli](https://github.com/piekstra/lofty-pm-cli), [kin-cli](https://github.com/piekstra/kin-cli) | on your computer, through your tunnel ([home modules](#tools-from-your-computer-home-modules)) | What do I owe my HOA? How did my rentals do? Which Lofty votes wait on me? What does my home insurance cover? |
 
 The Coinbase and Alpaca modules call official APIs with keys you create, so
@@ -155,7 +157,8 @@ The utility CLIs keep their credentials on your computer and run the same way
 credential and reads the CSV files in a folder you name. So do `cpmfl`, `rpmfl` and `kin`,
 whose portal session stays on your computer, and `lofty-pm`, which reads the local store
 its `scan` fills from your email. So do `govee`, whose API key stays on your computer, and
-`tplc` and `ghome`, whose session or credential stays on your computer. Each README's "Use with Claude"
+`tplc` and `ghome`, whose session or credential stays on your computer, and `myq`, which works a
+door through the myQ app on an Android phone connected to your computer. Each README's "Use with Claude"
 section names its port and connector secret, for the steps below:
 
 | CLI | Tools | Port | Connector secret |
@@ -175,6 +178,7 @@ section names its port and connector secret, for the steps below:
 | `govee` | `govee_…` | 8760 | `HOME_GOVEE_TOKEN` |
 | `tplc` | `tplink_…` | 8761 | `HOME_TPLINK_TOKEN` |
 | `ghome` | `ghome_…` | 8762 | `HOME_GHOME_TOKEN` |
+| `myq` | `myq_…` | 8763 | `HOME_MYQ_TOKEN` |
 
 The tools work while the computer is awake, signed in to the CLI, and
 running both the CLI's server and `cloudflared`. When it is not, those tools
@@ -255,8 +259,8 @@ for `M1` (the module's name is its tools' prefix: `m1_…` is `M1`,
 The server serves only the CLI's read-only tools. `--allow-writes` would add
 its write tools (each still needs your approval in Claude); leave it off
 unless you want Claude to change something there. For `govee`, `tplc` and `ghome`
-that means turning your lights and plugs on and off, and a client that ignores
-a tool's annotations does not ask you first.
+that means turning your lights and plugs on and off, and for `myq` opening and closing
+your garage door, and a client that ignores a tool's annotations does not ask you first.
 
 **Without Workers VPC.** If you have a domain on Cloudflare, a tunnel route
 works too: in **Zero Trust → Networks → Tunnels**, give the tunnel a public
@@ -402,7 +406,7 @@ has both can call the read-only tools and read what they return. They
 cannot call a write tool (none is served without `--allow-writes`), sign in,
 or read the session. On a server you started with `--allow-writes` they can call
 its write tools too, which for `govee`, `tplc` and `ghome` means switching your
-lights and plugs. Make a new token (`--new-token --overwrite`), set it in
+lights and plugs, and for `myq` opening or closing your garage door. Make a new token (`--new-token --overwrite`), set it in
 the Worker, and restart the server.
 
 **Read-only by default.** Without `--allow-writes`, the server lists and
