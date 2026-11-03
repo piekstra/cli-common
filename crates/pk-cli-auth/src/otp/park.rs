@@ -33,7 +33,7 @@ pub const DEFAULT_MAX_REJECTED: u32 = 3;
 
 /// An in-flight login waiting on a verification code.
 ///
-/// The field names match the parked login `insperity-cli` already stores, so
+/// The field names match the parked login that existing CLIs already store, so
 /// a CLI adopting this reads its existing item unchanged. `rejected` is new
 /// and defaults to 0.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,8 +232,8 @@ mod tests {
     const T0: u64 = 1_800_000_000;
 
     #[test]
-    fn the_stored_shape_matches_the_insperity_layout() {
-        // What insperity-cli parks today: no `rejected` field.
+    fn the_stored_shape_matches_the_earlier_layout() {
+        // What earlier CLIs park today: no `rejected` field.
         let legacy = r#"{"session":"jar","issued_at":1800000000,"channel":"email","sent_to_hint":"j•••@example.com"}"#;
         let parked: ParkedLogin = serde_json::from_str(legacy).unwrap();
         assert_eq!(parked.rejected, 0);
