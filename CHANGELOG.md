@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.18.0 — 2026-11-03
+
+- `pk-cli-auth`: `RefreshLock` covers a person around a login's and a logout's
+  keychain write. `before_signin` checks the lock before the browser opens or a
+  secret is read, so a stuck or unusable lock fails while nothing is lost.
+  `store_signin` is the write: it waits four times as long as a renewal, and its
+  error says the sign-in worked and the session was not stored.
+  `forget_for_binary` and `forget` are a logout's delete,
+  which runs with or without the lock: past a held lock it exits 5 saying to run
+  it again, and past an unusable lock or no home directory it warns on stderr.
+  `try_hold` runs its closure only if the lock is free right now, for a caller
+  that does something different when it is not first. `hold` is unchanged in
+  behaviour, and its contention text is the same.
+- `pk-cli-mcp`: `restart_note` also says a Claude Desktop extension runs its own
+  copy, so the new release's `.mcpb` has to be installed.
+- `DESIGN.md` §1.7 and `conformance.md`: these calls, and the lock only excluding
+  copies that take it, so `SECURITY.md` says which copies must be on a release
+  with it.
+
 ## v0.17.0 — 2026-11-03
 
 - `pk-cli-auth`: `refresh_lock::RefreshLock`, for a provider that rotates

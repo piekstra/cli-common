@@ -10,11 +10,26 @@
 //! [`RefreshLock`] is an exclusive advisory lock on an empty file. It is held
 //! from the read of the stored session to the write of the renewed one, so
 //! every grant presents the newest token: [`RefreshLock::renew`] does that for a
-//! renewal. A login or a logout wraps only its keychain write in
-//! [`RefreshLock::hold`], so a renewal in flight cannot overwrite it when it
-//! stores. Never hold the lock across a prompt, a browser capture or a wait for
-//! a code: a person can take far longer than a contender waits, and the write is
-//! all the race needs.
+//! renewal.
+//!
+//! A login or a logout holds it around its keychain write only, so a renewal in
+//! flight cannot overwrite that write when it stores. Never hold the lock across
+//! a prompt, a browser capture or a wait for a code: a person can take far longer
+//! than a contender waits, and the write is all the race needs. Three calls cover
+//! what a person is owed around that write:
+//!
+//! - [`RefreshLock::before_signin`], before the browser opens or a secret is read,
+//!   so a stuck or unusable lock fails before anyone does any work.
+//! - [`RefreshLock::store_signin`], for the write. Past that point the new session
+//!   exists only in memory, so an error says it was not stored.
+//! - [`RefreshLock::forget_for_binary`], for a logout, whose delete runs with or
+//!   without the lock: the lock must never be what keeps a credential on a machine
+//!   someone is trying to remove it from.
+//!
+//! The lock only excludes processes that take it. Until every copy sharing the
+//! keychain item is a release that does (a server not yet restarted, an installed
+//! Claude Desktop extension, which bundles its own binary), an old copy can still
+//! present a token a new one is renewing.
 //!
 //! - **It cannot go stale.** The operating system releases the lock when its
 //!   holder exits, however it exits, so nothing ever needs clearing.
@@ -58,6 +73,9 @@ use pk_cli_core::CliError;
 /// How long a contender waits by default: past the 60 s timeout on
 /// `pk_cli_http`'s clients, so it outlasts a holder whose grant takes all of it.
 pub const DEFAULT_WAIT: Duration = Duration::from_secs(75);
+
+/// How many times as long as a renewal [`RefreshLock::store_signin`] waits.
+pub const SIGNIN_PATIENCE: u32 = 4;
 
 const POLL_EVERY: Duration = Duration::from_millis(100);
 
@@ -114,8 +132,100 @@ impl RefreshLock {
     /// [`CliError::Other`] (exit 1). Both name the path. Proceeding unlocked is
     /// what would risk the session.
     pub fn hold<T>(&self, f: impl FnOnce() -> Result<T, CliError>) -> Result<T, CliError> {
-        let _held = self.acquire()?;
+        let _held = self.acquire().map_err(Refused::into_hold_error)?;
         f()
+    }
+
+    /// [`hold`](Self::hold) without waiting: `Ok(None)` when another process holds
+    /// the lock right now, without running `f`. For a caller that does something
+    /// different when it is not first. A file that cannot be created or locked is
+    /// the same error as `hold`.
+    pub fn try_hold<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, CliError>,
+    ) -> Result<Option<T>, CliError> {
+        match self.acquire_within(Duration::ZERO, || {}) {
+            Ok(_held) => f().map(Some),
+            Err(Refused::Held(_)) => Ok(None),
+            Err(broken) => Err(broken.into_hold_error()),
+        }
+    }
+
+    /// Check the lock before a sign-in, or before reading a secret a person
+    /// supplies, while failing costs nothing: a stuck or unusable lock is the same
+    /// error as [`hold`](Self::hold). This reserves nothing, because the lock is
+    /// released at once and [`store_signin`](Self::store_signin) takes it again.
+    pub fn before_signin(&self) -> Result<(), CliError> {
+        self.hold(|| Ok(()))
+    }
+
+    /// A sign-in's keychain write, under the lock. It waits [`SIGNIN_PATIENCE`]
+    /// times as long as a renewal, with a line on stderr once it has to, because
+    /// the alternative is another sign-in.
+    ///
+    /// Without the lock `store` does not run, and the error says that the sign-in
+    /// worked and its session is lost, because that session exists only in this
+    /// process's memory and nothing else may be done with it. Store anything that
+    /// needs no lock first. An error from `store` passes through unchanged.
+    pub fn store_signin<T>(
+        &self,
+        store: impl FnOnce() -> Result<T, CliError>,
+    ) -> Result<T, CliError> {
+        const LOST: &str = "the sign-in worked, but its session was not stored and cannot be kept";
+        let wait = self.wait * SIGNIN_PATIENCE;
+        let _held = self
+            .acquire_within(wait, || {
+                eprintln!(
+                    "waiting up to {wait:?} for another process to release {} so this sign-in \
+                     can be stored",
+                    self.path.display()
+                );
+            })
+            .map_err(|refused| match refused {
+                Refused::Held(why) => CliError::Upstream(format!(
+                    "{LOST}: {why}. Sign in again once that process finishes"
+                )),
+                Refused::Broken(why) => CliError::Other(format!("{LOST}: {why}")),
+            })?;
+        store()
+    }
+
+    /// A logout's keychain delete, for the lock [`for_binary`](Self::for_binary)
+    /// names. `delete` runs however the lock turns out, because the lock must not
+    /// be what keeps a credential on the machine:
+    ///
+    /// - Lock taken: `delete`'s result.
+    /// - Another process holds it past the wait: `delete` runs, and the result is
+    ///   [`CliError::Upstream`] (exit 5) saying so, because a renewal in flight can
+    ///   store the session again. Running the logout again settles it.
+    /// - Lock unusable, or no home directory to find it in: `delete`'s result, with
+    ///   a warning on stderr. A process resolving the same path cannot be holding
+    ///   it either.
+    ///
+    /// An error from `delete` passes through unchanged: the session is still stored.
+    pub fn forget_for_binary<T>(
+        bin: &str,
+        delete: impl FnOnce() -> Result<T, CliError>,
+    ) -> Result<T, CliError> {
+        match Self::for_binary(bin) {
+            Ok(lock) => lock.forget(delete),
+            Err(no_home) => forget_unlocked(&no_home.to_string(), delete),
+        }
+    }
+
+    /// [`forget_for_binary`](Self::forget_for_binary) for this lock.
+    pub fn forget<T>(&self, delete: impl FnOnce() -> Result<T, CliError>) -> Result<T, CliError> {
+        match self.acquire() {
+            Ok(_held) => delete(),
+            Err(Refused::Held(why)) => {
+                delete()?;
+                Err(CliError::Upstream(format!(
+                    "the stored session is deleted, but {why}, and a renewal in flight can \
+                     store it again: run this logout again in a minute"
+                )))
+            }
+            Err(Refused::Broken(why)) => forget_unlocked(&why, delete),
+        }
     }
 
     /// One renewal under the lock: `read` the stored session, ask `due` whether
@@ -145,42 +255,47 @@ impl RefreshLock {
     }
 
     /// The open file holds the lock until it is closed.
-    fn acquire(&self) -> Result<File, CliError> {
-        let file = self.open()?;
+    fn acquire(&self) -> Result<File, Refused> {
+        self.acquire_within(self.wait, || {})
+    }
+
+    /// `contended` runs once, the first time another process holds the lock.
+    fn acquire_within(&self, wait: Duration, contended: impl FnOnce()) -> Result<File, Refused> {
+        let file = self.open().map_err(Refused::Broken)?;
         let started = Instant::now();
+        let mut contended = Some(contended);
         loop {
             match file.try_lock() {
                 Ok(()) => return Ok(file),
                 Err(TryLockError::Error(e)) => {
-                    return Err(CliError::Other(format!(
+                    return Err(Refused::Broken(format!(
                         "locking {} before renewing the session: {e}",
                         self.path.display()
                     )))
                 }
                 Err(TryLockError::WouldBlock) => {
+                    if let Some(contended) = contended.take() {
+                        contended();
+                    }
                     let waited = started.elapsed();
-                    if waited >= self.wait {
-                        return Err(CliError::Upstream(format!(
-                            "another process has held {} for over {:?}, renewing or replacing \
+                    if waited >= wait {
+                        return Err(Refused::Held(format!(
+                            "another process has held {} for over {wait:?}, renewing or replacing \
                              this session (a keychain prompt waiting for an answer keeps it \
-                             there); nothing was sent, so try again in a minute",
+                             there)",
                             self.path.display(),
-                            self.wait,
                         )));
                     }
-                    std::thread::sleep(POLL_EVERY.min(self.wait - waited));
+                    std::thread::sleep(POLL_EVERY.min(wait - waited));
                 }
             }
         }
     }
 
-    fn open(&self) -> Result<File, CliError> {
+    fn open(&self) -> Result<File, String> {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir).map_err(|e| {
-                CliError::Other(format!(
-                    "creating {} for the token-refresh lock: {e}",
-                    dir.display()
-                ))
+                format!("creating {} for the token-refresh lock: {e}", dir.display())
             })?;
         }
         let mut options = OpenOptions::new();
@@ -192,8 +307,36 @@ impl RefreshLock {
         }
         options
             .open(&self.path)
-            .map_err(|e| CliError::Other(format!("opening {}: {e}", self.path.display())))
+            .map_err(|e| format!("opening {}: {e}", self.path.display()))
     }
+}
+
+/// Why the lock was not taken. Each caller owes a person a different sentence.
+enum Refused {
+    /// Another process held it past the wait, which a retry can get past.
+    Held(String),
+    /// The file cannot be created or locked, which a retry will not fix.
+    Broken(String),
+}
+
+impl Refused {
+    fn into_hold_error(self) -> CliError {
+        match self {
+            Self::Held(why) => {
+                CliError::Upstream(format!("{why}; nothing was sent, so try again in a minute"))
+            }
+            Self::Broken(why) => CliError::Other(why),
+        }
+    }
+}
+
+fn forget_unlocked<T>(
+    why: &str,
+    delete: impl FnOnce() -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    let deleted = delete()?;
+    eprintln!("warning: deleted the stored session without the token-refresh lock: {why}");
+    Ok(deleted)
 }
 
 fn path_under(home: &Path, bin: &str) -> PathBuf {
@@ -497,6 +640,170 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    /// A lock held by this test, and a second handle on it that gives up fast.
+    fn contended(dir: &tempfile::TempDir) -> (RefreshLock, RefreshLock) {
+        let path = dir.path().join("token-refresh.lock");
+        let holder = RefreshLock::at(&path);
+        let contender = RefreshLock::at(&path).wait_at_most(Duration::from_millis(100));
+        (holder, contender)
+    }
+
+    /// A path whose parent is a file, so the lock can never be opened.
+    fn broken(dir: &tempfile::TempDir) -> RefreshLock {
+        let file = dir.path().join("a-file");
+        fs::write(&file, "").unwrap();
+        RefreshLock::at(file.join("token-refresh.lock"))
+    }
+
+    #[test]
+    fn try_hold_runs_when_free_and_steps_aside_when_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let (holder, contender) = contended(&dir);
+        assert_eq!(contender.try_hold(|| Ok("ran")).unwrap(), Some("ran"));
+        holder
+            .hold(|| {
+                let skipped = contender
+                    .try_hold(|| -> Result<(), CliError> { panic!("another process holds it") })
+                    .unwrap();
+                assert_eq!(skipped, None);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(broken(&dir).try_hold(|| Ok(())).unwrap_err().exit_code(), 1);
+    }
+
+    #[test]
+    fn before_signin_fails_on_a_stuck_lock_and_reserves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (holder, contender) = contended(&dir);
+        holder
+            .hold(|| {
+                let err = contender.before_signin().unwrap_err();
+                assert_eq!(err.exit_code(), 5, "{err}");
+                Ok(())
+            })
+            .unwrap();
+        contender.before_signin().unwrap();
+        contender.hold(|| Ok(())).unwrap();
+        assert_eq!(broken(&dir).before_signin().unwrap_err().exit_code(), 1);
+    }
+
+    #[test]
+    fn a_signin_stores_under_the_lock_and_keeps_stores_own_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, lock) = contended(&dir);
+        assert_eq!(lock.store_signin(|| Ok("stored")).unwrap(), "stored");
+        let err = lock
+            .store_signin(|| Err::<(), _>(CliError::Keychain("dummy-refused".into())))
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            CliError::Keychain("dummy-refused".into()).to_string()
+        );
+    }
+
+    #[test]
+    fn a_signin_without_the_lock_says_it_was_not_stored_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (holder, contender) = contended(&dir);
+        holder
+            .hold(|| {
+                let err = contender
+                    .store_signin(|| -> Result<(), CliError> {
+                        panic!("no write without the lock")
+                    })
+                    .unwrap_err();
+                assert_eq!(err.exit_code(), 5, "{err}");
+                let message = err.to_string();
+                assert!(message.contains("the sign-in worked"), "{message}");
+                assert!(message.contains("not stored"), "{message}");
+                assert!(message.contains("Sign in again"), "{message}");
+                assert!(!message.contains("nothing was sent"), "{message}");
+                Ok(())
+            })
+            .unwrap();
+        let err = broken(&dir)
+            .store_signin(|| -> Result<(), CliError> { panic!("no write without the lock") })
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 1, "{err}");
+        assert!(err.to_string().contains("not stored"), "{err}");
+    }
+
+    #[test]
+    fn a_signin_waits_longer_than_a_renewal_for_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (holder, contender) = contended(&dir);
+        holder
+            .hold(|| {
+                let started = Instant::now();
+                contender
+                    .store_signin(|| -> Result<(), CliError> {
+                        panic!("no write without the lock")
+                    })
+                    .unwrap_err();
+                assert!(started.elapsed() >= Duration::from_millis(100) * SIGNIN_PATIENCE);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_logout_with_the_lock_returns_the_deletes_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, lock) = contended(&dir);
+        assert!(lock.forget(|| Ok(true)).unwrap());
+    }
+
+    #[test]
+    fn a_logout_past_a_held_lock_deletes_and_says_to_run_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (holder, contender) = contended(&dir);
+        holder
+            .hold(|| {
+                let mut deleted = false;
+                let err = contender
+                    .forget(|| {
+                        deleted = true;
+                        Ok(())
+                    })
+                    .unwrap_err();
+                assert!(deleted, "the lock must not keep the credential");
+                assert_eq!(err.exit_code(), 5, "{err}");
+                let message = err.to_string();
+                assert!(message.contains("is deleted"), "{message}");
+                assert!(message.contains("run this logout again"), "{message}");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_logout_past_a_broken_lock_or_no_home_deletes_and_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(broken(&dir).forget(|| Ok(true)).unwrap());
+        assert!(forget_unlocked("dummy: no home directory", || Ok(true)).unwrap());
+    }
+
+    #[test]
+    fn a_logout_whose_delete_fails_reports_that_and_not_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (holder, contender) = contended(&dir);
+        holder
+            .hold(|| {
+                let err = contender
+                    .forget(|| Err::<(), _>(CliError::Keychain("dummy-refused".into())))
+                    .unwrap_err();
+                assert!(err.to_string().contains("dummy-refused"), "{err}");
+                assert!(!err.to_string().contains("is deleted"), "{err}");
+                Ok(())
+            })
+            .unwrap();
+        let err = broken(&dir)
+            .forget(|| Err::<(), _>(CliError::Keychain("dummy-refused".into())))
+            .unwrap_err();
+        assert!(err.to_string().contains("dummy-refused"), "{err}");
     }
 
     #[test]
