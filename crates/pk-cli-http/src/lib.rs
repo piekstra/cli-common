@@ -12,7 +12,8 @@ use std::time::Duration;
 
 pub use pk_cli_core::transport::Inconclusive;
 use pk_cli_core::transport::{
-    inconclusive_answer, parse_retry_after, HttpRequest, HttpResponse, PlatformSigner, Transport,
+    inconclusive_answer, parse_retry_after, require_secure_url, HttpRequest, HttpResponse,
+    PlatformSigner, Transport,
 };
 use pk_cli_core::CliError;
 use serde_json::Value;
@@ -146,6 +147,15 @@ impl ApiArgs {
         }
     }
 
+    /// [`Self::url`], refusing a URL a credential must not travel to
+    /// ([`require_secure_url`]). For a client that sends a credential with the
+    /// request: the user may name any `https` host, but not plain `http`.
+    pub fn secure_url(&self, base: &str) -> Result<String, CliError> {
+        let url = self.url(base);
+        require_secure_url(&url)?;
+        Ok(url)
+    }
+
     pub fn parsed_method(&self) -> Result<reqwest::Method, CliError> {
         match self.method.to_uppercase().as_str() {
             "GET" => Ok(reqwest::Method::GET),
@@ -235,6 +245,24 @@ mod tests {
         assert_eq!(retry_after(&map), None);
         map.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
         assert_eq!(retry_after(&map), Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn secure_url_passes_a_path_and_refuses_plain_http() {
+        let base = "https://www.example.com/";
+        let secure = |path| args("GET", path, None).secure_url(base);
+        assert_eq!(secure("/x").unwrap(), "https://www.example.com/x");
+        assert_eq!(secure("https://other/x").unwrap(), "https://other/x");
+        assert_eq!(
+            secure("http://127.0.0.1:9/x").unwrap(),
+            "http://127.0.0.1:9/x"
+        );
+        assert_eq!(secure("http://other/x").unwrap_err().exit_code(), 2);
+        // `url` itself stays as it was, for a CLI that sends no credential.
+        assert_eq!(
+            args("GET", "http://other/x", None).url(base),
+            "http://other/x"
+        );
     }
 
     fn args(method: &str, path: &str, data: Option<&str>) -> ApiArgs {

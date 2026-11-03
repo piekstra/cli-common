@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.24.0 — 2026-11-03
+
+- `pk-cli-core`: `transport::require_secure_url` refuses a URL that is not `https`,
+  except plain `http` to this machine, naming only the scheme and host. Call it where
+  a URL or host comes from outside the binary and a credential goes with the request.
+- `pk-cli-http`: `ApiArgs::secure_url` is `ApiArgs::url` with that check, for an `api`
+  passthrough that sends a credential.
+- `pk-cli-core`: feature `reqwest` adds two redirect policies. `transport::secure_redirects`
+  keeps reqwest's limit of ten and errors on a redirect that leaves `https`.
+  `transport::same_host_redirects` also errors on a redirect to another host or port,
+  for a client that sends a provider's own auth header, which reqwest keeps on every hop.
+- `pk-cli-core`: a `reqwest` failure's message names the origin, not the whole URL, since
+  a path or query can carry an account id or a token. A redirect policy's reason is now
+  in the message.
+- `conformance.md`: the rules for these, and every workflow file sets `permissions:` at
+  the top level.
+
 ## v0.23.0 — 2026-11-03
 
 - `pk-cli-arcgis`: read-only queries against an ArcGIS REST layer, for CLIs over the
