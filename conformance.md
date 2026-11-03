@@ -20,7 +20,7 @@ status here.
 - [ ] Mutations report success from a read-back (or the write's echo only when it carries the values), never from the write's status code
 - [ ] A portal the CLI cannot sign in to by itself (bot check, OAuth single-page app) offers `auth login --browser` through `pk-cli-browser` (DESIGN.md §2.2), reports `method: "browser-session"`, and verifies the captured session before storing it
 - [ ] `make install` uses `--locked`, so the installed binary is built from the reviewed Cargo.lock
-- [ ] A provider that rotates refresh tokens: every renewal goes through `pk_cli_auth::refresh_lock::RefreshLock`, re-reading the session under the lock and posting no grant if another process renewed, and a login or logout holds the lock too (DESIGN.md §1.7)
+- [ ] A provider that rotates refresh tokens: every renewal goes through `pk_cli_auth::refresh_lock::RefreshLock` (cli-common v0.17.0 or later), re-reading the session under the lock and posting no grant if another process renewed, and a login or logout holds the lock around its keychain write only (DESIGN.md §1.7)
 
 ### MCP profile (DESIGN.md §1.9), for a CLI that serves tools
 
@@ -47,7 +47,7 @@ instead:
 
 - [ ] Pins cli-common v0.15.0 or later with pk-cli-mcp's `http` feature, so `<bin> mcp --http --port <PORT>` serves its read-only tools on 127.0.0.1 behind a bearer token (`<bin> mcp --new-token`), and its README's web and mobile section points at `connector/`'s home-module steps
 - [ ] Names its tools with one prefix (`m1_…`), which becomes the module's name in the Worker (`HOME_M1_TOKEN`, binding `HOME_M1`)
-- [ ] Its `self-update` calls `Updater::run_noting` with `pk_cli_mcp::restart_note`, since a running server keeps the old code, and its README's web and mobile section says to restart the server after an update
+- [ ] Its `self-update` calls `Updater::run_noting` with `pk_cli_mcp::restart_note` (cli-common v0.17.0 or later), since a running server keeps the old code, and its README's web and mobile section says to restart the server after an update
 - [ ] Its `SECURITY.md` lists the bearer token (keychain item or `<BIN>_MCP_TOKEN`, with a copy in the Worker), says tool results cross Cloudflare and reach Claude, links `connector/`'s threat model, and under revoking names `--new-token --overwrite` plus a restart, and stopping the server and tunnel, neither of which `auth logout` does
 
 ## Family status

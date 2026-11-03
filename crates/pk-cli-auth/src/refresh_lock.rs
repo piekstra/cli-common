@@ -10,15 +10,18 @@
 //! [`RefreshLock`] is an exclusive advisory lock on an empty file. It is held
 //! from the read of the stored session to the write of the renewed one, so
 //! every grant presents the newest token: [`RefreshLock::renew`] does that for a
-//! renewal, and [`RefreshLock::hold`] wraps anything else that replaces or
-//! removes the session (a login, a logout), which a renewal in flight would
-//! otherwise overwrite when it stores.
+//! renewal. A login or a logout wraps only its keychain write in
+//! [`RefreshLock::hold`], so a renewal in flight cannot overwrite it when it
+//! stores. Never hold the lock across a prompt, a browser capture or a wait for
+//! a code: a person can take far longer than a contender waits, and the write is
+//! all the race needs.
 //!
 //! - **It cannot go stale.** The operating system releases the lock when its
 //!   holder exits, however it exits, so nothing ever needs clearing.
 //! - **The wait is bounded.** A holder can be stuck on a slow token endpoint or
 //!   a keychain prompt nobody is there to answer, so a contender gives up after
-//!   [`DEFAULT_WAIT`] with an error naming the lock, having sent nothing.
+//!   [`DEFAULT_WAIT`] with [`CliError::Upstream`] (exit 5, retry later) naming the
+//!   lock, having sent nothing.
 //! - **It is not reentrant.** Each [`hold`](RefreshLock::hold) opens the file
 //!   afresh, so a nested one waits on its own holder until it times out. Keep
 //!   reads that can renew outside the closure.
@@ -102,11 +105,14 @@ impl RefreshLock {
         &self.path
     }
 
-    /// Run `f` holding the lock, and release it when `f` returns.
+    /// Run `f` holding the lock, and release it when `f` returns. Keep `f` to
+    /// the keychain write it protects; see the [module docs](self).
     ///
-    /// Without the lock `f` does not run: a holder that outlasts the wait, or a
-    /// file that cannot be created or locked, is [`CliError::Other`] (exit 1)
-    /// naming the path. Proceeding unlocked is what would risk the session.
+    /// Without the lock `f` does not run. A holder that outlasts the wait is
+    /// transient, so it is [`CliError::Upstream`] (exit 5); a file that cannot be
+    /// created or locked is a local fault a retry will not fix, so it is
+    /// [`CliError::Other`] (exit 1). Both name the path. Proceeding unlocked is
+    /// what would risk the session.
     pub fn hold<T>(&self, f: impl FnOnce() -> Result<T, CliError>) -> Result<T, CliError> {
         let _held = self.acquire()?;
         f()
@@ -154,12 +160,12 @@ impl RefreshLock {
                 Err(TryLockError::WouldBlock) => {
                     let waited = started.elapsed();
                     if waited >= self.wait {
-                        return Err(CliError::Other(format!(
-                            "another process has been renewing this session for over {:?} (it \
-                             holds {}; a keychain prompt waiting for an answer keeps it there); \
-                             nothing was sent, so try again in a minute",
+                        return Err(CliError::Upstream(format!(
+                            "another process has held {} for over {:?}, renewing or replacing \
+                             this session (a keychain prompt waiting for an answer keeps it \
+                             there); nothing was sent, so try again in a minute",
+                            self.path.display(),
                             self.wait,
-                            self.path.display()
                         )));
                     }
                     std::thread::sleep(POLL_EVERY.min(self.wait - waited));
@@ -397,7 +403,7 @@ mod tests {
                 started.elapsed() < Duration::from_secs(20),
                 "it must not hang"
             );
-            assert_eq!(err.exit_code(), 1);
+            assert_eq!(err.exit_code(), 5, "a retry can succeed: {err}");
             let message = err.to_string();
             assert!(message.contains(lock.path().to_str().unwrap()), "{message}");
             assert!(message.contains("try again"), "{message}");
@@ -414,6 +420,7 @@ mod tests {
         let err = RefreshLock::at(not_a_dir.join("token-refresh.lock"))
             .hold(|| -> Result<(), CliError> { panic!("ran without the lock") })
             .unwrap_err();
+        assert_eq!(err.exit_code(), 1, "a retry cannot fix this: {err}");
         assert!(err.to_string().contains("token-refresh lock"), "{err}");
     }
 

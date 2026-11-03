@@ -282,15 +282,26 @@ fn start_line(server: &Server, addr: SocketAddr, tools: usize, writes: usize) ->
 }
 
 /// The note for `pk_cli_selfupdate::Updater::run_noting`: `self-update` swaps
-/// the binary on disk, but `<bin> mcp --http` runs until it is stopped, and the
-/// launchd agent in `connector/`'s README restarts it only when it exits. So it
-/// keeps serving the old code until someone restarts it.
+/// the binary on disk, but `<bin> mcp --http` runs until it is stopped, so it
+/// keeps serving the old code until someone restarts it. On macOS the note adds
+/// the command for the launchd agent `connector/`'s README installs, whose label
+/// it names; elsewhere there is no one command to give.
 pub fn restart_note(bin: &str) -> String {
-    format!(
-        "note: a running `{bin} mcp --http` keeps serving the old version until it restarts. \
-         Under its launchd agent:\n  \
-         launchctl kickstart -k gui/$(id -u)/com.piekstra.{bin}-mcp-http"
-    )
+    note_for(bin, cfg!(target_os = "macos"))
+}
+
+fn note_for(bin: &str, launchd: bool) -> String {
+    let note = format!(
+        "note: a running `{bin} mcp --http` keeps serving the old version until it is restarted."
+    );
+    if launchd {
+        format!(
+            "{note} Under the launchd agent from cli-common's connector/ README:\n  \
+             launchctl kickstart -k gui/$(id -u)/com.piekstra.{bin}-mcp-http"
+        )
+    } else {
+        note
+    }
 }
 
 /// Serve on 127.0.0.1:`port` until the process is stopped.
@@ -517,11 +528,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn without_launchd_the_note_gives_no_launchctl_command() {
+        let note = note_for("m1f", false);
+        assert!(note.contains("`m1f mcp --http`"), "{note}");
+        assert!(!note.contains("launchctl"), "{note}");
+    }
+
     /// The label is the one the connector's README installs and restarts.
     #[test]
     fn the_restart_note_uses_the_connectors_launchd_label() {
         let kickstart = "launchctl kickstart -k gui/$(id -u)/com.piekstra.m1f-mcp-http";
-        assert!(restart_note("m1f").contains(kickstart));
+        assert!(note_for("m1f", true).contains(kickstart));
         let readme =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../connector/README.md");
         let readme = std::fs::read_to_string(readme).unwrap();
