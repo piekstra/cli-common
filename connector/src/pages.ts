@@ -32,7 +32,7 @@ export function authorizePage(d: ConsentDescription, handle: string): string {
   return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Connect ${esc(d.clientName)}</title><style>${STYLE}</style>
 <h1>Connect ${esc(d.clientName)}?</h1>
-<p>${who} Access will be sent to <strong>${esc(d.redirectHost)}</strong>, read-only.</p>
+<p>${who} Access will be sent to <strong>${esc(d.redirectHost)}</strong>. Its tools read, and change something only where you started a home module with <code>--allow-writes</code>.</p>
 ${loopback}
 <form method="post">
 <input type="hidden" name="handle" value="${esc(handle)}">
