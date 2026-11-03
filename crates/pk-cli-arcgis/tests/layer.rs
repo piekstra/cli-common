@@ -130,6 +130,21 @@ fn a_layer_that_ignores_the_offset_fails_on_the_second_page() {
 }
 
 #[test]
+fn a_shorter_page_repeating_the_start_of_the_last_one_fails_too() {
+    // Honors the page size and ignores the offset.
+    let server = server(|url| {
+        if url.contains("resultRecordCount=1") {
+            ok(&page_of(&["A1"], ""))
+        } else {
+            ok(&page_of(&["A1", "A2"], ""))
+        }
+    });
+    let query = Query::new("1=1", "PARCEL").limit(3);
+    let err = block_on(layer(&server).page_size(2).rows(&query)).unwrap_err();
+    assert!(err.to_string().contains("same rows twice"), "{err}");
+}
+
+#[test]
 fn rows_alike_in_the_chosen_columns_differ_by_the_sort_and_page_normally() {
     let server = server(|url| {
         assert!(url.contains("outFields=OWNER%2CID"), "{url}");
@@ -163,6 +178,7 @@ fn only_the_sort_columns_missing_from_the_fields_are_added() {
     assert!(asked(Query::new("1=1", "A DESC, B ASC").fields("A")).contains("outFields=A%2CB&"));
     assert!(asked(Query::new("1=1", "a").fields("A")).contains("outFields=A&"));
     assert!(asked(Query::new("1=1", "A")).contains("outFields=%2A&"));
+    assert!(asked(Query::new("1=1", "B").fields("A, ,")).contains("outFields=A%2CB&"));
 }
 
 #[test]

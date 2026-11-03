@@ -41,7 +41,8 @@ pub struct Layer<T> {
 /// What to ask a layer for. The sort is required because paging is only coherent over
 /// a stable order: without one, a row can repeat or go missing between pages. It has to
 /// identify a row uniquely, or tied rows can do the same. Its columns come back with each
-/// row, whatever [`Query::fields`] says, so a page repeating can only be the same rows.
+/// row, whatever [`Query::fields`] says, so a page repeating can only be the same rows,
+/// which is why the sort is a list of plain columns rather than expressions.
 #[derive(Debug, Clone)]
 pub struct Query<'a> {
     where_clause: &'a str,
@@ -52,7 +53,8 @@ pub struct Query<'a> {
 
 impl<'a> Query<'a> {
     /// Every column of every matching row, sorted by `order_by`, until [`Query::fields`]
-    /// or [`Query::limit`] say otherwise. `order_by` must identify a row uniquely.
+    /// or [`Query::limit`] say otherwise. `order_by` is a comma-separated list of column
+    /// names, each optionally followed by `ASC` or `DESC`, that identifies a row uniquely.
     pub fn new(where_clause: &'a str, order_by: &'a str) -> Self {
         Self {
             where_clause,
@@ -79,7 +81,12 @@ impl<'a> Query<'a> {
         if self.fields.trim() == "*" {
             return "*".to_string();
         }
-        let mut fields: Vec<&str> = self.fields.split(',').map(str::trim).collect();
+        let mut fields: Vec<&str> = self
+            .fields
+            .split(',')
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .collect();
         // Each sort term is a column, optionally followed by ASC or DESC.
         for column in self
             .order_by
@@ -180,7 +187,8 @@ impl<T: Transport> Layer<T> {
                 })
                 .collect::<Result<Vec<Value>, CliError>>()?;
             // A server that ignores the offset would send this page forever.
-            if page == last_page {
+            // A later page can be shorter, when a limit asks only for the remainder.
+            if last_page.starts_with(&page) {
                 return Err(CliError::Upstream(
                     "ArcGIS sent the same rows twice: the layer does not page, or the sort does \
                      not identify a row"
