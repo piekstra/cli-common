@@ -43,7 +43,7 @@ spellings are kept one major version):
                         #   NEVER via argv flags. --browser where the CLI cannot
                         #   sign in by itself (bot check, OAuth SPA; §2.2).
 <bin> auth status       # canonical DTO (see 1.4). Works logged-out.
-<bin> auth logout       # clear session; --forget also clears stored credential+config identity.
+<bin> auth logout       # clear session (and, for a --browser CLI, the kept browser profile); --forget also clears stored credential+config identity.
 <bin> auth set-credential  # raw keychain write for rotation/headless (--stdin | --from-env, --overwrite).
 
 <bin> config path|show|init         # non-secret settings
