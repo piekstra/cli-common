@@ -1,12 +1,20 @@
 # Changelog
 
-## Unreleased
+## v0.23.0 — 2026-11-03
 
 - `pk-cli-arcgis`: read-only queries against an ArcGIS REST layer, for CLIs over the
   public GIS services many US counties publish parcel data from. `Layer::rows` pages by
   the rows received, since a server can send a short page with more to follow, and
   requires a sort. An error in an HTTP 200 body keeps its exit code, and a body without
   `features` fails instead of reading as no rows. `quote` makes a SQL string literal.
+
+## v0.22.0 — 2026-11-03
+
+- `pk-cli-mcp`: feature `http` exports `HTTP_TOKEN_ACCOUNT`, the keychain item
+  `--new-token` writes, so a CLI's `auth logout --forget` can remove it by the writer's
+  own name.
+- `pk-cli-mcp`: a `CliError::Keychain` reads "the OS keychain could not be used". It said
+  "could not be read", which was wrong for a tool that failed writing a renewed session.
 
 ## v0.21.0 — 2026-11-03
 

@@ -56,8 +56,10 @@ use crate::result::ToolOutput;
 use crate::tool::ToolDef;
 use crate::toolset::{Server, Toolset};
 
-/// The keychain item (`piekstra.<bin>`) that holds the bearer token.
-const TOKEN_ACCOUNT: &str = "mcp-http-token";
+/// The keychain item (`piekstra.<bin>`) that holds the bearer token. `pub` for a CLI's
+/// `auth logout --forget`, which removes it by this name so that forgetting a CLI leaves
+/// no credential of its behind.
+pub const HTTP_TOKEN_ACCOUNT: &str = "mcp-http-token";
 
 /// The shortest token the server accepts. `--new-token` makes 64 hex
 /// characters (256 bits).
@@ -104,7 +106,7 @@ pub(crate) fn run<T: Toolset + Send + Sync + 'static>(
         let token = save_new_token(&store, &server.bin, args.overwrite, fresh_token()?)?;
         eprintln!(
             "Saved a new token for `{bin} mcp --http` in the keychain ({service}, \
-             {TOKEN_ACCOUNT}). Set the same value as the bearer-token secret in your Worker, \
+             {HTTP_TOKEN_ACCOUNT}). Set the same value as the bearer-token secret in your Worker, \
              then (re)start `{bin} mcp --http`. It is shown once:",
             bin = server.bin,
             service = store.service(),
@@ -147,7 +149,7 @@ fn resolve_token<K: KeychainRead + ?Sized>(store: &K, bin: &str) -> Result<Secre
     let order =
         SourceOrder::new(&[SourceKind::Env, SourceKind::Keychain]).map_err(CliError::Other)?;
     let replace = format!("`{bin} mcp --new-token --overwrite`");
-    let spec = SecretSpec::new(TOKEN_ACCOUNT)
+    let spec = SecretSpec::new(HTTP_TOKEN_ACCOUNT)
         .env(var.clone())
         .remedy(replace.clone());
     let resolved = SecretResolver::new(store).order(order).resolve(&spec)?;
@@ -162,7 +164,7 @@ fn resolve_token<K: KeychainRead + ?Sized>(store: &K, bin: &str) -> Result<Secre
         CliError::Auth(match resolved.source {
             SourceKind::Env => format!("{var} {why}"),
             _ => format!(
-                "the token in the keychain ({}, {TOKEN_ACCOUNT}) {why}; make a new one with \
+                "the token in the keychain ({}, {HTTP_TOKEN_ACCOUNT}) {why}; make a new one with \
                  {replace}",
                 store.service()
             ),
@@ -215,18 +217,18 @@ fn save_new_token<S: TokenStore + ?Sized>(
     overwrite: bool,
     token: Secret,
 ) -> Result<Secret, CliError> {
-    if !overwrite && store.get(TOKEN_ACCOUNT)?.is_some() {
+    if !overwrite && store.get(HTTP_TOKEN_ACCOUNT)?.is_some() {
         return Err(CliError::Usage(format!(
-            "a token for `{bin} mcp --http` is already saved ({}, {TOKEN_ACCOUNT}); pass \
+            "a token for `{bin} mcp --http` is already saved ({}, {HTTP_TOKEN_ACCOUNT}); pass \
              --overwrite to replace it, then update the Worker's secret to the new one",
             store.service()
         )));
     }
-    store.set(TOKEN_ACCOUNT, &token)?;
-    match store.get(TOKEN_ACCOUNT)? {
+    store.set(HTTP_TOKEN_ACCOUNT, &token)?;
+    match store.get(HTTP_TOKEN_ACCOUNT)? {
         Some(kept) if kept.expose() == token.expose() => Ok(token),
         _ => Err(CliError::Keychain(format!(
-            "the keychain did not keep the new token ({}, {TOKEN_ACCOUNT}); nothing was printed, \
+            "the keychain did not keep the new token ({}, {HTTP_TOKEN_ACCOUNT}); nothing was printed, \
              try `{bin} mcp --new-token --overwrite` again",
             store.service()
         ))),
@@ -667,7 +669,7 @@ mod tests {
             store
                 .items
                 .borrow_mut()
-                .insert(TOKEN_ACCOUNT.into(), token.into());
+                .insert(HTTP_TOKEN_ACCOUNT.into(), token.into());
             store
         }
     }
@@ -735,7 +737,7 @@ mod tests {
         let store = MemStore::default();
         let got = save_new_token(&store, BIN, false, Secret::new(TOKEN)).unwrap();
         assert_eq!(got.expose(), TOKEN);
-        assert_eq!(store.items.borrow()[TOKEN_ACCOUNT], TOKEN);
+        assert_eq!(store.items.borrow()[HTTP_TOKEN_ACCOUNT], TOKEN);
     }
 
     #[test]
@@ -745,13 +747,13 @@ mod tests {
         assert_eq!(e.exit_code(), 2);
         assert!(e.to_string().contains("--overwrite"), "{e}");
         assert_eq!(
-            store.items.borrow()[TOKEN_ACCOUNT],
+            store.items.borrow()[HTTP_TOKEN_ACCOUNT],
             "an-earlier-token-the-worker-already-holds",
             "refused before anything was written"
         );
 
         save_new_token(&store, BIN, true, Secret::new(TOKEN)).unwrap();
-        assert_eq!(store.items.borrow()[TOKEN_ACCOUNT], TOKEN);
+        assert_eq!(store.items.borrow()[HTTP_TOKEN_ACCOUNT], TOKEN);
     }
 
     #[test]
