@@ -27,7 +27,8 @@
 //!   bound, tools in a stable order. The provider sits behind a per-target
 //!   seam the toolset awaits (blocking natively, `fetch` in a Worker); see
 //!   the trait's docs.
-//! - [`shape`]: limits (default 25, max 200), opaque cursors,
+//! - [`shape`]: limits (default 25, max 200), opaque cursors (by a count of rows, or
+//!   by position for a list whose rows can change between pages),
 //!   [`ResponseFormat`] and the per-result size budget that truncates a list
 //!   with a hint on how to narrow.
 //! - [`ToolError`]: the family exit codes as actionable tool errors. An auth
@@ -118,7 +119,9 @@ pub use http::{restart_note, HTTP_TOKEN_ACCOUNT};
 #[cfg(feature = "test-util")]
 pub use pk_cli_core::block_on;
 pub use result::{CallToolResult, ToolOutput};
-pub use shape::{ListArgs, Page, PageInfo, PageRequest, ResponseFormat};
+pub use shape::{
+    ListArgs, Order, Page, PageInfo, PageRequest, PositionKey, PositionRequest, ResponseFormat,
+};
 pub use tool::{Annotations, ToolDef};
 pub use toolset::{
     call_tool, call_tool_json, instructions, parse_args, tools_list, tools_list_json, Server,
