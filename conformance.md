@@ -58,7 +58,7 @@ Drift notes are from the 2026-07-19 family audit.
 | CLI | Status |
 |---|---|
 | example-cli | reference implementation (incl. `utility/v1` profile demo) |
-| lofty | conforms (cli-common v0.1.2) — `properties list` uses domain paging (`--page`/`--per-page`) |
+| lofty | conforms (v0.2.0, cli-common v0.21.0) — `properties list` uses domain paging (`--page`/`--per-page`) |
 | discord | conforms (cli-common v0.1.2) — domain nouns flat-plural, no `list|get` verbs |
 | xfin | conforms (v0.7.0, cli-common v0.2.0) — gained `config path|show|set|unset`, `summary`/`balance` entry points, `--limit`/range flags on statements. Remaining: `set-credential` also top-level; second auth surface `payments login|logout` |
 | fpl | conforms (v0.3.0, cli-common v0.2.0) — gained `config path|show|set|unset` and range flags on lists. Remaining: `init` kept alongside `auth login`; `usage hourly` still `MM-DD-YYYY` |
@@ -139,6 +139,10 @@ Google Home's, replacing a hand-kept device→room table. Producers declare
 | town-of-jupiter-fl-cli (`tojfl`) | `jupiter_balance`, `jupiter_bills`, `jupiter_payments`, `jupiter_usage` (`utility/v1`) | `.mcpb` on each release from v0.5.0; `town-of-jupiter-fl-cli` plugin in `claude-plugins` | home module: `tojfl mcp --http` from v0.5.0 |
 | loxahatchee-river-fl-cli (`lrfl`) | `loxahatchee_balance`, `loxahatchee_bills`, `loxahatchee_payments`, `loxahatchee_usage` (`utility/v1`) | `.mcpb` on each release from v0.8.0; `loxahatchee-river-fl-cli` plugin in `claude-plugins` | home module: `lrfl mcp --http` from v0.8.0 |
 | xfinity-cli (`xfin`) | `xfinity_balance`, `xfinity_bills`, `xfinity_usage` (`utility/v1`, no payments tool) | `.mcpb` on each release from v0.10.0; `xfinity-cli` plugin in `claude-plugins` | home module: `xfin mcp --http` from v0.10.0 |
+| schwab-cli (`schw`) | `schwab_portfolio`, `schwab_transactions` | `.mcpb` on each release from v0.2.0; `schwab-cli` plugin in `claude-plugins` | home module: `schw mcp --http` from v0.2.0 |
+| nelnet-cli (`nlnt`) | `nelnet_loans`, `nelnet_payments`, `nelnet_repayment`, `nelnet_tax`, `nelnet_documents` | `.mcpb` on each release from v0.3.0, macOS and Linux only: no Windows build, because the session bundle is unmeasured against Windows's 2,560-byte credential limit; `nelnet-cli` plugin in `claude-plugins` | home module: `nlnt mcp --http` from v0.3.0 |
+| chase-cli (`chse`) | `chase_transactions`, `chase_exports` (over CSV files in a folder; no provider, no credential) | `.mcpb` on each release from v0.2.0; `chase-cli` plugin in `claude-plugins` | home module: `chse mcp --http` from v0.2.0 |
+| lofty-cli (`lofty`) | `lofty_account`, `lofty_orders`, `lofty_trades`, `lofty_property` | `.mcpb` on each release from v0.2.0; `lofty-cli` plugin in `claude-plugins` | home module: `lofty mcp --http` from v0.2.0 |
 
 Consumers: Claude Code, Claude Desktop, and (path B) a deploy-your-own
 Cloudflare Worker reached from claude.ai, which runs a portal CLI's tools on

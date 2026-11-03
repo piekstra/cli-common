@@ -17,6 +17,7 @@ Tools it can serve. Every module is optional: you turn on the ones you use.
 | `alpaca_portfolio`, `alpaca_activities` | [alpaca-cli](https://github.com/piekstra/alpaca-cli) | in the Worker | What is my Alpaca account worth, and what do I hold? Which fills, dividends and fees, over a period? |
 | `m1_…`, `robinhood_…` and other portal CLIs' tools | [m1-cli](https://github.com/piekstra/m1-cli), [robinhood-cli](https://github.com/piekstra/robinhood-cli) | on your computer, through your tunnel ([home modules](#tools-from-your-computer-home-modules)) | whatever that CLI's `mcp` tools answer |
 | `fpl_…`, `jupiter_…`, `loxahatchee_…`, `xfinity_…` | [fpl-cli](https://github.com/piekstra/fpl-cli), [town-of-jupiter-fl-cli](https://github.com/piekstra/town-of-jupiter-fl-cli), [loxahatchee-river-fl-cli](https://github.com/piekstra/loxahatchee-river-fl-cli), [xfinity-cli](https://github.com/piekstra/xfinity-cli) | on your computer, through your tunnel ([home modules](#tools-from-your-computer-home-modules)) | What do I owe, and when is it due? What did past bills come to? Which payments posted? How much did I use? |
+| `schwab_…`, `nelnet_…`, `chase_…`, `lofty_…` | [schwab-cli](https://github.com/piekstra/schwab-cli), [nelnet-cli](https://github.com/piekstra/nelnet-cli), [chase-cli](https://github.com/piekstra/chase-cli), [lofty-cli](https://github.com/piekstra/lofty-cli) | on your computer, through your tunnel ([home modules](#tools-from-your-computer-home-modules)) | What do I hold, and what happened over a period? What do I owe on my loans? What did I spend, in the Chase activity I downloaded? |
 
 The Coinbase and Alpaca modules call official APIs with keys you create, so
 they run inside the Worker. Portal CLIs (M1, Robinhood) sign in through a
@@ -146,8 +147,10 @@ beta). The session never leaves your computer; the Worker holds only the
 bearer token.
 
 The utility CLIs keep their credentials on your computer and run the same way
-(`lrfl` needs none, since the district's lookup is anonymous). Each README's "Use
-with Claude" section names its port and connector secret, for the steps below:
+(`lrfl` needs none, since the district's lookup is anonymous). So do `schw`, `nlnt` and
+`lofty`, whose session or API key stays on your computer, and `chse`, which has no
+credential and reads the CSV files in a folder you name. Each README's "Use with Claude"
+section names its port and connector secret, for the steps below:
 
 | CLI | Tools | Port | Connector secret |
 |---|---|---|---|
@@ -155,6 +158,10 @@ with Claude" section names its port and connector secret, for the steps below:
 | `xfin` | `xfinity_…` | 8733 | `HOME_XFINITY_TOKEN` |
 | `lrfl` | `loxahatchee_…` | 8734 | `HOME_LOXAHATCHEE_TOKEN` |
 | `tojfl` | `jupiter_…` | 8735 | `HOME_JUPITER_TOKEN` |
+| `schw` | `schwab_…` | 8736 | `HOME_SCHWAB_TOKEN` |
+| `nlnt` | `nelnet_…` | 8737 | `HOME_NELNET_TOKEN` |
+| `chse` | `chase_…` | 8738 | `HOME_CHASE_TOKEN` |
+| `lofty` | `lofty_…` | 8739 | `HOME_LOFTY_TOKEN` |
 
 The tools work while the computer is awake, signed in to the CLI, and
 running both the CLI's server and `cloudflared`. When it is not, those tools
