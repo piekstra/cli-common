@@ -11,7 +11,8 @@ use pk_cli_core::CliError;
 /// [`TimedOut`](BrowserError::TimedOut) and
 /// [`WindowClosed`](BrowserError::WindowClosed) are exit 3 (the owner did
 /// not finish signing in), [`Undecided`](BrowserError::Undecided) is exit 5
-/// (the provider never answered clearly), [`Handler`](BrowserError::Handler)
+/// (the provider never answered any pending capture's read clearly),
+/// [`Handler`](BrowserError::Handler)
 /// is the CLI's own error, and everything else is exit 1.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -42,8 +43,10 @@ pub enum BrowserError {
     Canceled,
     /// The sign-in did not finish within the timeout.
     TimedOut(String),
-    /// The wait ran out while a confirm hook's read could not decide
-    /// ([`Confirm::Undecided`](crate::Confirm::Undecided)).
+    /// The wait ran out with every pending capture's confirm read unable to
+    /// decide ([`Confirm::Undecided`](crate::Confirm::Undecided)). If any
+    /// pending capture is still waiting on the owner, the error is
+    /// [`TimedOut`](BrowserError::TimedOut) instead.
     Undecided(String),
     /// The owner closed the window before the sign-in finished.
     WindowClosed(String),

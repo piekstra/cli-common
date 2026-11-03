@@ -140,8 +140,8 @@ pub enum Confirm {
     NotYet(String),
     /// The read could not decide (a 429, a 5xx, no answer, an edge block's
     /// page): keep the tab and the jar, and ask again after a backoff of 6 s,
-    /// doubling to 60 s, or after `retry_after` when the provider gave one.
-    /// The deadline brings one last ask regardless. The first such answer
+    /// doubling to 60 s, or longer if `retry_after` asks. The deadline brings
+    /// one last ask regardless. The first such answer
     /// prints one status line. If the wait runs out on it,
     /// [`BrowserError::Undecided`] is exit 5, because the owner has nothing to
     /// fix by signing in again. The reason follows the
@@ -150,7 +150,8 @@ pub enum Confirm {
     Undecided {
         /// What the read answered, for the status line and the timeout.
         reason: String,
-        /// How long the provider asked to wait, capped at five minutes.
+        /// How long the provider asked to wait. It lengthens the backoff, up
+        /// to five minutes, and never shortens it.
         retry_after: Option<Duration>,
     },
     /// Something no later poll can change (the session cannot be sent, the
@@ -581,7 +582,7 @@ impl Browser {
     ///
     /// Errors: a timeout, or the window closed before the sign-in finished,
     /// is exit 3 naming what was (not) seen and the command to re-run; a
-    /// timeout while the confirm hook's read could not decide is
+    /// timeout with every pending capture's confirm read unable to decide is
     /// [`BrowserError::Undecided`], exit 5; Ctrl-C is "browser login canceled"
     /// (exit 1).
     pub fn wait(&mut self, capture: &Capture, timeout: Duration) -> Result<Captured, BrowserError> {
@@ -1211,7 +1212,9 @@ fn confirm_gate(
             retry_after,
         } => {
             let backoff = next_undecided_backoff(w.undecided.as_ref().map(|read| read.backoff));
-            let wait = retry_after.map_or(backoff, |after| after.min(MAX_RETRY_AFTER));
+            // A `Retry-After` lengthens the wait and never shortens it: a zero,
+            // or a date a skewed clock reads as past, must not restore the poll.
+            let wait = retry_after.map_or(backoff, |after| after.min(MAX_RETRY_AFTER).max(backoff));
             if !w.warned_undecided {
                 w.warned_undecided = true;
                 notes.push(undecided_note(&capture.label, &reason));

@@ -51,6 +51,7 @@
 //!         // The CLI's own request, bounded by its own timeout. It judges the
 //!         // answer itself, with `pk_cli_http::inconclusive` for what says
 //!         // nothing about the session: a 429, a 5xx, a 403 with an HTML page.
+//!         // A 2xx is accepted only once its body shows an account in it.
 //!         match me_with(header.expose()) {
 //!             Me::Accepted => Confirm::Ready,
 //!             Me::Refused => Confirm::NotYet("GET /me answered 401".into()),

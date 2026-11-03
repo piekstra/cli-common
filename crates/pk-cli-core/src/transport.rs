@@ -14,6 +14,7 @@
 //! drives them with [`crate::block_on()`] at no cost.
 
 use std::fmt;
+use std::time::Duration;
 
 use crate::CliError;
 
@@ -144,6 +145,109 @@ impl HttpResponse {
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
     }
+
+    /// Whether this answer says nothing about the session a read was made with
+    /// ([`inconclusive_answer`]). `now` is Unix seconds, for a `Retry-After`
+    /// given as a date: a Worker has no system clock.
+    pub fn inconclusive(&self, now: i64) -> Option<Inconclusive> {
+        inconclusive_answer(
+            self.status,
+            self.header_value("content-type"),
+            self.header_value("retry-after"),
+            now,
+        )
+    }
+
+    /// How long this answer asks to wait ([`parse_retry_after`]). `now` is Unix
+    /// seconds.
+    pub fn retry_after(&self, now: i64) -> Option<Duration> {
+        parse_retry_after(self.header_value("retry-after")?, now)
+    }
+}
+
+/// An answer that says nothing about the session a read was made with: the
+/// provider or its edge did not judge it. A browser sign-in's confirm hook answers
+/// `Confirm::Undecided` on this. Any other answer is the CLI's to judge, because a
+/// provider's refusal rule is its own, and a 2xx is not acceptance until its body
+/// shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Inconclusive {
+    /// The HTTP status, for the reason the CLI words.
+    pub status: u16,
+    /// How long the provider asked to wait ([`parse_retry_after`]).
+    pub retry_after: Option<Duration>,
+}
+
+/// A 429, a 5xx, or a 403 with an HTML page, which is an edge block rather than a
+/// provider's refusal. It takes the status and two header values, and leaves the
+/// body to the caller. `now` is Unix seconds.
+pub fn inconclusive_answer(
+    status: u16,
+    content_type: Option<&str>,
+    retry_after: Option<&str>,
+    now: i64,
+) -> Option<Inconclusive> {
+    let html = content_type.is_some_and(|value| {
+        value
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("text/html")
+    });
+    let says_nothing = status == 429 || (500..600).contains(&status) || (status == 403 && html);
+    says_nothing.then(|| Inconclusive {
+        status,
+        retry_after: retry_after.and_then(|value| parse_retry_after(value, now)),
+    })
+}
+
+/// How long a `Retry-After` value asks to wait: delay-seconds, or an IMF-fixdate
+/// (`Wed, 21 Oct 2015 07:28:00 GMT`), which counts from `now`, Unix seconds, and is
+/// zero once past. `None` for any other form.
+pub fn parse_retry_after(value: &str, now: i64) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let at = imf_fixdate_unix(value)?;
+    Some(Duration::from_secs(at.saturating_sub(now).max(0) as u64))
+}
+
+/// `Wed, 21 Oct 2015 07:28:00 GMT` as Unix seconds.
+fn imf_fixdate_unix(value: &str) -> Option<i64> {
+    let parts: Vec<&str> = value.split_ascii_whitespace().collect();
+    let [_weekday, day, month, year, time, "GMT"] = parts.as_slice() else {
+        return None;
+    };
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let month = MONTHS.iter().position(|name| name == month)? as i64 + 1;
+    let day: i64 = day.parse().ok()?;
+    let year: i64 = year.parse().ok()?;
+    let mut clock = time.split(':').map(str::parse::<i64>);
+    let (hours, minutes, seconds) = (
+        clock.next()?.ok()?,
+        clock.next()?.ok()?,
+        clock.next()?.ok()?,
+    );
+    if clock.next().is_some()
+        || !(1..=31).contains(&day)
+        || !(0..24).contains(&hours)
+        || !(0..60).contains(&minutes)
+        || !(0..=60).contains(&seconds)
+    {
+        return None;
+    }
+    // Days from the civil date, by shifting the year to start in March.
+    let shifted_year = if month <= 2 { year - 1 } else { year };
+    let era = shifted_year.div_euclid(400);
+    let year_of_era = shifted_year - era * 400;
+    let shifted_month = (month + 9) % 12;
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hours * 3_600 + minutes * 60 + seconds)
 }
 
 impl fmt::Debug for HttpResponse {
@@ -257,6 +361,78 @@ pub fn percent_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_429_a_5xx_and_a_403_page_say_nothing_about_the_session() {
+        let page = Some("text/html; charset=utf-8");
+        let json = Some("application/json");
+        for (status, kind, expected) in [
+            (429, json, true),
+            (500, json, true),
+            (503, page, true),
+            (403, page, true),
+            (403, json, false),
+            (401, page, false),
+            (404, page, false),
+            (200, page, false),
+            (200, json, false),
+        ] {
+            let got = inconclusive_answer(status, kind, None, 0);
+            assert_eq!(got.is_some(), expected, "{status} {kind:?}");
+            if let Some(answer) = got {
+                assert_eq!(answer.status, status);
+            }
+        }
+    }
+
+    #[test]
+    fn a_retry_after_reads_in_seconds_or_as_a_date() {
+        // Wed, 21 Oct 2015 07:28:00 GMT.
+        let at = 1_445_412_480;
+        for (value, expected) in [
+            ("120", Some(120)),
+            (" 0 ", Some(0)),
+            ("Wed, 21 Oct 2015 07:28:00 GMT", Some(30)),
+            ("Wed, 21 Oct 2015 07:27:00 GMT", Some(0)),
+            ("Thu, 01 Jan 1970 00:00:00 GMT", Some(0)),
+            ("soon", None),
+            ("-5", None),
+            ("Wed, 21 Oct 2015 07:28:00 PST", None),
+            ("Wed, 21 Foo 2015 07:28:00 GMT", None),
+            ("Wed, 32 Oct 2015 07:28:00 GMT", None),
+            ("Wed, 21 Oct 2015 25:28:00 GMT", None),
+        ] {
+            let got = parse_retry_after(value, at - 30);
+            assert_eq!(got, expected.map(Duration::from_secs), "{value}");
+        }
+    }
+
+    #[test]
+    fn an_imf_fixdate_lands_on_the_known_second() {
+        for (value, expected) in [
+            ("Thu, 01 Jan 1970 00:00:00 GMT", 0),
+            ("Wed, 21 Oct 2015 07:28:00 GMT", 1_445_412_480),
+            ("Sat, 29 Feb 2020 12:00:00 GMT", 1_582_977_600),
+            ("Sun, 01 Mar 2020 00:00:00 GMT", 1_583_020_800),
+        ] {
+            assert_eq!(imf_fixdate_unix(value), Some(expected), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_response_judges_itself_through_its_headers() {
+        let mut answer = HttpResponse::new(429, "");
+        answer.headers = vec![("Retry-After".into(), "120".into())];
+        let said = answer.inconclusive(0).unwrap();
+        assert_eq!(said.status, 429);
+        assert_eq!(said.retry_after, Some(Duration::from_secs(120)));
+        assert_eq!(answer.retry_after(0), Some(Duration::from_secs(120)));
+        let mut block = HttpResponse::new(403, "");
+        block.headers = vec![("content-type".into(), "text/html".into())];
+        assert!(block.inconclusive(0).is_some());
+        assert!(HttpResponse::new(403, "{}").inconclusive(0).is_none());
+        assert!(HttpResponse::new(200, "").inconclusive(0).is_none());
+    }
     use crate::block_on;
 
     #[test]

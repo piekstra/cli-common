@@ -1368,18 +1368,19 @@ fn an_undecided_read_keeps_the_tab_and_warns_once_until_a_read_decides() {
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = calls.clone();
     let hook = move |_: &Captured| {
-        if counter.fetch_add(1, Ordering::SeqCst) < 2 {
-            Confirm::Undecided {
-                reason: "GET /me answered 429".into(),
-                retry_after: Some(Duration::from_millis(2)),
-            }
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Confirm::undecided("GET /me answered 429")
         } else {
             Confirm::Ready
         }
     };
-    let out = run(&mut fake, &[jar_capture().confirm(hook)], LONG);
+    let out = run(
+        &mut fake,
+        &[jar_capture().confirm(hook)],
+        Duration::from_millis(60),
+    );
     assert_eq!(out.result.unwrap().len(), 1);
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(fake.0.borrow().closed, ["T-app"], "closed only once ready");
     let warned: Vec<_> = out
         .notes
@@ -1388,6 +1389,29 @@ fn an_undecided_read_keeps_the_tab_and_warns_once_until_a_read_decides() {
         .collect();
     assert_eq!(warned.len(), 1, "{:?}", out.notes);
     assert!(warned[0].contains("Ctrl-C"), "{warned:?}");
+}
+
+#[test]
+fn a_short_retry_after_does_not_shorten_the_backoff() {
+    let capture = jar_capture().confirm(|_| Confirm::Undecided {
+        reason: "GET /me answered 503".into(),
+        retry_after: Some(Duration::ZERO),
+    });
+    let mut w = Waiting::new(&capture);
+    let start = Instant::now();
+    let mut notes = Vec::new();
+    assert!(confirm_gate(&mut w, bare_candidate(), start, &mut notes).is_err());
+    let read = w.undecided.as_ref().unwrap();
+    assert_eq!(read.ask_at, start + Duration::from_secs(6));
+    let next = read.ask_at;
+    assert!(confirm_gate(&mut w, bare_candidate(), next, &mut notes).is_err());
+    let read = w.undecided.as_ref().unwrap();
+    assert_eq!(
+        read.ask_at,
+        next + Duration::from_secs(12),
+        "it still doubles"
+    );
+    assert_eq!(notes.len(), 1, "{notes:?}");
 }
 
 #[test]

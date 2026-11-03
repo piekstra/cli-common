@@ -132,6 +132,19 @@ with `auth login --browser`: whether it keeps a browser profile, not whether
 that profile is signed in; §2.2.) This retires utiman's
 `authenticated-field` per-provider config.
 
+**A login result under `--json` (schema `auth-login/v1`):**
+```json
+{ "schema": "auth-login/v1", "stored": true, "verified": true }
+```
+`auth login`, and any other command that stores a session (`set-credential`,
+`set-session`), answers with this. A CLI whose login already answers with its own
+schema (`auth-status/v1`, `session-import/v1`) adds `verified` there. `verified` is
+`true` when a provider read accepted the session and `false` otherwise, including
+`--no-verify` and any other store with no read. It is present on both values rather
+than omitted when `true`, because a driver tests for it. A consumer treats an absent
+`verified`, from a CLI not yet updated, as unknown rather than false. A login that
+refuses `--json` has no result to carry it.
+
 **Canonical `self-update --check --json` (schema `self-update/v1`):**
 ```json
 { "schema": "self-update/v1", "current": "0.3.1", "latest": "0.4.0",
@@ -709,7 +722,7 @@ HTML page) depends on what was captured:
 | The captured value | On an inconclusive read |
 |---|---|
 | Can only be this sign-in's: a token in site storage cleared at launch (`clear_site_storage`), or a signal that exists only once signed in, read from a scratch profile | Store it and warn. No copy survives the run, so it cannot be read again. A bad stored session costs the same one further sign-in that discarding it would |
-| Could predate the sign-in: a cookie in a kept profile, or a cookie the site also sets for a visitor | `Confirm::Undecided`, with a reason worded as the Secrets row says. The crate keeps the tab and the jar and asks again after a backoff of 6 s, doubling to 60 s, or after the provider's `Retry-After`, up to five minutes, with one last ask at the deadline. The first such answer prints one status line saying Ctrl-C ends the wait. A provider that recovers finishes the sign-in. Storing could keep a stale or anonymous jar. `Confirm::Fail` would lose a session cookie, which does not survive the stop, so keep it for an answer no later poll can change. If the wait runs out with every pending capture undecided, `BrowserError::Undecided` is exit 5: that capture is not handed over, a session cookie is gone, and the sign-in may have to be repeated. A pending capture a person has yet to finish makes it `TimedOut`, exit 3 |
+| Could predate the sign-in: a cookie in a kept profile, or a cookie the site also sets for a visitor | `Confirm::Undecided`, with a reason worded as the Secrets row says. The crate keeps the tab and the jar and asks again after a backoff of 6 s, doubling to 60 s, or longer if the provider's `Retry-After` asks, up to five minutes, with one last ask at the deadline. The first such answer prints one status line saying Ctrl-C ends the wait. A provider that recovers finishes the sign-in. Storing could keep a stale or anonymous jar. `Confirm::Fail` would lose a session cookie, which does not survive the stop, so keep it for an answer no later poll can change. If the wait runs out with every pending capture undecided, `BrowserError::Undecided` is exit 5: that capture is not handed over, a session cookie is gone, and the sign-in may have to be repeated. A pending capture a person has yet to finish makes it `TimedOut`, exit 3 |
 
 A provider whose edge challenges every read from outside a browser never lets
 that wait finish. A CLI that has recorded this may store on the challenge and warn
@@ -721,13 +734,17 @@ what the table says must not be stored. Otherwise it keeps waiting, and its reas
 names the other routes.
 
 A 403 is not automatically a refusal, though `json_response` maps it to exit 3. A
-read that decides a session uses `pk_cli_http::inconclusive` first, which names a
-429, a 5xx and a 403 with an HTML page and carries the `Retry-After`, and judges
-any other answer by the provider's own rule.
+read that decides a session uses `pk_cli_http::inconclusive` first, or
+`HttpResponse::inconclusive` on the transport seam (§2.3), which names a 429, a 5xx
+and a 403 with an HTML page and carries the `Retry-After`, and judges any other
+answer by the provider's own rule. A 2xx alone is not acceptance, because an edge
+interstitial or an app's shell page can answer 200 to anyone. Those helpers read
+the status and headers only, so the hook looks in the body for what only a
+signed-in answer has, and answers `Undecided` on a 2xx whose body is empty, HTML or
+unparseable.
 
-A stored, unverified session exits 0, because the session is stored. A `--json`
-login result always carries `verified`: `true` when a read accepted the session,
-`false` otherwise. The stderr warning prints even under `-q`, names the cause, says
+A stored, unverified session exits 0, because the session is stored, and its login
+result says `verified: false` (§1.4). The stderr warning prints even under `-q`, names the cause, says
 the session is unverified, and names the way out: `<bin> auth login --browser
 --overwrite`. An `auth status` that makes no provider read reports `session_valid`
 from local facts (an expiry, a refresh token), so an unverified session can read
@@ -815,9 +832,14 @@ let capture = Capture::new("Example", HostRule::exact("www.example.com")?)
                 retry_after: said.retry_after,
             };
         }
-        match answer.status().as_u16() {
-            200..=299 => Confirm::Ready,
-            status => Confirm::NotYet(format!("GET /api/me answered HTTP {status}")),
+        let status = answer.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Confirm::NotYet(format!("GET /api/me answered HTTP {status}"));
+        }
+        // A 2xx alone proves nothing: an edge page or an app's shell answers 200.
+        match answer.json::<serde_json::Value>() {
+            Ok(me) if me.get("email").is_some() => Confirm::Ready,
+            _ => Confirm::undecided("GET /api/me answered 200 with no account in it"),
         }
     });
 ```
