@@ -50,7 +50,7 @@ mod cli {
         };
         match me(header.expose()) {
             Ok(()) => Confirm::Ready,
-            Err(CliError::Auth(why)) => Confirm::NotYet(why),
+            Err(e) if e.is_auth() => Confirm::NotYet(e.message().to_string()),
             Err(e) => Confirm::Fail(e),
         }
     }
