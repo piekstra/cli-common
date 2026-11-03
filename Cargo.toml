@@ -7,6 +7,7 @@ members = [
     "crates/pk-cli-selfupdate",
     "crates/pk-cli-auth",
     "crates/pk-cli-http",
+    "crates/pk-cli-arcgis",
     "crates/pk-cli-utility",
     "crates/pk-cli-documents",
     "crates/pk-cli-scrape",
@@ -33,6 +34,7 @@ pk-cli-config = { path = "crates/pk-cli-config", version = "0.24.0" }
 pk-cli-selfupdate = { path = "crates/pk-cli-selfupdate", version = "0.24.0" }
 pk-cli-auth = { path = "crates/pk-cli-auth", version = "0.24.0" }
 pk-cli-http = { path = "crates/pk-cli-http", version = "0.24.0" }
+pk-cli-arcgis = { path = "crates/pk-cli-arcgis", version = "0.24.0" }
 pk-cli-utility = { path = "crates/pk-cli-utility", version = "0.24.0" }
 pk-cli-documents = { path = "crates/pk-cli-documents", version = "0.24.0" }
 pk-cli-scrape = { path = "crates/pk-cli-scrape", version = "0.24.0" }
