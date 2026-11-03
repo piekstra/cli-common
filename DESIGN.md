@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · inconclusive read of a one-shot capture stores with a warning (§2.2) · 2026-11-03
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · when a window capture's read cannot decide (§2.2) · 2026-11-03
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -692,24 +692,42 @@ read from the matches, and a CLI adds nothing for `fresh_profile`.
 `pk_cli_browser::forget_profile(BIN)`, so a logout signs the browser out
 too. After the capture the CLI verifies the session with one provider read
 and stores it as one keychain item (§1.7), as a `--stdin` import of the same
-value would. A read that refuses the session stores nothing, and each CLI
-decides what counts as a refusal. A `--stdin` import also stores nothing on any
-other unproven read, because the value can be piped again. A window capture
-differs when the page held the only local copy: `clear_site_storage` has
-removed it, so the sign-in cannot be read again. An inconclusive read of such a
-capture (a 429, a 5xx, a dropped connection, an empty or unparseable answer, an
-edge block's HTML page) stores the session and warns on stderr, even under
-`-q`. The warning names the cause, says the session is unverified, and names the
-way out: `<bin> auth login --browser --overwrite`. With site storage cleared at
-launch, a token in the page can only be this sign-in's, and a bad stored session
-costs the same one further sign-in that discarding it would. A capture held in
-cookies stays in the kept profile, so it can end the wait with `Confirm::Fail`
-and take nothing. Either way, an unverified session never replaces a working
-stored one without `--overwrite`. `auth status` reports `method: "browser-session"` and
+value would. The exception is a read that cannot decide, below.
+`auth status` reports `method: "browser-session"` and
 `browser_profile`, from `pk_cli_browser::profile_exists(BIN)`, and
 `info.auth.login_hint` is `<bin> auth login --browser`. The manual path
 (`--stdin` with a value copied out of DevTools) stays as the fallback for a
 machine without Chrome.
+
+**When the read cannot decide.** A read that refuses the session stores nothing,
+and each CLI decides what counts as a refusal. A `--stdin` import also stores
+nothing on any other unproven read, because the value can be piped again. A
+window capture cost the owner a password and a code, so an inconclusive read (a
+429, a 5xx, a dropped connection, an empty or unparseable answer, an edge block's
+HTML page) depends on what was captured:
+
+| The captured value | On an inconclusive read |
+|---|---|
+| Can only be this sign-in's: a token in site storage cleared at launch (`clear_site_storage`), or a signal that exists only once signed in, read from a scratch profile | Store it and warn. No copy survives the run, so it cannot be read again. A bad stored session costs the same one further sign-in that discarding it would |
+| Could predate the sign-in: a cookie in a kept profile, or a cookie the site also sets for a visitor | `Confirm::NotYet` with the read's own reason, and one stderr line the first time, unless `-q`, saying Ctrl-C ends the wait. The tab and the jar stay alive, the next poll reads again, and a provider that recovers finishes the sign-in. Storing could keep a stale or anonymous jar. `Confirm::Fail` would lose a session cookie, which does not survive the stop, so keep it for an answer no later poll can change |
+
+A provider whose edge challenges every read from outside a browser never lets
+that wait finish. A CLI that has recorded this stores on the challenge and warns,
+and says so in its `docs/api.md`.
+
+A stored, unverified session exits 0, because the session is stored. `--json`
+adds `verified: false` to the login result, which is additive and absent on a
+verified login. The stderr warning prints even under `-q`, names the cause, says
+the session is unverified, and names the way out: `<bin> auth login --browser
+--overwrite`. An `auth status` that makes no provider read reports `session_valid`
+from local facts (an expiry, a refresh token), so an unverified session can read
+as valid until a read says otherwise.
+
+An unverified session never replaces a working stored one without `--overwrite`,
+and a CLI settles that before a sign-in is spent: with a session stored and no
+`--overwrite` it refuses before Chrome opens. A CLI that lets a sign-in run beside
+a stored session, because a read may show the stored one is dead, keeps the
+stored one when it cannot tell. It stores nothing, exits 5 and says so.
 
 ```rust
 use pk_cli_browser::{Capture, HostRule, Launch, DEFAULT_TIMEOUT};
@@ -774,7 +792,8 @@ let capture = Capture::new("Example", HostRule::exact("www.example.com")?)
         match client_with(header.expose()).and_then(|c| c.get_json("/api/me")) {
             Ok(_) => Confirm::Ready,
             Err(CliError::Auth(_)) => Confirm::NotYet("GET /api/me answered 401".into()),
-            Err(e) => Confirm::Fail(e),
+            // A 429, a 5xx or an outage: the jar stays in the tab until a read decides.
+            Err(e) => Confirm::NotYet(format!("GET /api/me could not tell: {e}")),
         }
     });
 ```

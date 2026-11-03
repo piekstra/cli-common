@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-- `DESIGN.md` §2.2 states the rule for verifying a window capture: a refusal
-  stores nothing, and an inconclusive read of a capture whose only local copy was
-  the page's stores the session with a warning that names the way out. A
-  finished sign-in is not lost to a 429 or an outage. No code changes.
+- `DESIGN.md` §2.2 and `conformance.md` state what a window capture does when its
+  verifying read cannot decide. A refusal stores nothing. A value that can only
+  be this sign-in's stores with a warning, exit 0 and `verified: false`. A value
+  that could predate the sign-in keeps waiting with `Confirm::NotYet`. A finished
+  sign-in is not lost to a 429 or an outage. No code changes.
 
 ## v0.19.0 — 2026-11-03
 

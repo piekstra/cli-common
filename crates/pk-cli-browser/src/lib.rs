@@ -52,7 +52,8 @@
 //!         match me_with(header.expose()) {
 //!             Ok(()) => Confirm::Ready,
 //!             Err(CliError::Auth(_)) => Confirm::NotYet("GET /me answered 401".into()),
-//!             Err(e) => Confirm::Fail(e),
+//!             // A 429, a 5xx or an outage: the jar stays in the tab until a read decides.
+//!             Err(e) => Confirm::NotYet(format!("GET /api/me could not tell: {e}")),
 //!         }
 //!     });
 //! let captured = pk_cli_browser::capture(
