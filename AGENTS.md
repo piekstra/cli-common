@@ -49,9 +49,10 @@ ships needs these targets like any family CLI.
 
 **Sign every target that produces a binary.** `cargo build` and
 `cargo install` both ad-hoc sign, giving the binary a *new* code identity each
-time. macOS scopes keychain "Always Allow" grants to that identity, so any
-unsigned rebuild silently revokes the grant and the next run prompts again —
-which reads as a flaky keychain rather than a signing problem.
+time, so it fails a keychain item's access list and the next run prompts again —
+which reads as a flaky keychain rather than a signing problem. Signing fixes the
+access list only: the item's partition list pins each binary's `cdhash:` when the
+certificate has no Apple team ID, so a signed rebuild still prompts once per item.
 
 Signing only `install` and `dev` is not enough: the binary most often run
 during development is `./target/release/<bin>`, produced by the CLI's

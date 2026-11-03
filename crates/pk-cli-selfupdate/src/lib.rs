@@ -382,10 +382,10 @@ fn replace_self(binary_name: &str, binary: &[u8]) -> Result<(), CliError> {
 }
 
 /// The stable, self-signed family code-signing identity (created once by
-/// `cli-common/scripts/setup-dev-signing.sh`). A keychain "Always Allow" grant
-/// binds to this identity's designated requirement, so signing every installed
-/// build with it keeps the grant valid across versions — a self-updated binary
-/// is not re-prompted.
+/// `cli-common/scripts/setup-dev-signing.sh`). Signing every installed build with
+/// it keeps the designated requirement that a keychain item's access list checks.
+/// A self-updated binary is still prompted once per item, because the partition
+/// list pins each binary's cdhash when the certificate has no Apple team ID.
 #[cfg(target_os = "macos")]
 const CODESIGN_IDENTITY: &str = "pk-cli-codesign";
 
