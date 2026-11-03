@@ -50,6 +50,10 @@ use crate::watch::{
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 /// Between polls of the page list.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// The most a read that could not decide waits by its own backoff.
+const MAX_UNDECIDED_BACKOFF: Duration = Duration::from_secs(60);
+/// The most a provider's `Retry-After` is honoured for.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(300);
 /// Bound on one CDP call, the in-page check included.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// A timeout this long is announced as no limit at all.
@@ -134,10 +138,34 @@ pub enum Confirm {
     /// the timeout error if the wait runs out, so it names what was seen
     /// (`GET /me answered 401`), never a value.
     NotYet(String),
-    /// Something waiting will not fix (the provider is down, the session is
-    /// refused for another reason): end the wait with this error, as
+    /// The read could not decide (a 429, a 5xx, no answer, an edge block's
+    /// page): keep the tab and the jar, and ask again after a backoff that
+    /// doubles from two polls up to a minute, or after `retry_after` when the
+    /// provider gave one. The first such answer prints one status line. If the
+    /// wait runs out on it, [`BrowserError::Undecided`] is exit 5, because the
+    /// owner has nothing to fix by signing in again. The reason follows the
+    /// rule for [`NotYet`](Confirm::NotYet): fixed parts, never a response
+    /// body or a URL's query.
+    Undecided {
+        /// What the read answered, for the status line and the timeout.
+        reason: String,
+        /// How long the provider asked to wait, capped at five minutes.
+        retry_after: Option<Duration>,
+    },
+    /// Something no later poll can change (the session cannot be sent, the
+    /// account is locked): end the wait with this error, as
     /// [`BrowserError::Handler`].
     Fail(CliError),
+}
+
+impl Confirm {
+    /// [`Confirm::Undecided`] with no `Retry-After` from the provider.
+    pub fn undecided(reason: impl Into<String>) -> Self {
+        Confirm::Undecided {
+            reason: reason.into(),
+            retry_after: None,
+        }
+    }
 }
 
 impl Capture {
@@ -286,8 +314,9 @@ impl Capture {
     /// sign-in finishes. It is shown the candidate [`Captured`] and answers
     /// with a [`Confirm`]: [`Confirm::NotYet`] leaves the tab open and asks
     /// again on the next poll (its reason names what the wait was stuck on
-    /// if it times out), [`Confirm::Ready`] closes the tab and hands the
-    /// capture over, and [`Confirm::Fail`] ends the wait with
+    /// if it times out), [`Confirm::Undecided`] does the same after a backoff,
+    /// for a read that could not decide, [`Confirm::Ready`] closes the tab and
+    /// hands the capture over, and [`Confirm::Fail`] ends the wait with
     /// [`BrowserError::Handler`].
     ///
     /// The request is the CLI's own: the crate never sends one, it calls the
@@ -667,6 +696,16 @@ pub(crate) enum Blocked {
     Holding,
     /// The confirm hook said not yet, for this reason.
     Unconfirmed(String),
+    /// The confirm hook's read could not decide, for this reason.
+    Undecided(String),
+}
+
+/// The confirm hook's last inconclusive answer, and when to ask it again.
+#[derive(Debug, Clone)]
+struct UndecidedRead {
+    reason: String,
+    ask_at: Instant,
+    backoff: Duration,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -690,6 +729,8 @@ struct Waiting<'a> {
     log: Option<RequestLog>,
     /// When everything but the watch window was first ready.
     hold_since: Option<Instant>,
+    undecided: Option<UndecidedRead>,
+    warned_undecided: bool,
 }
 
 impl<'a> Waiting<'a> {
@@ -713,6 +754,8 @@ impl<'a> Waiting<'a> {
                 .and_then(|l| HostRule::domain(&l.domain).ok())
                 .map(RequestLog::new),
             hold_since: None,
+            undecided: None,
+            warned_undecided: false,
         }
     }
 
@@ -973,7 +1016,7 @@ fn read_when_ready<T: Transport>(
         request_log: w.log.as_ref().map(|log| log.entries().to_vec()),
         user_agent,
     };
-    let captured = confirm_gate(w, candidate)?;
+    let captured = confirm_gate(w, candidate, state.now, notes)?;
     let closed = close_pages(cdp, &matching);
     Ok((captured, closed))
 }
@@ -1132,19 +1175,62 @@ fn user_agent_gate<T: Transport>(
 
 /// The CLI's check of the candidate. On `NotYet` the watched request is
 /// kept for the next poll; the rest is read again then.
-fn confirm_gate(w: &mut Waiting<'_>, mut candidate: Captured) -> Result<Captured, Gate> {
+fn confirm_gate(
+    w: &mut Waiting<'_>,
+    mut candidate: Captured,
+    now: Instant,
+    notes: &mut Vec<String>,
+) -> Result<Captured, Gate> {
     let capture = w.capture;
     let Some(hook) = &capture.confirm else {
         return Ok(candidate);
     };
+    if let Some(read) = w.undecided.as_ref().filter(|read| now < read.ask_at) {
+        w.seen = candidate.request.take();
+        return Err(Blocked::Undecided(read.reason.clone()).into());
+    }
     match (hook.0)(&candidate) {
         Confirm::Ready => Ok(candidate),
         Confirm::NotYet(reason) => {
+            w.undecided = None;
             w.seen = candidate.request.take();
             Err(Blocked::Unconfirmed(reason).into())
         }
+        Confirm::Undecided {
+            reason,
+            retry_after,
+        } => {
+            let backoff = next_undecided_backoff(w.undecided.as_ref().map(|read| read.backoff));
+            let wait = retry_after.map_or(backoff, |after| after.min(MAX_RETRY_AFTER));
+            if !w.warned_undecided {
+                w.warned_undecided = true;
+                notes.push(undecided_note(&capture.label, &reason));
+            }
+            w.undecided = Some(UndecidedRead {
+                reason: reason.clone(),
+                ask_at: now + wait,
+                backoff,
+            });
+            w.seen = candidate.request.take();
+            Err(Blocked::Undecided(reason).into())
+        }
         Confirm::Fail(e) => Err(Gate::Failed(e)),
     }
+}
+
+/// Two polls first, then doubling up to the ceiling.
+fn next_undecided_backoff(last: Option<Duration>) -> Duration {
+    match last {
+        None => POLL_INTERVAL * 2,
+        Some(last) => (last * 2).min(MAX_UNDECIDED_BACKOFF),
+    }
+}
+
+fn undecided_note(label: &str, reason: &str) -> String {
+    format!(
+        "{label}: the session could not be confirmed yet: {reason}. The window stays open and \
+         this keeps trying. Ctrl-C ends the wait."
+    )
 }
 
 fn page_host(page: &PageTarget) -> String {
@@ -1592,6 +1678,9 @@ pub(crate) fn diagnose(capture: &Capture, progress: &Progress) -> String {
         Some(Blocked::Unconfirmed(reason)) => {
             format!("the session was read but not confirmed: {reason}")
         }
+        Some(Blocked::Undecided(reason)) => {
+            format!("the session was read, but the read could not decide: {reason}")
+        }
         None => "a page was open, but the session was not ready".into(),
     };
     let empty_jar = matches!(progress.blocked, Some(Blocked::EmptyJar(_)));
@@ -1661,6 +1750,17 @@ fn timed_out(
     };
     if let Some(e) = port_error {
         why.push_str(&format!("; Chrome's debug port: {e}"));
+    }
+    let undecided = pending
+        .iter()
+        .any(|w| matches!(w.progress.blocked, Some(Blocked::Undecided(_))));
+    if undecided {
+        return BrowserError::Undecided(format!(
+            "timed out after {}: the provider did not answer clearly ({why}). Nothing was stored, \
+             and the sign-in may have to be repeated: re-run `{login_hint}` once the provider \
+             answers.",
+            duration_words(timeout)
+        ));
     }
     BrowserError::TimedOut(format!(
         "timed out after {}: the {} not completed in the browser window ({why}). Re-run \

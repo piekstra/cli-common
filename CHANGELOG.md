@@ -2,11 +2,17 @@
 
 ## Unreleased
 
+- `pk-cli-browser`: `Confirm::Undecided { reason, retry_after }` and
+  `Confirm::undecided(reason)`, for a confirm hook's read that could not decide (a
+  429, a 5xx, no answer, an edge block's page). The crate keeps the tab and the jar
+  and asks again after a backoff, doubling from two polls up to a minute, or after
+  the provider's `Retry-After`, up to five minutes. The first such answer prints
+  one status line. A wait that runs out on it is `BrowserError::Undecided`, exit 5,
+  rather than `TimedOut`, exit 3, because signing in again fixes nothing.
 - `DESIGN.md` §2.2 and `conformance.md` state what a window capture does when its
-  verifying read cannot decide. A refusal stores nothing. A value that can only
-  be this sign-in's stores with a warning, exit 0 and `verified: false`. A value
-  that could predate the sign-in keeps waiting with `Confirm::NotYet`. A finished
-  sign-in is not lost to a 429 or an outage. No code changes.
+  verifying read cannot decide. A refusal stores nothing. A value that can only be
+  this sign-in's stores with a warning, exit 0 and `verified: false`. A value that
+  could predate the sign-in answers `Confirm::Undecided`.
 
 ## v0.19.0 — 2026-11-03
 

@@ -52,8 +52,8 @@
 //!         match me_with(header.expose()) {
 //!             Ok(()) => Confirm::Ready,
 //!             Err(CliError::Auth(_)) => Confirm::NotYet("GET /me answered 401".into()),
-//!             // A 429, a 5xx or an outage: the jar stays in the tab until a read decides.
-//!             Err(e) => Confirm::NotYet(format!("GET /api/me could not tell: {e}")),
+//!             // A 429, a 5xx or an outage: the crate asks again after a backoff.
+//!             Err(_) => Confirm::undecided("GET /me got no clear answer"),
 //!         }
 //!     });
 //! let captured = pk_cli_browser::capture(
@@ -222,8 +222,8 @@
 //! the only place a session touches the filesystem (kept between sign-ins
 //! unless the CLI asks for a fresh one, above). Status lines and errors
 //! name hosts, labels, URLs without queries and cookie names only; a
-//! [`Confirm::NotYet`] reason is shown too, so a CLI writes it the same
-//! way.
+//! [`Confirm::NotYet`] or [`Confirm::Undecided`] reason is shown too, so a
+//! CLI writes it the same way.
 //!
 //! The [`Capture::confirm`] hook is the CLI's code, run in the CLI's
 //! process with the candidate session: the request it makes is the CLI's
