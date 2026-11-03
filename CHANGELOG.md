@@ -2,13 +2,13 @@
 
 ## Unreleased
 
-- `pk-cli-mcp`: a position cursor. `PageRequest::page_by_position` takes every matching row
-  paired with its `PositionKey` and an `Order`, sorts them, and returns a cursor holding the
-  last row's position instead of a count of rows, so a row that arrives between pages cannot
-  repeat one and a row that leaves cannot skip one. A `PositionKey` is a sort value and an id;
-  the cursor holds the sort value encoded and the id only as a hash. A cursor from before a
-  tool moved is honoured as its count, and a position cursor reaching a count-of-rows page
-  is refused.
+- `pk-cli-mcp`: a position cursor. `PositionRequest`, beside `PageRequest`, takes every
+  matching row paired with its `PositionKey` and an `Order`, sorts them, and returns a cursor
+  holding the last row's position instead of a count of rows, so a row that arrives between
+  pages cannot repeat one and a row that leaves cannot skip one. A `PositionKey` is a sort value
+  and an id; the cursor holds the sort value encoded and a fingerprint of the id. A cursor from
+  before a tool moved is honoured as its count, and `PageRequest` refuses a position cursor
+  before anything is fetched.
 - `pk-cli-utility`: `<prefix>_bills` and `<prefix>_payments` page by position, so every
   `utility/v1` CLI moves on its bump. Rows sharing a date now run in a fixed order of their
   own, the provider's within a day aside. `<prefix>_usage` stays by count of rows: a period's label can be

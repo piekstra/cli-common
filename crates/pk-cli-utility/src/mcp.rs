@@ -18,8 +18,8 @@
 
 use pk_cli_core::{dates, resolve, CliError, Money};
 use pk_cli_mcp::{
-    parse_args, ListArgs, Order, Page, PageRequest, PositionKey, ResponseFormat, Server, ToolDef,
-    ToolError, ToolOutput, Toolset,
+    parse_args, ListArgs, Order, Page, PageRequest, PositionKey, PositionRequest, ResponseFormat,
+    Server, ToolDef, ToolError, ToolOutput, Toolset,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -228,7 +228,7 @@ impl<S: UtilitySource> UtilityTools<S> {
 
     async fn bills(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let args: ListToolArgs = parse_args(args)?;
-        let page = args.page_request()?;
+        let page = PositionRequest::new(&args.list, &args.filter())?;
         let (since, until) = args.bounds()?;
         let account = self.account(args.account.as_deref()).await?;
         let detailed = args.list.format().is_detailed();
@@ -263,12 +263,12 @@ impl<S: UtilitySource> UtilityTools<S> {
                 (key, item)
             })
             .collect();
-        ToolOutput::new(&page.page_by_position(rows, Order::Descending, self.narrow())?)
+        ToolOutput::new(&page.page(rows, Order::Descending, self.narrow())?)
     }
 
     async fn payments(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let args: ListToolArgs = parse_args(args)?;
-        let page = args.page_request()?;
+        let page = PositionRequest::new(&args.list, &args.filter())?;
         let (since, until) = args.bounds()?;
         let account = self.account(args.account.as_deref()).await?;
         let detailed = args.list.format().is_detailed();
@@ -295,12 +295,12 @@ impl<S: UtilitySource> UtilityTools<S> {
                 (key, item)
             })
             .collect();
-        ToolOutput::new(&page.page_by_position(rows, Order::Descending, self.narrow())?)
+        ToolOutput::new(&page.page(rows, Order::Descending, self.narrow())?)
     }
 
     async fn usage(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let args: ListToolArgs = parse_args(args)?;
-        let page = args.page_request()?;
+        let page = PageRequest::new(&args.list, &args.filter())?;
         let (since, until) = args.bounds()?;
         let account = self.account(args.account.as_deref()).await?;
         let rows = self
@@ -472,15 +472,12 @@ struct ListFilter<'a> {
 }
 
 impl ListToolArgs {
-    fn page_request(&self) -> Result<PageRequest, ToolError> {
-        PageRequest::new(
-            &self.list,
-            &ListFilter {
-                account: present(self.account.as_deref()),
-                since: present(self.since.as_deref()),
-                until: present(self.until.as_deref()),
-            },
-        )
+    fn filter(&self) -> ListFilter<'_> {
+        ListFilter {
+            account: present(self.account.as_deref()),
+            since: present(self.since.as_deref()),
+            until: present(self.until.as_deref()),
+        }
     }
 
     /// `since` and `until` in canonical ISO form, so they compare as text.

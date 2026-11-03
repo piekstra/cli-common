@@ -119,7 +119,9 @@ pub use http::{restart_note, HTTP_TOKEN_ACCOUNT};
 #[cfg(feature = "test-util")]
 pub use pk_cli_core::block_on;
 pub use result::{CallToolResult, ToolOutput};
-pub use shape::{ListArgs, Order, Page, PageInfo, PageRequest, PositionKey, ResponseFormat};
+pub use shape::{
+    ListArgs, Order, Page, PageInfo, PageRequest, PositionKey, PositionRequest, ResponseFormat,
+};
 pub use tool::{Annotations, ToolDef};
 pub use toolset::{
     call_tool, call_tool_json, instructions, parse_args, tools_list, tools_list_json, Server,

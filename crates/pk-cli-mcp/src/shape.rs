@@ -7,9 +7,10 @@
 //!   starts and a fingerprint of the query's filters, so a cursor replayed
 //!   with different filters is refused rather than silently paging a
 //!   different list. Where the next page starts is a count of rows
-//!   ([`PageRequest::page`]), or, for a list whose rows can arrive or leave
-//!   between pages, the last row's own position ([`PageRequest::page_by_position`]),
-//!   so a new row cannot repeat one and a removed row cannot skip one.
+//!   ([`PageRequest`]), or, for a list whose rows can arrive or leave between
+//!   pages, the last row's own position ([`PositionRequest`]), so a new row
+//!   cannot repeat one and a removed row cannot skip one. A tool picks one when it
+//!   resolves the arguments.
 //! - **Format.** [`ResponseFormat::Concise`] by default: the fields a person
 //!   reads, names rather than ids. `detailed` adds ids, timestamps and
 //!   provider detail.
@@ -21,8 +22,7 @@
 //!   non-ASCII names is measured as the model sees it.
 //!
 //! [`ListArgs`] is the argument block a list tool flattens into its input;
-//! [`PageRequest`] resolves it, and [`PageRequest::page`] or
-//! [`PageRequest::page_by_position`] cuts the page.
+//! [`PageRequest`] or [`PositionRequest`] resolves it and cuts the page.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -106,7 +106,7 @@ pub struct Page<T> {
     pub info: PageInfo,
 }
 
-/// Which way a list runs, by its rows' position keys ([`PageRequest::page_by_position`]).
+/// Which way a list runs, by its rows' position keys ([`PositionRequest::page`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Order {
     /// Largest first: newest first, for an ISO date. A row with no date, sorting by nothing,
@@ -125,9 +125,9 @@ impl Order {
     }
 }
 
-/// Where a row belongs in a list that pages by position ([`PageRequest::page_by_position`]):
-/// a value to sort by, and what tells the row from others with the same one. Neither may change
-/// while the row exists: a row whose key changes moves with it, and can repeat or be missed.
+/// Where a row belongs in a list that pages by position ([`PositionRequest`]): a value to sort
+/// by, and what tells the row from others with the same one. Neither may change while the row
+/// exists: a row whose key changes moves with it, and can repeat or be missed.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PositionKey {
     sort: String,
@@ -137,11 +137,15 @@ pub struct PositionKey {
 impl PositionKey {
     /// `sort` is what the list runs by, such as an ISO date or a symbol. It travels in the
     /// cursor, encoded and not encrypted, so it is something the concise format shows. Over
-    /// [`MAX_SORT_BYTES`] it is cut to that. `id` is whatever tells rows with the same `sort`
-    /// apart, such as a transaction id or a confirmation number. The cursor holds only its hash,
-    /// so an id the concise format holds back stays out, and rows with the same `sort` run in
-    /// the order of those hashes, a fixed order and not a meaningful one. A timestamp in `sort`
-    /// keeps a day's rows in time order.
+    /// [`MAX_SORT_BYTES`] it is cut to that.
+    ///
+    /// `id` is whatever tells rows with the same `sort` apart, such as a transaction id or a
+    /// confirmation number. The cursor holds a fingerprint of it, an unkeyed hash. That keeps
+    /// the id from being read off a cursor, and cursors short. It does not hide it from someone
+    /// who tries candidates, and it does not need to: a cursor goes to the client that could
+    /// ask for `detailed`. Rows with the same `sort` run in the order of those fingerprints, a
+    /// fixed order and not a meaningful one. A timestamp in `sort` keeps a day's rows in time
+    /// order.
     pub fn new(sort: impl Into<String>, id: &str) -> Self {
         let mut sort = sort.into();
         cut_sort(&mut sort);
@@ -159,12 +163,40 @@ struct Position {
     repeat: usize,
 }
 
-/// A resolved page request: how many, from where, under what budget.
+/// The limit, checked.
+fn resolved_limit(args: &ListArgs) -> Result<usize, ToolError> {
+    let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
+    if !(1..=MAX_LIMIT).contains(&limit) {
+        return Err(ToolError::usage(format!(
+            "limit must be between 1 and {MAX_LIMIT}; got {limit}"
+        )));
+    }
+    Ok(limit as usize)
+}
+
+/// The call's cursor, checked against the query's filters. `None` for the first page.
+fn resolved_cursor(args: &ListArgs, fingerprint: u64) -> Result<Option<Cursor>, ToolError> {
+    match args.cursor.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(c) => {
+            let (cursor, fp) = decode_cursor(c).ok_or_else(foreign_cursor)?;
+            if fp != fingerprint {
+                return Err(ToolError::usage(
+                    "cursor belongs to a query with different filters; repeat the filters \
+                     of the call that returned it, or omit cursor to start over",
+                ));
+            }
+            Ok(Some(cursor))
+        }
+    }
+}
+
+/// A resolved page request, counted in rows: how many, from where, under what budget. For a
+/// list that holds still between pages; [`PositionRequest`] is for one that does not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageRequest {
     limit: usize,
     offset: usize,
-    position: Option<Position>,
     fingerprint: u64,
     budget: usize,
 }
@@ -175,30 +207,16 @@ impl PageRequest {
     /// A bad limit, a cursor this tool did not issue, or a cursor issued for
     /// other filters is a usage error saying how to fix the call.
     pub fn new<F: Serialize + ?Sized>(args: &ListArgs, filters: &F) -> Result<Self, ToolError> {
-        let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
-        if !(1..=MAX_LIMIT).contains(&limit) {
-            return Err(ToolError::usage(format!(
-                "limit must be between 1 and {MAX_LIMIT}; got {limit}"
-            )));
-        }
+        let limit = resolved_limit(args)?;
         let fingerprint = fingerprint(filters)?;
-        let (offset, position) = match args.cursor.as_deref().map(str::trim) {
-            None | Some("") => (0, None),
-            Some(c) => {
-                let cursor = decode_cursor(c).ok_or_else(foreign_cursor)?;
-                if cursor.fingerprint != fingerprint {
-                    return Err(ToolError::usage(
-                        "cursor belongs to a query with different filters; repeat the filters \
-                         of the call that returned it, or omit cursor to start over",
-                    ));
-                }
-                (cursor.offset, cursor.position)
-            }
+        let offset = match resolved_cursor(args, fingerprint)? {
+            None => 0,
+            Some(Cursor::Count(offset)) => offset,
+            Some(Cursor::At(_)) => return Err(foreign_cursor()),
         };
         Ok(Self {
-            limit: limit as usize,
+            limit,
             offset,
-            position,
             fingerprint,
             budget: SIZE_BUDGET,
         })
@@ -214,20 +232,15 @@ impl PageRequest {
         self.limit
     }
 
-    /// Where this page starts in the full list of matching records. A count of rows: none
-    /// under a position cursor, which says where it starts by a row's key.
+    /// Where this page starts in the full list of matching records.
     pub fn offset(&self) -> usize {
         self.offset
     }
 
     /// How many matching records the tool must fetch, counted from the first,
     /// for [`Self::page`] to know whether another page exists: the page's
-    /// end plus one. [`Self::page_by_position`] needs every matching record, so under a
-    /// position cursor this is all of them.
+    /// end plus one.
     pub fn wanted(&self) -> usize {
-        if self.position.is_some() {
-            return usize::MAX;
-        }
         self.offset.saturating_add(self.limit).saturating_add(1)
     }
 
@@ -247,34 +260,85 @@ impl PageRequest {
         more_upstream: bool,
         narrow: &str,
     ) -> Result<Page<T>, ToolError> {
-        if self.position.is_some() {
-            return Err(foreign_cursor());
-        }
         let available = matched.len().saturating_sub(self.offset);
         let rows = matched.into_iter().skip(self.offset);
-        self.cut(rows, available, more_upstream, narrow, |kept| {
-            encode_cursor(self.offset + kept, self.fingerprint)
+        cut(
+            self.limit,
+            self.budget,
+            rows,
+            available,
+            more_upstream,
+            narrow,
+            // `offset` is bounded by MAX_OFFSET on decode, so the sum is small.
+            |kept| encode_cursor(self.offset + kept, self.fingerprint),
+        )
+    }
+}
+
+/// A resolved page request for a list whose rows can arrive, leave or change between pages: the
+/// next cursor holds the last row's position rather than a count of rows.
+///
+/// A count of rows would repeat one when a new row arrives above the page's end, and skip one when
+/// a row above it leaves. A position does neither, and a total added up across pages stays right.
+/// Rows that arrive above a position already passed are not seen until the list is read again from
+/// the start.
+///
+/// A tool using this reads every record matching the filters on every page, so it has no
+/// `wanted()`. A read of part of the list could not keep the promise above: an unread row could
+/// sort above a cursor already past it and never be returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositionRequest {
+    limit: usize,
+    after: After,
+    fingerprint: u64,
+    budget: usize,
+}
+
+/// Where a [`PositionRequest`]'s page starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum After {
+    Start,
+    /// A cursor from before this tool moved to positions, held across an upgrade.
+    Count(usize),
+    Row(Position),
+}
+
+impl PositionRequest {
+    /// As [`PageRequest::new`]. A cursor from when this tool paged by a count of rows is honoured
+    /// as that count.
+    pub fn new<F: Serialize + ?Sized>(args: &ListArgs, filters: &F) -> Result<Self, ToolError> {
+        let limit = resolved_limit(args)?;
+        let fingerprint = fingerprint(filters)?;
+        let after = match resolved_cursor(args, fingerprint)? {
+            None => After::Start,
+            Some(Cursor::Count(offset)) => After::Count(offset),
+            Some(Cursor::At(position)) => After::Row(position),
+        };
+        Ok(Self {
+            limit,
+            after,
+            fingerprint,
+            budget: SIZE_BUDGET,
         })
     }
 
-    /// [`Self::page`] for a list whose rows can arrive, leave or change between pages:
-    /// the next cursor holds the last row's position rather than a count of rows.
-    ///
-    /// `keyed` pairs **every** record matching the filters with its [`PositionKey`]. A count
-    /// of rows would repeat one when a new row arrives above the page's end, and skip one when
-    /// a row above it leaves; a position does neither, and a total added up across pages stays
-    /// right. Rows that arrive above a position already passed are not seen until the list is
-    /// read again from the start.
+    /// A smaller budget, for tests that exercise truncation on small data.
+    pub fn with_budget(mut self, chars: usize) -> Self {
+        self.budget = chars;
+        self
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Cut this page out of `keyed`: **every** record matching the filters, paired with its
+    /// [`PositionKey`]. `narrow` is as in [`PageRequest::page`].
     ///
     /// The rows are sorted here by key in `order`, stably, so a tool cannot return them in an
-    /// order its cursor disagrees with. A read of part of the list could not keep that promise:
-    /// an unread row could sort above a cursor already past it and never be returned, so this
-    /// has no form for one. Rows sharing a key keep the order they came in, and are told apart
-    /// by count.
-    ///
-    /// A cursor from a count-of-rows page of this tool, held across an upgrade, is honoured as
-    /// that count.
-    pub fn page_by_position<T: Serialize>(
+    /// order its cursor disagrees with. Rows sharing a key keep the order they came in, and are
+    /// told apart by count.
+    pub fn page<T: Serialize>(
         &self,
         mut keyed: Vec<(PositionKey, T)>,
         order: Order,
@@ -282,84 +346,90 @@ impl PageRequest {
     ) -> Result<Page<T>, ToolError> {
         keyed.sort_by(|a, b| order.cmp(&a.0, &b.0));
         let (keys, rows): (Vec<PositionKey>, Vec<T>) = keyed.into_iter().unzip();
-        let start = match &self.position {
-            Some(at) => position_after(&keys, at, order),
-            None => self.offset.min(keys.len()),
+        let start = match &self.after {
+            After::Start => 0,
+            After::Count(offset) => (*offset).min(keys.len()),
+            After::Row(at) => position_after(&keys, at, order),
         };
         let available = keys.len() - start;
-        let rows = rows.into_iter().skip(start);
-        self.cut(rows, available, false, narrow, |kept| {
-            // `more` is true here, so a row was kept or the budget refused the first: never
-            // past the list, and `cut` turns a first row over budget into an error.
-            encode_position_cursor(
-                self.fingerprint,
-                &position_of(&keys, start + kept - 1, order),
-            )
-        })
-    }
-
-    /// Fill a page from `rows`, the list from where this page starts, of which
-    /// `available` were read; `next_cursor` makes the cursor once the count kept is known.
-    fn cut<T: Serialize>(
-        &self,
-        rows: impl Iterator<Item = T>,
-        available: usize,
-        more_upstream: bool,
-        narrow: &str,
-        next_cursor: impl FnOnce(usize) -> String,
-    ) -> Result<Page<T>, ToolError> {
-        let item_budget = self.budget.saturating_sub(ENVELOPE_RESERVE);
-        let mut items = Vec::new();
-        let mut used = 2; // the array's brackets
-        for item in rows.take(self.limit) {
-            let size = serde_json::to_string(&item)
-                .map_err(|e| ToolError::other(format!("serializing a record: {e}")))?
-                .chars()
-                .count()
-                + 1; // its comma
-            if used + size > item_budget {
-                break;
-            }
-            used += size;
-            items.push(item);
-        }
-        let kept = items.len();
-        if kept == 0 && available > 0 {
-            return Err(ToolError::usage(format!(
-                "a single record is larger than the {}-character result budget; call again \
-                 with response_format=concise, or narrow with {narrow}",
-                self.budget
-            )));
-        }
-        let truncated = kept < self.limit.min(available);
-        let more = kept < available || more_upstream;
-        // `offset` is bounded by MAX_OFFSET on decode, so a count of rows stays small.
-        let next_cursor = more.then(|| next_cursor(kept));
-        let hint = if truncated {
-            Some(format!(
-                "Stopped at {kept} records to stay under the {}-character result budget. Pass \
-                 next_cursor as cursor for the rest, or narrow with {narrow} or \
-                 response_format=concise.",
-                self.budget
-            ))
-        } else if more {
-            Some(format!(
-                "More records match: pass next_cursor as cursor for the next page, or narrow \
-                 with {narrow}."
-            ))
-        } else {
-            None
-        };
-        Ok(Page {
-            items,
-            info: PageInfo {
-                returned: kept,
-                next_cursor,
-                truncated,
-                hint,
+        cut(
+            self.limit,
+            self.budget,
+            rows.into_iter().skip(start),
+            available,
+            false,
+            narrow,
+            // Only when rows are left after those kept, and `cut` keeps at least one of them or
+            // turns a first row over budget into an error.
+            |kept| {
+                encode_position_cursor(
+                    self.fingerprint,
+                    &position_of(&keys, start + kept - 1, order),
+                )
             },
-        })
+        )
     }
+}
+
+/// Fill a page from `rows`, the list from where this page starts, of which `available` were read;
+/// `next_cursor` makes the cursor once the count kept is known.
+fn cut<T: Serialize>(
+    limit: usize,
+    budget: usize,
+    rows: impl Iterator<Item = T>,
+    available: usize,
+    more_upstream: bool,
+    narrow: &str,
+    next_cursor: impl FnOnce(usize) -> String,
+) -> Result<Page<T>, ToolError> {
+    let item_budget = budget.saturating_sub(ENVELOPE_RESERVE);
+    let mut items = Vec::new();
+    let mut used = 2; // the array's brackets
+    for item in rows.take(limit) {
+        let size = serde_json::to_string(&item)
+            .map_err(|e| ToolError::other(format!("serializing a record: {e}")))?
+            .chars()
+            .count()
+            + 1; // its comma
+        if used + size > item_budget {
+            break;
+        }
+        used += size;
+        items.push(item);
+    }
+    let kept = items.len();
+    if kept == 0 && available > 0 {
+        return Err(ToolError::usage(format!(
+            "a single record is larger than the {budget}-character result budget; call again \
+             with response_format=concise, or narrow with {narrow}"
+        )));
+    }
+    let truncated = kept < limit.min(available);
+    let more = kept < available || more_upstream;
+    let next_cursor = more.then(|| next_cursor(kept));
+    let hint = if truncated {
+        Some(format!(
+            "Stopped at {kept} records to stay under the {budget}-character result budget. Pass \
+             next_cursor as cursor for the rest, or narrow with {narrow} or \
+             response_format=concise."
+        ))
+    } else if more {
+        Some(format!(
+            "More records match: pass next_cursor as cursor for the next page, or narrow \
+             with {narrow}."
+        ))
+    } else {
+        None
+    };
+    Ok(Page {
+        items,
+        info: PageInfo {
+            returned: kept,
+            next_cursor,
+            truncated,
+            hint,
+        },
+    })
 }
 
 /// FNV-1a over the filters' compact JSON. Not a security boundary (a cursor
@@ -428,11 +498,10 @@ const MAX_OFFSET: usize = 10_000_000;
 /// The hex of the longest cursor: a position's sort value, and room for the rest.
 const MAX_CURSOR_CHARS: usize = (MAX_SORT_BYTES + 64) * 2;
 
-/// A cursor as it decodes.
-struct DecodedCursor {
-    offset: usize,
-    fingerprint: u64,
-    position: Option<Position>,
+/// Where a cursor says the next page starts.
+enum Cursor {
+    Count(usize),
+    At(Position),
 }
 
 fn to_hex(plain: &str) -> String {
@@ -453,7 +522,8 @@ fn encode_position_cursor(fingerprint: u64, position: &Position) -> String {
     ))
 }
 
-fn decode_cursor(cursor: &str) -> Option<DecodedCursor> {
+/// The cursor and the fingerprint of the filters it was issued for.
+fn decode_cursor(cursor: &str) -> Option<(Cursor, u64)> {
     if !cursor.len().is_multiple_of(2) || cursor.len() > MAX_CURSOR_CHARS {
         return None;
     }
@@ -468,11 +538,8 @@ fn decode_cursor(cursor: &str) -> Option<DecodedCursor> {
             let (offset, fingerprint) = rest.split_once(':')?;
             let offset: usize = offset.parse().ok()?;
             (offset <= MAX_OFFSET).then_some(())?;
-            Some(DecodedCursor {
-                offset,
-                fingerprint: u64::from_str_radix(fingerprint, 16).ok()?,
-                position: None,
-            })
+            let fingerprint = u64::from_str_radix(fingerprint, 16).ok()?;
+            Some((Cursor::Count(offset), fingerprint))
         }
         POSITION_CURSOR_VERSION => {
             let mut parts = rest.splitn(4, ':');
@@ -481,17 +548,11 @@ fn decode_cursor(cursor: &str) -> Option<DecodedCursor> {
             let id = u64::from_str_radix(parts.next()?, 16).ok()?;
             let sort = parts.next()?;
             (sort.len() <= MAX_SORT_BYTES).then_some(())?;
-            Some(DecodedCursor {
-                offset: 0,
-                fingerprint,
-                position: Some(Position {
-                    key: PositionKey {
-                        sort: sort.to_string(),
-                        id,
-                    },
-                    repeat,
-                }),
-            })
+            let key = PositionKey {
+                sort: sort.to_string(),
+                id,
+            };
+            Some((Cursor::At(Position { key, repeat }), fingerprint))
         }
         _ => None,
     }
@@ -690,9 +751,9 @@ mod tests {
         cursor: Option<&str>,
         limit: u32,
     ) -> (Vec<String>, Option<String>) {
-        let page = PageRequest::new(&args(Some(limit), cursor), &())
+        let page = PositionRequest::new(&args(Some(limit), cursor), &())
             .unwrap()
-            .page_by_position(keyed(rows), Order::Descending, "since/until")
+            .page(keyed(rows), Order::Descending, "since/until")
             .unwrap();
         (page.items, page.info.next_cursor)
     }
@@ -804,14 +865,14 @@ mod tests {
         assert_eq!(items[0], "2026-03-05/e");
         assert_eq!(items[4], "2026-03-01/a");
 
-        let page = PageRequest::new(&args(Some(1), None), &())
+        let page = PositionRequest::new(&args(Some(1), None), &())
             .unwrap()
-            .page_by_position(keyed(&shuffled), Order::Ascending, "symbol")
+            .page(keyed(&shuffled), Order::Ascending, "symbol")
             .unwrap();
         assert_eq!(page.items, ["2026-03-01/a"]);
-        let next = PageRequest::new(&args(Some(1), page.info.next_cursor.as_deref()), &())
+        let next = PositionRequest::new(&args(Some(1), page.info.next_cursor.as_deref()), &())
             .unwrap()
-            .page_by_position(keyed(&shuffled), Order::Ascending, "symbol")
+            .page(keyed(&shuffled), Order::Ascending, "symbol")
             .unwrap();
         assert_eq!(next.items, ["2026-03-02/b"]);
     }
@@ -822,9 +883,9 @@ mod tests {
             (PositionKey::new("", "z"), "undated"),
             (PositionKey::new("2026-03-01", "a"), "dated"),
         ];
-        let page = PageRequest::new(&args(None, None), &())
+        let page = PositionRequest::new(&args(None, None), &())
             .unwrap()
-            .page_by_position(rows, Order::Descending, "x")
+            .page(rows, Order::Descending, "x")
             .unwrap();
         assert_eq!(page.items, ["dated", "undated"]);
     }
@@ -845,9 +906,9 @@ mod tests {
         let mut seen = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let page = PageRequest::new(&args(Some(1), cursor.as_deref()), &())
+            let page = PositionRequest::new(&args(Some(1), cursor.as_deref()), &())
                 .unwrap()
-                .page_by_position(rows(), Order::Descending, "x")
+                .page(rows(), Order::Descending, "x")
                 .unwrap();
             seen.extend(page.items);
             match page.info.next_cursor {
@@ -873,9 +934,10 @@ mod tests {
         assert_eq!(items, ["2026-03-02/b"]);
     }
 
-    /// A concise result holds an id back, and a cursor is plain hex a client can read.
+    /// A concise result holds an id back, and a cursor is plain hex a client can read: it
+    /// should not be readable off it.
     #[test]
-    fn a_cursor_holds_the_sort_value_and_never_the_id() {
+    fn a_cursor_holds_the_sort_value_and_a_fingerprint_of_the_id() {
         let (_, cursor) = newest_page(
             &[("2026-03-02", "CONF-DUMMY"), ("2026-03-01", "a")],
             None,
@@ -902,16 +964,16 @@ mod tests {
                 (PositionKey::new("2026-03-01T10:00:00", "a"), "a"),
             ]
         };
-        let page = PageRequest::new(&args(Some(1), None), &())
+        let page = PositionRequest::new(&args(Some(1), None), &())
             .unwrap()
-            .page_by_position(rows(), Order::Descending, "x")
+            .page(rows(), Order::Descending, "x")
             .unwrap();
         assert_eq!(page.items, ["c"]);
         let cursor = page.info.next_cursor.unwrap();
         assert!(cursor.len() <= MAX_CURSOR_CHARS, "{}", cursor.len());
-        let page = PageRequest::new(&args(Some(1), Some(&cursor)), &())
+        let page = PositionRequest::new(&args(Some(1), Some(&cursor)), &())
             .unwrap()
-            .page_by_position(rows(), Order::Descending, "x")
+            .page(rows(), Order::Descending, "x")
             .unwrap();
         assert_eq!(page.items, ["b"]);
     }
@@ -925,23 +987,23 @@ mod tests {
 
     #[test]
     fn a_position_cursor_stays_bound_to_its_filters() {
-        let page = PageRequest::new(&args(Some(1), None), &json!({"a": 1}))
+        let page = PositionRequest::new(&args(Some(1), None), &json!({"a": 1}))
             .unwrap()
-            .page_by_position(keyed(&ledger()), Order::Descending, "a")
+            .page(keyed(&ledger()), Order::Descending, "a")
             .unwrap();
         let cursor = page.info.next_cursor.unwrap();
         assert!(!cursor.contains(':'), "opaque: {cursor}");
-        let e = PageRequest::new(&args(None, Some(&cursor)), &json!({"a": 2})).unwrap_err();
+        let e = PositionRequest::new(&args(None, Some(&cursor)), &json!({"a": 2})).unwrap_err();
         assert!(e.message().contains("different filters"), "{e}");
     }
 
-    /// A tool has one kind of cursor; the other kind reaching `page` means it was not
-    /// this tool's, and there is no count to page from.
+    /// A tool picks its kind of cursor when it resolves the arguments. A position cursor
+    /// reaching a count-of-rows tool was not this tool's, and is refused before anything is
+    /// fetched, so a client cannot change how much a tool reads.
     #[test]
-    fn a_count_of_rows_page_refuses_a_position_cursor() {
+    fn a_count_of_rows_tool_refuses_a_position_cursor_before_any_read() {
         let (_, cursor) = newest_page(&ledger(), None, 1);
-        let r = PageRequest::new(&args(None, cursor.as_deref()), &()).unwrap();
-        let e = r.page(vec![1, 2, 3], "x").unwrap_err();
+        let e = PageRequest::new(&args(None, cursor.as_deref()), &()).unwrap_err();
         assert!(e.message().contains("next_cursor exactly"), "{e}");
     }
 
@@ -957,15 +1019,6 @@ mod tests {
         assert_eq!(items, ["2026-03-03/c", "2026-03-02/b"]);
         let (rest, _) = newest_page(&ledger(), next.as_deref(), 2);
         assert_eq!(rest, ["2026-03-01/a"]);
-    }
-
-    /// A tool that still sizes a read by `wanted()` gets all of it once a position is in play.
-    #[test]
-    fn a_position_cursor_wants_every_row() {
-        let (_, cursor) = newest_page(&ledger(), None, 1);
-        let r = PageRequest::new(&args(Some(1), cursor.as_deref()), &()).unwrap();
-        assert_eq!(r.wanted(), usize::MAX);
-        assert_eq!(r.offset(), 0);
     }
 
     /// Hand-built cursors come back from clients, as with the offsets above.
@@ -987,7 +1040,7 @@ mod tests {
             )),
             "ab".repeat(MAX_CURSOR_CHARS),
         ] {
-            let e = PageRequest::new(&args(None, Some(&forged)), &()).unwrap_err();
+            let e = PositionRequest::new(&args(None, Some(&forged)), &()).unwrap_err();
             assert!(e.message().contains("next_cursor exactly"), "{forged}: {e}");
         }
         let past_the_end = encode_position_cursor(
@@ -1009,32 +1062,28 @@ mod tests {
                 .map(|i| (PositionKey::new(format!("{i:04}"), ""), format!("{i:0>90}")))
                 .collect()
         };
-        let r = PageRequest::new(&args(Some(50), None), &())
+        let r = PositionRequest::new(&args(Some(50), None), &())
             .unwrap()
             .with_budget(ENVELOPE_RESERVE + 1_000);
-        let page = r
-            .page_by_position(rows(), Order::Ascending, "since/until")
-            .unwrap();
+        let page = r.page(rows(), Order::Ascending, "since/until").unwrap();
         assert!(page.info.truncated);
         let kept = page.items.len();
         assert!(kept < 50 && kept > 0);
         let cursor = page.info.next_cursor.unwrap();
-        let next = PageRequest::new(&args(Some(1), Some(&cursor)), &())
+        let next = PositionRequest::new(&args(Some(1), Some(&cursor)), &())
             .unwrap()
-            .page_by_position(rows(), Order::Ascending, "since/until")
+            .page(rows(), Order::Ascending, "since/until")
             .unwrap();
         assert_eq!(next.items, [format!("{kept:0>90}")]);
     }
 
     #[test]
     fn one_row_over_budget_on_a_position_page_is_a_usage_error() {
-        let r = PageRequest::new(&args(None, None), &())
+        let r = PositionRequest::new(&args(None, None), &())
             .unwrap()
             .with_budget(ENVELOPE_RESERVE + 10);
         let rows = vec![(PositionKey::new("2026-03-01", "a"), "x".repeat(100))];
-        let e = r
-            .page_by_position(rows, Order::Descending, "type")
-            .unwrap_err();
+        let e = r.page(rows, Order::Descending, "type").unwrap_err();
         assert!(e.message().contains("response_format=concise"), "{e}");
     }
 
