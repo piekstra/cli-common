@@ -139,11 +139,12 @@ pub enum Confirm {
     /// (`GET /me answered 401`), never a value.
     NotYet(String),
     /// The read could not decide (a 429, a 5xx, no answer, an edge block's
-    /// page): keep the tab and the jar, and ask again after a backoff that
-    /// doubles from two polls up to a minute, or after `retry_after` when the
-    /// provider gave one. The first such answer prints one status line. If the
-    /// wait runs out on it, [`BrowserError::Undecided`] is exit 5, because the
-    /// owner has nothing to fix by signing in again. The reason follows the
+    /// page): keep the tab and the jar, and ask again after a backoff of 6 s,
+    /// doubling to 60 s, or after `retry_after` when the provider gave one.
+    /// The deadline brings one last ask regardless. The first such answer
+    /// prints one status line. If the wait runs out on it,
+    /// [`BrowserError::Undecided`] is exit 5, because the owner has nothing to
+    /// fix by signing in again. The reason follows the
     /// rule for [`NotYet`](Confirm::NotYet): fixed parts, never a response
     /// body or a URL's query.
     Undecided {
@@ -578,9 +579,11 @@ impl Browser {
     /// Wait up to `timeout` for `capture` to be ready, read it, and close
     /// its tab(s).
     ///
-    /// Errors: timeout, or the window closed before the sign-in finished,
-    /// is exit 3 naming what was (not) seen and the command to re-run;
-    /// Ctrl-C is "browser login canceled" (exit 1).
+    /// Errors: a timeout, or the window closed before the sign-in finished,
+    /// is exit 3 naming what was (not) seen and the command to re-run; a
+    /// timeout while the confirm hook's read could not decide is
+    /// [`BrowserError::Undecided`], exit 5; Ctrl-C is "browser login canceled"
+    /// (exit 1).
     pub fn wait(&mut self, capture: &Capture, timeout: Duration) -> Result<Captured, BrowserError> {
         let mut out = None;
         self.wait_each(std::slice::from_ref(capture), timeout, |captured| {
@@ -1016,6 +1019,13 @@ fn read_when_ready<T: Transport>(
         request_log: w.log.as_ref().map(|log| log.entries().to_vec()),
         user_agent,
     };
+    if state.final_round {
+        // The deadline is one last permitted ask: a read that decides now
+        // keeps a finished sign-in.
+        if let Some(read) = &mut w.undecided {
+            read.ask_at = state.now;
+        }
+    }
     let captured = confirm_gate(w, candidate, state.now, notes)?;
     let closed = close_pages(cdp, &matching);
     Ok((captured, closed))
@@ -1377,10 +1387,15 @@ pub(crate) fn run_wait<D: Driver>(
             }
         };
         if deadline.is_some_and(|d| Instant::now() >= d) {
-            // A session that is ready but held open for its watch window is
-            // captured rather than lost: one more poll, with the windows
-            // ended, after reading what the watch has.
-            if !final_round && waiting.iter().any(|w| !w.done && w.hold_since.is_some()) {
+            // A session that is ready but held open for its watch window, or
+            // waiting out a read that could not decide, is captured rather
+            // than lost: one more poll, with the windows ended, after reading
+            // what the watch has.
+            if !final_round
+                && waiting
+                    .iter()
+                    .any(|w| !w.done && (w.hold_since.is_some() || w.undecided.is_some()))
+            {
                 final_round = true;
                 pause(driver, Duration::ZERO, None, &mut watch, &mut waiting)?;
                 continue;
@@ -1751,15 +1766,18 @@ fn timed_out(
     if let Some(e) = port_error {
         why.push_str(&format!("; Chrome's debug port: {e}"));
     }
+    // One capture a person has yet to finish makes this a sign-in to repeat,
+    // exit 3, whatever the others answered.
     let undecided = pending
         .iter()
-        .any(|w| matches!(w.progress.blocked, Some(Blocked::Undecided(_))));
+        .all(|w| matches!(w.progress.blocked, Some(Blocked::Undecided(_))));
     if undecided {
         return BrowserError::Undecided(format!(
-            "timed out after {}: the provider did not answer clearly ({why}). Nothing was stored, \
-             and the sign-in may have to be repeated: re-run `{login_hint}` once the provider \
-             answers.",
-            duration_words(timeout)
+            "timed out after {}: the provider did not answer clearly ({why}). Nothing was \
+             captured for {}, and the sign-in may have to be repeated: re-run `{login_hint}` once \
+             the provider answers.",
+            duration_words(timeout),
+            sign_ins(&pending_labels(waiting))
         ));
     }
     BrowserError::TimedOut(format!(

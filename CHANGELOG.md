@@ -5,14 +5,23 @@
 - `pk-cli-browser`: `Confirm::Undecided { reason, retry_after }` and
   `Confirm::undecided(reason)`, for a confirm hook's read that could not decide (a
   429, a 5xx, no answer, an edge block's page). The crate keeps the tab and the jar
-  and asks again after a backoff, doubling from two polls up to a minute, or after
-  the provider's `Retry-After`, up to five minutes. The first such answer prints
-  one status line. A wait that runs out on it is `BrowserError::Undecided`, exit 5,
-  rather than `TimedOut`, exit 3, because signing in again fixes nothing.
+  and asks again after a backoff of 6 s, doubling to 60 s, or after the provider's
+  `Retry-After`, up to five minutes, with one last ask at the deadline. The first
+  such answer prints one status line. A wait that runs out with every pending
+  capture undecided is `BrowserError::Undecided`, exit 5, rather than `TimedOut`,
+  exit 3, because signing in again fixes nothing.
+- `pk-cli-auth`: `RefreshLock` unlocks when released rather than relying on the
+  close. A process being spawned on another thread holds a copy of the descriptor
+  until it execs, so the next holder could find the lock taken. This also failed
+  about 1 test run in 25.
+- `pk-cli-http`: `inconclusive(&response)` names an answer that says nothing about
+  the session (a 429, a 5xx, a 403 with an HTML page), and `retry_after(&headers)`
+  reads `Retry-After` in seconds or as an IMF-fixdate.
 - `DESIGN.md` §2.2 and `conformance.md` state what a window capture does when its
   verifying read cannot decide. A refusal stores nothing. A value that can only be
-  this sign-in's stores with a warning, exit 0 and `verified: false`. A value that
-  could predate the sign-in answers `Confirm::Undecided`.
+  this sign-in's stores with a warning and exit 0. A value that could predate the
+  sign-in answers `Confirm::Undecided`. A `--json` login result always carries
+  `verified`.
 
 ## v0.19.0 — 2026-11-03
 

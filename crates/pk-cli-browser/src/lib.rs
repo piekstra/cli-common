@@ -39,21 +39,27 @@
 //!
 //! ```no_run
 //! use pk_cli_browser::{Capture, Captured, Confirm, HostRule, Launch, DEFAULT_TIMEOUT};
-//! # fn me_with(_cookie_header: &str) -> Result<(), pk_cli_core::CliError> { Ok(()) }
+//! # enum Me { Accepted, Refused, CouldNotTell(u16, Option<std::time::Duration>), NoAnswer }
+//! # fn me_with(_cookie_header: &str) -> Me { Me::Accepted }
 //! # fn main() -> Result<(), pk_cli_core::CliError> {
-//! use pk_cli_core::CliError;
 //!
 //! let capture = Capture::new("Example", HostRule::exact("www.example.com")?)
 //!     .cookie("https://www.example.com/", "sid") // set for visitors too
 //!     .cookie_jar("example.com")
 //!     .confirm(|candidate: &Captured| {
 //!         let header = candidate.cookie_header().expect("the capture reads a jar");
-//!         // The CLI's own request, bounded by its own timeout.
+//!         // The CLI's own request, bounded by its own timeout. It judges the
+//!         // answer itself, with `pk_cli_http::inconclusive` for what says
+//!         // nothing about the session: a 429, a 5xx, a 403 with an HTML page.
 //!         match me_with(header.expose()) {
-//!             Ok(()) => Confirm::Ready,
-//!             Err(CliError::Auth(_)) => Confirm::NotYet("GET /me answered 401".into()),
-//!             // A 429, a 5xx or an outage: the crate asks again after a backoff.
-//!             Err(_) => Confirm::undecided("GET /me got no clear answer"),
+//!             Me::Accepted => Confirm::Ready,
+//!             Me::Refused => Confirm::NotYet("GET /me answered 401".into()),
+//!             // The crate asks again after a backoff.
+//!             Me::CouldNotTell(status, retry_after) => Confirm::Undecided {
+//!                 reason: format!("GET /me answered HTTP {status}"),
+//!                 retry_after,
+//!             },
+//!             Me::NoAnswer => Confirm::undecided("GET /me got no answer"),
 //!         }
 //!     });
 //! let captured = pk_cli_browser::capture(

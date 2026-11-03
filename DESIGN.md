@@ -709,7 +709,7 @@ HTML page) depends on what was captured:
 | The captured value | On an inconclusive read |
 |---|---|
 | Can only be this sign-in's: a token in site storage cleared at launch (`clear_site_storage`), or a signal that exists only once signed in, read from a scratch profile | Store it and warn. No copy survives the run, so it cannot be read again. A bad stored session costs the same one further sign-in that discarding it would |
-| Could predate the sign-in: a cookie in a kept profile, or a cookie the site also sets for a visitor | `Confirm::Undecided`, with a reason worded as the Secrets row says. The crate keeps the tab and the jar and asks again after a backoff, doubling from two polls up to a minute, or after the provider's `Retry-After`, up to five minutes. The first such answer prints one status line saying Ctrl-C ends the wait. A provider that recovers finishes the sign-in. Storing could keep a stale or anonymous jar. `Confirm::Fail` would lose a session cookie, which does not survive the stop, so keep it for an answer no later poll can change. If the wait runs out, `BrowserError::Undecided` is exit 5: nothing is stored, a session cookie is gone, and the sign-in may have to be repeated |
+| Could predate the sign-in: a cookie in a kept profile, or a cookie the site also sets for a visitor | `Confirm::Undecided`, with a reason worded as the Secrets row says. The crate keeps the tab and the jar and asks again after a backoff of 6 s, doubling to 60 s, or after the provider's `Retry-After`, up to five minutes, with one last ask at the deadline. The first such answer prints one status line saying Ctrl-C ends the wait. A provider that recovers finishes the sign-in. Storing could keep a stale or anonymous jar. `Confirm::Fail` would lose a session cookie, which does not survive the stop, so keep it for an answer no later poll can change. If the wait runs out with every pending capture undecided, `BrowserError::Undecided` is exit 5: that capture is not handed over, a session cookie is gone, and the sign-in may have to be repeated. A pending capture a person has yet to finish makes it `TimedOut`, exit 3 |
 
 A provider whose edge challenges every read from outside a browser never lets
 that wait finish. A CLI that has recorded this may store on the challenge and warn
@@ -720,9 +720,14 @@ in a profile would close the window while the owner is still typing, and store
 what the table says must not be stored. Otherwise it keeps waiting, and its reason
 names the other routes.
 
-A stored, unverified session exits 0, because the session is stored. `--json`
-adds `verified: false` to the login result, which is additive and absent on a
-verified login. The stderr warning prints even under `-q`, names the cause, says
+A 403 is not automatically a refusal, though `json_response` maps it to exit 3. A
+read that decides a session uses `pk_cli_http::inconclusive` first, which names a
+429, a 5xx and a 403 with an HTML page and carries the `Retry-After`, and judges
+any other answer by the provider's own rule.
+
+A stored, unverified session exits 0, because the session is stored. A `--json`
+login result always carries `verified`: `true` when a read accepted the session,
+`false` otherwise. The stderr warning prints even under `-q`, names the cause, says
 the session is unverified, and names the way out: `<bin> auth login --browser
 --overwrite`. An `auth status` that makes no provider read reports `session_valid`
 from local facts (an expiry, a refresh token), so an unverified session can read
@@ -774,8 +779,8 @@ let session = pk_cli_browser::capture(
 | The tab is closed | the moment a capture is read, every page on its hosts is closed, before anything else happens, so the web app cannot renew, and so rotate, the token it just handed over. A watch window and the confirm hook come before the read, never after it: the session handed over is the one read, and confirmed, in the poll that closes the tab. A capture still in its watch window when the timeout comes is read and confirmed once more rather than lost |
 | Several providers | `Browser::wait_each` waits for several captures in one window, one tab each (their hosts must not overlap), and hands each over as it is read, so one provider's timeout never loses another's session |
 | Secrets | values come back as `pk_cli_secrets::Secret` (redacted `Debug`/`Display`, zeroized on drop): the expression's answer, each named cookie, each jar cookie and the header built from them, each header value of a watched request. A watched request comes back without its query, and a request log holds no header, body or query. The crate never logs a value, never puts one on a command line and never writes one to disk (Chrome's own profile, above, is the one place a session touches it); status lines and errors name labels, hosts, URLs without a query and cookie names only, plus a confirm hook's `NotYet` or `Undecided` reason, which the CLI words the same way |
-| Status lines | on stderr, suppressed by `-q`: `A Chrome window opened at the Example sign-in. Sign in there (password and the texted code); this waits for the session and captures it (up to 10 minutes; Ctrl-C cancels).`, then `Example: session captured, tab closed.` A capture that holds its tab open says so when the hold starts: `Example: keeping the tab open up to 25 seconds for the page to request www.example.com/bff/graphql before capturing the session.` |
-| Errors | every call returns a `BrowserError`, which `?` turns into the family's `CliError`. `Undecided` (the wait ran out while a confirm hook's read could not decide) is exit 5. `TimedOut` (after `DEFAULT_TIMEOUT`, 10 minutes, unless the CLI passes another) and `WindowClosed` are exit 3, naming what was seen (no page on the host was open, the page held no session yet, the expression threw, which cookie was missing, that the jar was empty and which cookie names it held, which request was never made, the confirm hook's last `NotYet` reason) and the command to re-run (`<bin> auth login --browser`; `Launch::login_hint` overrides it). `Canceled` (`browser login canceled`), `ChromeNotFound` (naming `<PREFIX>_CHROME`), `Launch`, `Profile` (the kept profile needs repair: not a private directory of the user's, it cannot be located, created or removed, or its site storage cannot be removed; naming its path and the fix), `ProfileInUse` (another sign-in or a running Chrome has it: wait, or `--fresh-profile`) and `Invalid` are exit 1, and `Handler` passes the CLI's own error through: the `wait_each` handler's, or a confirm hook's `Fail`. A CLI branches on the variant: on `ChromeNotFound` it can point the owner at its `--stdin` path |
+| Status lines | on stderr, suppressed by `-q`: `A Chrome window opened at the Example sign-in. Sign in there (password and the texted code); this waits for the session and captures it (up to 10 minutes; Ctrl-C cancels).`, then `Example: session captured, tab closed.` A capture that holds its tab open says so when the hold starts: `Example: keeping the tab open up to 25 seconds for the page to request www.example.com/bff/graphql before capturing the session.` A confirm hook's first `Confirm::Undecided` says so: `Example: the session could not be confirmed yet: GET /api/me answered HTTP 503. The window stays open and this keeps trying. Ctrl-C ends the wait.` |
+| Errors | every call returns a `BrowserError`, which `?` turns into the family's `CliError`. `Undecided` (the wait ran out with every pending capture's read unable to decide) is exit 5. `TimedOut` (after `DEFAULT_TIMEOUT`, 10 minutes, unless the CLI passes another) and `WindowClosed` are exit 3, naming what was seen (no page on the host was open, the page held no session yet, the expression threw, which cookie was missing, that the jar was empty and which cookie names it held, which request was never made, the confirm hook's last `NotYet` reason) and the command to re-run (`<bin> auth login --browser`; `Launch::login_hint` overrides it). `Canceled` (`browser login canceled`), `ChromeNotFound` (naming `<PREFIX>_CHROME`), `Launch`, `Profile` (the kept profile needs repair: not a private directory of the user's, it cannot be located, created or removed, or its site storage cannot be removed; naming its path and the fix), `ProfileInUse` (another sign-in or a running Chrome has it: wait, or `--fresh-profile`) and `Invalid` are exit 1, and `Handler` passes the CLI's own error through: the `wait_each` handler's, or a confirm hook's `Fail`. A CLI branches on the variant: on `ChromeNotFound` it can point the owner at its `--stdin` path |
 | Ctrl-C | the crate installs one process-wide handler: the first Ctrl-C ends the wait, so the guard drops and cleans up; a second, at any point in that, kills Chrome, removes a scratch profile (the kept one stays) and exits 130; with no window open, Ctrl-C exits 130 as it would without a handler. A CLI with its own handler sets `Launch::ctrl_c(false)` and calls `pk_cli_browser::cancel()` from it |
 
 **Choosing the readiness signal.** A capture is read once and its tab
@@ -794,11 +799,25 @@ let capture = Capture::new("Example", HostRule::exact("www.example.com")?)
     .cookie_jar("example.com")
     .confirm(|candidate| {
         let header = candidate.cookie_header().expect("the capture reads a jar");
-        match client_with(header.expose()).and_then(|c| c.get_json("/api/me")) {
-            Ok(_) => Confirm::Ready,
-            Err(CliError::Auth(_)) => Confirm::NotYet("GET /api/me answered 401".into()),
-            // A 429, a 5xx or an outage: the crate asks again after a backoff.
-            Err(_) => Confirm::undecided("GET /api/me got no clear answer"),
+        let client = match client_with(header.expose()) {
+            Ok(client) => client,
+            Err(e) => return Confirm::Fail(e), // no later poll changes this
+        };
+        let answer = match client.get("/api/me").send() {
+            Ok(answer) => answer,
+            Err(_) => return Confirm::undecided("GET /api/me got no answer"),
+        };
+        // A 429, a 5xx or a 403 with an HTML page: the crate asks again after a
+        // backoff, or after the provider's `Retry-After`.
+        if let Some(said) = pk_cli_http::inconclusive(&answer) {
+            return Confirm::Undecided {
+                reason: format!("GET /api/me answered HTTP {}", said.status),
+                retry_after: said.retry_after,
+            };
+        }
+        match answer.status().as_u16() {
+            200..=299 => Confirm::Ready,
+            status => Confirm::NotYet(format!("GET /api/me answered HTTP {status}")),
         }
     });
 ```

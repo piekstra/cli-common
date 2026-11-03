@@ -1405,7 +1405,11 @@ fn an_undecided_read_is_not_asked_again_inside_its_backoff() {
         &[jar_capture().confirm(hook)],
         Duration::from_millis(60),
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "the first backoff is 6 s");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the first backoff is 6 s, so only the first ask and the deadline's last one"
+    );
     assert!(
         calls_named(&fake, "Target.getTargets").len() > 1,
         "the wait kept polling"
@@ -1415,9 +1419,64 @@ fn an_undecided_read_is_not_asked_again_inside_its_backoff() {
     assert_eq!(err.exit_code(), 5);
     let message = err.to_string();
     assert!(message.contains("GET /me answered 503"), "{message}");
-    assert!(message.contains("Nothing was stored"), "{message}");
+    assert!(message.contains("Nothing was captured"), "{message}");
     assert!(message.contains("ex auth login --browser"), "{message}");
     assert!(fake.0.borrow().closed.is_empty());
+}
+
+#[test]
+fn the_deadline_brings_one_last_ask_that_can_finish_the_sign_in() {
+    let mut fake = fake_with(vec![page("T-app", "https://www.example.com/")]);
+    fake.0.borrow_mut().cookies = split_jar();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let hook = move |_: &Captured| {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Confirm::undecided("GET /me answered 503")
+        } else {
+            Confirm::Ready
+        }
+    };
+    let out = run(
+        &mut fake,
+        &[jar_capture().confirm(hook)],
+        Duration::from_millis(60),
+    );
+    assert_eq!(
+        out.result.unwrap().len(),
+        1,
+        "the last ask kept the sign-in"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.0.borrow().closed, ["T-app"]);
+}
+
+#[test]
+fn only_a_wait_that_every_capture_is_undecided_on_is_the_provider_s_exit_code() {
+    let (a, b, c) = (
+        Capture::new("Alpha", HostRule::exact("a.example.com").unwrap()),
+        Capture::new("Beta", HostRule::exact("b.example.com").unwrap()),
+        Capture::new("Gamma", HostRule::exact("c.example.com").unwrap()),
+    );
+    let waiting = |blocked: [Option<Blocked>; 2]| {
+        let mut w = vec![Waiting::new(&a), Waiting::new(&b), Waiting::new(&c)];
+        w[0].done = true;
+        let [one, two] = blocked;
+        w[1].progress.blocked = one;
+        w[2].progress.blocked = two;
+        w
+    };
+    let undecided = || Some(Blocked::Undecided("GET /me answered 503".into()));
+    let out = timed_out("x", LONG, &waiting([undecided(), undecided()]), None);
+    assert!(matches!(&out, BrowserError::Undecided(_)), "{out:?}");
+    assert_eq!(out.exit_code(), 5);
+    let message = out.to_string();
+    assert!(message.contains("Beta"), "{message}");
+    assert!(!message.contains("Alpha"), "a finished capture: {message}");
+    let mixed = [undecided(), Some(Blocked::Unconfirmed("401".into()))];
+    let out = timed_out("x", LONG, &waiting(mixed), None);
+    assert!(matches!(&out, BrowserError::TimedOut(_)), "{out:?}");
+    assert_eq!(out.exit_code(), 3);
 }
 
 #[test]
