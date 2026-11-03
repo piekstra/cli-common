@@ -20,6 +20,12 @@
   say whether a kept profile exists, for `auth status`. They answer and refuse
   as `forget_profile` and `forget_named_profile` do, take no lock and create
   nothing. `test-util` adds `profile_exists_in` and `named_profile_exists_in`.
+- `pk-cli-browser`: `BrowserArgs` refuses `--fresh-profile` without `--browser`
+  (exit 2) when the CLI marks `browser` as conflicting with another argument.
+  Clap counts a `requires` as satisfied when the required argument conflicts with
+  one given, so `--fresh-profile --stdin` parsed and the flag was ignored. A CLI
+  needs no change beyond the new tag; `BrowserArgs` is the same flags, argument
+  ids and group, and implements `clap::Args` and `FromArgMatches` by hand.
 - `pk-cli-browser`: dropping a kept profile unlocks its run lock explicitly. On
   a close alone, the lock lasted as long as a copy of the descriptor in a process
   another thread was spawning, which refused the next sign-in as `ProfileInUse`.

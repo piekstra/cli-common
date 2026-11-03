@@ -288,21 +288,91 @@ pub use watch::{CapturedRequest, LoggedRequest, RequestKind};
 /// login arguments beside `pk_cli_auth::LoginArgs`, so every portal CLI
 /// spells and documents them the same way, and pass `fresh_profile` on to
 /// [`Launch::fresh_profile`].
-#[derive(clap::Args, Debug, Default, Clone)]
+///
+/// `--fresh-profile` without `--browser` is a usage error (exit 2), including
+/// when the CLI marks `browser` as conflicting with its other credential
+/// sources (`mut_arg("browser", |a| a.conflicts_with_all(["stdin"]))`). Clap
+/// counts a `requires` as satisfied when the required argument conflicts with
+/// one given, so `--fresh-profile --stdin` passes clap's own check; this type
+/// makes the check again as it is read from the matches, and the CLI adds
+/// nothing for `fresh_profile`.
+#[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct BrowserArgs {
+    /// `--browser`: sign in through a Chrome window and capture the session
+    /// from it.
+    pub browser: bool,
+
+    /// `--fresh-profile`: sign in through a fresh browser profile, deleted
+    /// afterwards, instead of the one this CLI keeps.
+    pub fresh_profile: bool,
+}
+
+// The flags as clap declares and reads them, separate from `BrowserArgs` so
+// the check on reading can be its own. Plain comments here: a doc comment on a
+// flattened struct becomes the `about` of the command it is flattened into.
+#[derive(clap::Args, Debug, Clone)]
+#[group(id = "BrowserArgs")]
+struct BrowserFlags {
     /// Sign in through a Chrome window and capture the session from it: the
     /// password and any code are entered on the provider's own page, never
     /// in this CLI.
     #[arg(long)]
-    pub browser: bool,
+    browser: bool,
 
     /// With --browser: sign in through a fresh browser profile, deleted
     /// afterwards, instead of the one this CLI keeps. The provider sees a
     /// new device (expect its full sign-in), and nothing of this sign-in
     /// stays on disk.
     #[arg(long, requires = "browser")]
-    pub fresh_profile: bool,
+    fresh_profile: bool,
+}
+
+impl TryFrom<BrowserFlags> for BrowserArgs {
+    type Error = clap::Error;
+
+    fn try_from(flags: BrowserFlags) -> Result<Self, clap::Error> {
+        if flags.fresh_profile && !flags.browser {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "--fresh-profile needs --browser",
+            ));
+        }
+        Ok(BrowserArgs {
+            browser: flags.browser,
+            fresh_profile: flags.fresh_profile,
+        })
+    }
+}
+
+impl clap::FromArgMatches for BrowserArgs {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        BrowserFlags::from_arg_matches(matches)?.try_into()
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        let mut flags = BrowserFlags {
+            browser: self.browser,
+            fresh_profile: self.fresh_profile,
+        };
+        flags.update_from_arg_matches(matches)?;
+        *self = flags.try_into()?;
+        Ok(())
+    }
+}
+
+impl clap::Args for BrowserArgs {
+    fn group_id() -> Option<clap::Id> {
+        BrowserFlags::group_id()
+    }
+
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        BrowserFlags::augment_args(cmd)
+    }
+
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        BrowserFlags::augment_args_for_update(cmd)
+    }
 }
 
 #[cfg(test)]
@@ -345,5 +415,113 @@ mod tests {
         let err = Cli::try_parse_from(["x", "--fresh-profile"]).err().unwrap();
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
         assert_eq!(err.exit_code(), 2);
+    }
+
+    /// A CLI that marks `browser` as conflicting with another source, the way
+    /// the family does. Clap counts a `requires` as satisfied when the required
+    /// argument conflicts with one given, so `requires` alone lets
+    /// `--fresh-profile --stdin` through with the flag ignored.
+    #[derive(Parser, Debug)]
+    #[command(mut_arg("browser", |a| a.conflicts_with_all(["stdin"])))]
+    struct ConflictOnBrowser {
+        #[command(flatten)]
+        browser: BrowserArgs,
+        #[arg(long)]
+        stdin: bool,
+    }
+
+    /// The same conflict declared on the other argument.
+    #[derive(Parser, Debug)]
+    struct ConflictOnSource {
+        #[command(flatten)]
+        browser: BrowserArgs,
+        #[arg(long, conflicts_with = "browser")]
+        stdin: bool,
+    }
+
+    /// The form a CLI's `auth login` has: flattened in a subcommand.
+    #[derive(Parser, Debug)]
+    struct ConflictInSubcommand {
+        #[command(subcommand)]
+        command: Login,
+    }
+
+    #[derive(clap::Subcommand, Debug)]
+    enum Login {
+        Login(ConflictOnBrowserArgs),
+    }
+
+    #[derive(clap::Args, Debug)]
+    #[command(mut_arg("browser", |a| a.conflicts_with_all(["stdin"])))]
+    struct ConflictOnBrowserArgs {
+        #[command(flatten)]
+        browser: BrowserArgs,
+        #[arg(long)]
+        stdin: bool,
+    }
+
+    fn assert_fresh_profile_refused(result: Result<(), clap::Error>) {
+        let err = result.expect_err("--fresh-profile without --browser is a usage error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert_eq!(err.exit_code(), 2);
+        let msg = err.to_string();
+        assert!(msg.contains("--fresh-profile needs --browser"), "{msg}");
+    }
+
+    #[test]
+    fn a_fresh_profile_needs_the_browser_flag_whatever_that_flag_conflicts_with() {
+        assert_fresh_profile_refused(
+            ConflictOnBrowser::try_parse_from(["x", "--fresh-profile", "--stdin"]).map(drop),
+        );
+        assert_fresh_profile_refused(
+            ConflictOnSource::try_parse_from(["x", "--fresh-profile", "--stdin"]).map(drop),
+        );
+        assert_fresh_profile_refused(
+            ConflictInSubcommand::try_parse_from(["x", "login", "--fresh-profile", "--stdin"])
+                .map(drop),
+        );
+
+        // Updating parsed arguments goes through the same check.
+        let mut cli = ConflictOnBrowser::try_parse_from(["x", "--stdin"]).unwrap();
+        assert_fresh_profile_refused(cli.try_update_from(["x", "--fresh-profile", "--stdin"]));
+    }
+
+    #[test]
+    fn the_browser_flags_parse_as_before_beside_a_conflict() {
+        let stdin = ConflictOnBrowser::try_parse_from(["x", "--stdin"]).unwrap();
+        assert!(stdin.stdin && !stdin.browser.browser && !stdin.browser.fresh_profile);
+        let none = ConflictOnBrowser::try_parse_from(["x"]).unwrap();
+        assert!(!none.stdin && !none.browser.browser && !none.browser.fresh_profile);
+        let both =
+            ConflictOnBrowser::try_parse_from(["x", "--browser", "--fresh-profile"]).unwrap();
+        assert!(both.browser.browser && both.browser.fresh_profile);
+        let plain = ConflictOnBrowser::try_parse_from(["x", "--browser"]).unwrap();
+        assert!(plain.browser.browser && !plain.browser.fresh_profile);
+
+        // The CLI's own conflict still stands, and alone the flag is clap's
+        // own refusal.
+        let err = ConflictOnBrowser::try_parse_from(["x", "--browser", "--stdin"])
+            .err()
+            .unwrap();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        let err = ConflictOnBrowser::try_parse_from(["x", "--fresh-profile"])
+            .err()
+            .unwrap();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    /// `BrowserArgs` reads as the flags it declares: the ids a CLI's `mut_arg`
+    /// names, the group a derive names, and no `about` of its own.
+    #[test]
+    fn the_flags_keep_their_ids_and_group_and_add_no_about() {
+        use clap::Args;
+        let cmd = BrowserArgs::augment_args(clap::Command::new("x"));
+        let ids: Vec<&str> = cmd.get_arguments().map(|a| a.get_id().as_str()).collect();
+        assert_eq!(ids, ["browser", "fresh_profile"]);
+        assert_eq!(
+            BrowserArgs::group_id().as_ref().map(clap::Id::as_str),
+            Some("BrowserArgs")
+        );
+        assert_eq!(cmd.get_about().map(ToString::to_string), None);
     }
 }

@@ -809,6 +809,31 @@ mod tests {
         }
     }
 
+    /// `--fresh-profile` is refused beside any other source, at parse time, so
+    /// nothing runs with the flag ignored.
+    #[test]
+    fn a_fresh_profile_without_the_browser_flag_is_a_usage_error() {
+        for args in [
+            &["example-cli", "auth", "login", "--fresh-profile"][..],
+            &["example-cli", "auth", "login", "--fresh-profile", "--stdin"][..],
+        ] {
+            let err = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{args:?}");
+        }
+        let cli = Cli::try_parse_from([
+            "example-cli",
+            "auth",
+            "login",
+            "--browser",
+            "--fresh-profile",
+        ])
+        .unwrap();
+        let Command::Auth(AuthCmd::Login(login)) = cli.command else {
+            panic!("parsed as auth login");
+        };
+        assert!(login.browser.browser && login.browser.fresh_profile);
+    }
+
     /// The status's browser field on a temp dir through `test-util`'s
     /// `profile_exists_in`, the seam a CLI's status tests use so they never
     /// read the owner's real data dir.

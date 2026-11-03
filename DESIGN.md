@@ -684,7 +684,11 @@ over the Chrome DevTools Protocol and stores it like any other credential.
 being `pk_cli_browser::BrowserArgs` flattened beside `LoginArgs`. It takes
 no other credential source: `--browser` with `--stdin`, `--from-env` or
 `--op` is exit 2, decided before any keychain or network work, and so is
-`--fresh-profile` without `--browser`. `<bin> auth logout` calls
+`--fresh-profile` without `--browser`. That second rule holds beside a CLI's own
+conflicts on `browser`: clap counts a `requires` as satisfied when the required
+argument conflicts with one given, so `BrowserArgs` checks it again as it is
+read from the matches, and a CLI adds nothing for `fresh_profile`.
+`<bin> auth logout` calls
 `pk_cli_browser::forget_profile(BIN)`, so a logout signs the browser out
 too. After the capture the CLI verifies the session with one provider read
 and stores it as one keychain item (§1.7), exactly as a `--stdin` import of
