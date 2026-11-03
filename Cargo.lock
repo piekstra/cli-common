@@ -1516,6 +1516,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pk-cli-arcgis"
+version = "0.21.0"
+dependencies = [
+ "pk-cli-core",
+ "pk-cli-http",
+ "reqwest",
+ "serde_json",
+]
+
+[[package]]
 name = "pk-cli-auth"
 version = "0.21.0"
 dependencies = [

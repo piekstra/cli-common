@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `pk-cli-arcgis`: read-only queries against an ArcGIS REST layer, for CLIs over the
+  public GIS services many US counties publish parcel data from. `Layer::rows` pages by
+  the rows received, since a server can send a short page with more to follow, and
+  requires a sort. An error in an HTTP 200 body keeps its exit code, and a body without
+  `features` fails instead of reading as no rows. `quote` makes a SQL string literal.
+
 ## v0.21.0 — 2026-11-03
 
 - `pk-cli-utility`: feature `mcp`, the `utility/v1` MCP tools written once.
