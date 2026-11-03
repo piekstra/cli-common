@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · `Confirm::Undecided`, when a window capture's read cannot decide (§2.2) · 2026-11-03 · `pk-cli-arcgis`, read-only ArcGIS REST layer queries (Part 2) · 2026-11-03 · `SendDeadline`, a late write's check in one place (§1.9, §2.3) · 2026-11-03 · `CliError::because`, a typed cause and a remedy apart from the message (§1.5, §1.9) · 2026-11-03
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · `Confirm::Undecided`, when a window capture's read cannot decide (§2.2) · 2026-11-03 · `pk-cli-arcgis`, read-only ArcGIS REST layer queries (Part 2) · 2026-11-03 · `SendDeadline`, a late write's check in one place (§1.9, §2.3) · 2026-11-03 · `hold_within`, `stop_note` (§1.9) · 2026-11-03 · `CliError::because`, a typed cause and a remedy apart from the message (§1.5, §1.9) · 2026-11-03
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -548,6 +548,10 @@ WebCrypto) in B, behind a provider seam the toolset awaits (§2.3).
   and a retry nobody watches is the late write itself, and not
   `confirmation_required`, which says nothing changed and that `--force` was
   missing.
+- **A queue gives up in time.** A server that takes calls one at a time holds its turn with
+  `pk_cli_mcp::hold_within`, whose wait leaves room to answer inside 120 s, so a call behind a
+  slow one says so instead of being answered at the limit with nobody told why. A plain
+  `Mutex::lock` has no such bound.
 - **Stable.** `tools/list` returns the same tools in the same order every
   time (clients cache it and it is part of the prompt), and listing touches
   no credential, file or network: a client lists tools before anyone has

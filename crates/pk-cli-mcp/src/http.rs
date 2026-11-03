@@ -309,6 +309,35 @@ fn note_for(bin: &str, launchd: bool) -> String {
     )
 }
 
+/// The note for `auth logout --forget`, once it has removed [`HTTP_TOKEN_ACCOUNT`]: the delete
+/// stops the next server reusing that token and does nothing to this one, which read it at its
+/// start, or to the variable. So a logout that reads as the end of access still leaves a way in
+/// until someone stops the server. On macOS the note adds the command for the launchd agent
+/// `connector/`'s README installs, whose label it names; elsewhere there is no one command to give.
+pub fn stop_note(bin: &str) -> String {
+    stop_note_for(bin, cfg!(target_os = "macos"))
+}
+
+fn stop_note_for(bin: &str, launchd: bool) -> String {
+    let var = token_env_var(bin);
+    let server = format!(
+        "note: a running `{bin} mcp --http` keeps accepting the token it started with until it \
+         stops, and ${var} is beyond this command: unset it if it is set."
+    );
+    let stop = if launchd {
+        format!(
+            " Under the launchd agent from cli-common's connector/ README:\n  \
+             launchctl bootout gui/$(id -u)/com.piekstra.{bin}-mcp-http"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{server}{stop}\n\
+         note: a connector still in use needs `{bin} mcp --new-token`."
+    )
+}
+
 /// Serve on 127.0.0.1:`port` until the process is stopped.
 fn serve<T: Toolset + Send + Sync + 'static>(
     toolset: Scoped<T>,
@@ -557,6 +586,26 @@ mod tests {
         let readme = std::fs::read_to_string(readme).unwrap();
         assert!(readme.contains(kickstart));
         assert!(readme.contains("<string>com.piekstra.m1f-mcp-http</string>"));
+    }
+
+    #[test]
+    fn the_stop_note_says_what_a_removed_token_does_not_end() {
+        let note = stop_note_for("m1f", false);
+        assert!(note.contains("`m1f mcp --http`"), "{note}");
+        assert!(note.contains("$M1F_MCP_TOKEN"), "{note}");
+        assert!(note.contains("`m1f mcp --new-token`"), "{note}");
+        assert!(!note.contains("launchctl"), "{note}");
+    }
+
+    /// The same label the restart note and the connector's README use.
+    #[test]
+    fn the_stop_note_uses_the_connectors_launchd_label() {
+        let bootout = "launchctl bootout gui/$(id -u)/com.piekstra.m1f-mcp-http";
+        assert!(stop_note_for("m1f", true).contains(bootout));
+        let readme =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../connector/README.md");
+        let readme = std::fs::read_to_string(readme).unwrap();
+        assert!(readme.contains(bootout));
     }
 
     #[test]
