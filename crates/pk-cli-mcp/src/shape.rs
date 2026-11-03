@@ -9,8 +9,9 @@
 //!   different list. Where the next page starts is a count of rows
 //!   ([`PageRequest`]), or, for a list whose rows can arrive or leave between
 //!   pages, the last row's own position ([`PositionRequest`]), so a new row
-//!   cannot repeat one and a removed row cannot skip one. A tool picks one when it
-//!   resolves the arguments.
+//!   cannot repeat one and a removed row cannot skip one, or, for a list the
+//!   provider itself reads on from a position, the tool's key for that position
+//!   ([`ResumeRequest`]). A tool picks one when it resolves the arguments.
 //! - **Format.** [`ResponseFormat::Concise`] by default: the fields a person
 //!   reads, names rather than ids. `detailed` adds ids, timestamps and
 //!   provider detail.
@@ -22,7 +23,7 @@
 //!   non-ASCII names is measured as the model sees it.
 //!
 //! [`ListArgs`] is the argument block a list tool flattens into its input;
-//! [`PageRequest`] or [`PositionRequest`] resolves it and cuts the page.
+//! [`PageRequest`], [`PositionRequest`] or [`ResumeRequest`] resolves it and cuts the page.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -212,7 +213,7 @@ impl PageRequest {
         let offset = match resolved_cursor(args, fingerprint)? {
             None => 0,
             Some(Cursor::Count(offset)) => offset,
-            Some(Cursor::At(_)) => return Err(foreign_cursor()),
+            Some(Cursor::At(_) | Cursor::Resume(_)) => return Err(foreign_cursor()),
         };
         Ok(Self {
             limit,
@@ -265,6 +266,7 @@ impl PageRequest {
         cut(
             self.limit,
             self.budget,
+            0,
             rows,
             available,
             more_upstream,
@@ -313,6 +315,7 @@ impl PositionRequest {
             None => After::Start,
             Some(Cursor::Count(offset)) => After::Count(offset),
             Some(Cursor::At(position)) => After::Row(position),
+            Some(Cursor::Resume(_)) => return Err(foreign_cursor()),
         };
         Ok(Self {
             limit,
@@ -355,6 +358,7 @@ impl PositionRequest {
         cut(
             self.limit,
             self.budget,
+            0,
             rows.into_iter().skip(start),
             available,
             false,
@@ -371,18 +375,138 @@ impl PositionRequest {
     }
 }
 
+/// A resolved page request for a list the **provider** reads on from a position, whose rows can
+/// arrive or leave between pages. The next cursor holds the tool's own key for where to read on.
+///
+/// [`PositionRequest`] needs every matching row on every page, which a long list cannot afford,
+/// and a count of rows re-reads everything before the page and can skip a row. This does neither:
+/// a page costs what the provider charges for one page, however deep it is.
+///
+/// **A key must resume immediately after its row.** A row's own id does, for a provider that reads
+/// on with `before=<id>`. A provider's cursor marking the end of a whole page of its rows does
+/// not, since a page cut by its limit or the size budget would skip the rest of that page. So
+/// for that provider a key holds the cursor that fetched the row's page and what the row is, and
+/// the tool re-reads that page and resumes just after the row. A count into the page would not
+/// do, since a row arriving or leaving there moves the rest. If the row itself has gone, the
+/// place is lost: the tool says so and the caller starts over, rather than guess.
+///
+/// A key travels in the cursor encoded and not encrypted, through the client and into the model's
+/// transcript, so it is something the client may already see. It also comes back from the client,
+/// which can hand-build a cursor, so a tool checks [`Self::resume`]'s value is the shape it issued
+/// before sending it anywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeRequest {
+    limit: usize,
+    resume: Option<String>,
+    fingerprint: u64,
+    budget: usize,
+}
+
+impl ResumeRequest {
+    /// As [`PageRequest::new`]. A cursor of another kind is refused before anything is fetched.
+    pub fn new<F: Serialize + ?Sized>(args: &ListArgs, filters: &F) -> Result<Self, ToolError> {
+        let limit = resolved_limit(args)?;
+        let fingerprint = fingerprint(filters)?;
+        let resume = match resolved_cursor(args, fingerprint)? {
+            None => None,
+            Some(Cursor::Resume(key)) => Some(key),
+            Some(Cursor::Count(_) | Cursor::At(_)) => return Err(foreign_cursor()),
+        };
+        Ok(Self {
+            limit,
+            resume,
+            fingerprint,
+            budget: SIZE_BUDGET,
+        })
+    }
+
+    /// A smaller budget, for tests that exercise truncation on small data.
+    pub fn with_budget(mut self, chars: usize) -> Self {
+        self.budget = chars;
+        self
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// The key to read on from. `None` on the first page.
+    pub fn resume(&self) -> Option<&str> {
+        self.resume.as_deref()
+    }
+
+    /// Cut this page out of `keyed`: the rows read from where this page starts, in the list's
+    /// order, each paired with the key that resumes immediately after it. Read one past
+    /// [`Self::limit`] where the provider allows, so a page knows whether more follow.
+    ///
+    /// `rest` is the key that resumes after the last of `keyed`, when the provider has more
+    /// beyond them. It is how a page with no rows moves on, and a `rest` equal to where this page
+    /// started is an error, not a cursor that would read the same page forever. `narrow` is as in
+    /// [`PageRequest::page`].
+    ///
+    /// An empty key, or one over [`MAX_RESUME_BYTES`], fails rather than making a cursor the next
+    /// call would refuse.
+    pub fn page<T: Serialize>(
+        &self,
+        keyed: Vec<(String, T)>,
+        rest: Option<String>,
+        narrow: &str,
+    ) -> Result<Page<T>, ToolError> {
+        if rest.is_some() && rest.as_deref() == self.resume() {
+            return Err(ToolError::upstream(
+                "the provider gave the position it was asked for as the next one, so the list \
+                 cannot be read further",
+            ));
+        }
+        let available = keyed.len();
+        let (keys, rows): (Vec<String>, Vec<T>) = keyed.into_iter().unzip();
+        // A cursor's hex is twice its key, and the reserve only holds a short one.
+        let longest = keys.iter().chain(&rest).map(String::len).max().unwrap_or(0);
+        let more_upstream = rest.is_some();
+        let mut unusable = false;
+        let page = cut(
+            self.limit,
+            self.budget,
+            longest.saturating_mul(2),
+            rows.into_iter(),
+            available,
+            more_upstream,
+            narrow,
+            |kept| {
+                let key = match kept.checked_sub(1) {
+                    Some(last) if kept < available => keys[last].as_str(),
+                    _ => rest.as_deref().unwrap_or_default(),
+                };
+                unusable = key.is_empty() || key.len() > MAX_RESUME_BYTES;
+                encode_resume_cursor(self.fingerprint, key)
+            },
+        )?;
+        if unusable {
+            return Err(ToolError::upstream(
+                "the position for the next page is empty or too long to hold in a cursor",
+            ));
+        }
+        Ok(page)
+    }
+}
+
 /// Fill a page from `rows`, the list from where this page starts, of which `available` were read;
-/// `next_cursor` makes the cursor once the count kept is known.
+/// `next_cursor` makes the cursor once the count kept is known. `cursor_reserve` is what a cursor
+/// may take beyond [`ENVELOPE_RESERVE`].
+#[allow(clippy::too_many_arguments)]
 fn cut<T: Serialize>(
     limit: usize,
     budget: usize,
+    cursor_reserve: usize,
     rows: impl Iterator<Item = T>,
     available: usize,
     more_upstream: bool,
     narrow: &str,
     next_cursor: impl FnOnce(usize) -> String,
 ) -> Result<Page<T>, ToolError> {
-    let item_budget = budget.saturating_sub(ENVELOPE_RESERVE);
+    let item_budget = budget
+        .saturating_sub(ENVELOPE_RESERVE)
+        .saturating_sub(cursor_reserve);
     let mut items = Vec::new();
     let mut used = 2; // the array's brackets
     for item in rows.take(limit) {
@@ -456,6 +580,9 @@ fn foreign_cursor() -> ToolError {
     )
 }
 
+/// The longest key a [`ResumeRequest`] cursor holds. A page makes room for its own.
+pub const MAX_RESUME_BYTES: usize = 1_024;
+
 /// The most of a position's sort value a cursor holds. A sort value is a date or a symbol; this
 /// bounds a cursor when a provider's value is not what it looks like.
 pub const MAX_SORT_BYTES: usize = 200;
@@ -490,18 +617,20 @@ fn position_of(keys: &[PositionKey], index: usize, order: Order) -> Position {
 
 const CURSOR_VERSION: &str = "c1";
 const POSITION_CURSOR_VERSION: &str = "c2";
+const RESUME_CURSOR_VERSION: &str = "c3";
 
 /// The largest offset a cursor may carry. Cursors come back from the client,
 /// which can hand-build one, and no real list pages this far.
 const MAX_OFFSET: usize = 10_000_000;
 
-/// The hex of the longest cursor: a position's sort value, and room for the rest.
-const MAX_CURSOR_CHARS: usize = (MAX_SORT_BYTES + 64) * 2;
+/// The hex of the longest cursor: a key to read on from, and room for the rest.
+const MAX_CURSOR_CHARS: usize = (MAX_RESUME_BYTES + 64) * 2;
 
 /// Where a cursor says the next page starts.
 enum Cursor {
     Count(usize),
     At(Position),
+    Resume(String),
 }
 
 fn to_hex(plain: &str) -> String {
@@ -520,6 +649,11 @@ fn encode_position_cursor(fingerprint: u64, position: &Position) -> String {
         "{POSITION_CURSOR_VERSION}:{fingerprint:016x}:{}:{:016x}:{}",
         position.repeat, position.key.id, position.key.sort
     ))
+}
+
+/// Hex of `c3:<fingerprint>:<key>`, the key last because it may hold a colon.
+fn encode_resume_cursor(fingerprint: u64, key: &str) -> String {
+    to_hex(&format!("{RESUME_CURSOR_VERSION}:{fingerprint:016x}:{key}"))
 }
 
 /// The cursor and the fingerprint of the filters it was issued for.
@@ -554,6 +688,12 @@ fn decode_cursor(cursor: &str) -> Option<(Cursor, u64)> {
             };
             Some((Cursor::At(Position { key, repeat }), fingerprint))
         }
+        RESUME_CURSOR_VERSION => {
+            let (fingerprint, key) = rest.split_once(':')?;
+            let fingerprint = u64::from_str_radix(fingerprint, 16).ok()?;
+            (!key.is_empty() && key.len() <= MAX_RESUME_BYTES).then_some(())?;
+            Some((Cursor::Resume(key.to_string()), fingerprint))
+        }
         _ => None,
     }
 }
@@ -562,6 +702,246 @@ fn decode_cursor(cursor: &str) -> Option<(Cursor, u64)> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Up to `read` of `rows` from after `key`, each paired with its own value as its key, as a
+    /// provider's `before=<id>` reads them.
+    fn from_after(rows: &[u32], key: Option<&str>, read: usize) -> Vec<(String, u32)> {
+        let bound = key.map(|k| k.parse::<u32>().unwrap());
+        rows.iter()
+            .copied()
+            .filter(|r| bound.is_none_or(|b| *r < b))
+            .take(read)
+            .map(|r| (r.to_string(), r))
+            .collect()
+    }
+
+    #[test]
+    fn a_resume_cursor_walks_a_list_without_gaps_or_repeats() {
+        let all: Vec<u32> = (0..60).rev().collect();
+        let filters = json!({"channel": "example"});
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let r = ResumeRequest::new(&args(Some(25), cursor.as_deref()), &filters).unwrap();
+            let keyed = from_after(&all, r.resume(), r.limit() + 1);
+            let page = r.page(keyed, None, "since").unwrap();
+            seen.extend(page.items);
+            match page.info.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => {
+                    assert!(page.info.hint.is_none());
+                    break;
+                }
+            }
+        }
+        assert_eq!(seen, all);
+    }
+
+    #[test]
+    fn a_row_that_leaves_or_arrives_between_pages_loses_nothing() {
+        let all: Vec<u32> = (10..20).rev().collect();
+        let first = ResumeRequest::new(&args(Some(3), None), &()).unwrap();
+        let page = first
+            .page(from_after(&all, first.resume(), 4), None, "since")
+            .unwrap();
+        assert_eq!(page.items, [19, 18, 17]);
+
+        // One read is deleted, and one arrives above the page.
+        let moved: Vec<u32> = [99]
+            .into_iter()
+            .chain(all.iter().copied().filter(|r| *r != 18))
+            .collect();
+        let next =
+            ResumeRequest::new(&args(Some(3), page.info.next_cursor.as_deref()), &()).unwrap();
+        assert_eq!(next.resume(), Some("17"));
+        let keyed = from_after(&moved, next.resume(), 4);
+        assert_eq!(next.page(keyed, None, "since").unwrap().items, [16, 15, 14]);
+    }
+
+    #[test]
+    fn a_resume_page_cut_by_the_budget_reads_on_from_the_last_row_kept() {
+        let keyed: Vec<(String, String)> =
+            (0..4).map(|i| (format!("k{i}"), "x".repeat(40))).collect();
+        let r = ResumeRequest::new(&args(Some(4), None), &())
+            .unwrap()
+            .with_budget(ENVELOPE_RESERVE + 100);
+        let page = r.page(keyed, None, "since").unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page.info.truncated);
+        let next = ResumeRequest::new(&args(Some(4), page.info.next_cursor.as_deref()), &());
+        assert_eq!(next.unwrap().resume(), Some("k1"));
+    }
+
+    /// Two provider pages reached by the cursor before each. A row's key is the cursor that
+    /// fetched its page and the row itself, so the next call resumes just after that row.
+    fn read_by_page_cursor(
+        pages: &[Vec<u32>],
+        cursor: Option<&str>,
+    ) -> Result<Page<u32>, ToolError> {
+        let r = ResumeRequest::new(&args(Some(3), cursor), &())?;
+        let (mut at, after) = match r.resume().map(|k| k.split_once('|').unwrap()) {
+            Some((page, row)) => (page.parse::<usize>().unwrap(), row.parse::<u32>().ok()),
+            None => (0, None),
+        };
+        let mut keyed = Vec::new();
+        let mut after = after;
+        while keyed.len() <= r.limit() && at < pages.len() {
+            let rows = &pages[at];
+            let start = match after.take() {
+                None => 0,
+                Some(row) => {
+                    rows.iter().position(|r| *r == row).ok_or_else(|| {
+                        ToolError::usage("the list changed where this read had reached")
+                    })? + 1
+                }
+            };
+            for row in &rows[start..] {
+                keyed.push((format!("{at}|{row}"), *row));
+            }
+            at += 1;
+        }
+        let rest = (at < pages.len()).then(|| format!("{at}|"));
+        r.page(keyed, rest, "since")
+    }
+
+    #[test]
+    fn a_page_level_cursor_loses_no_rows_to_a_cut_page() {
+        let pages = [(0..4).collect::<Vec<u32>>(), (4..8).collect()];
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = read_by_page_cursor(&pages, cursor.as_deref()).unwrap();
+            seen.extend(page.items);
+            match page.info.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(seen, (0..8).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn a_page_level_cursor_survives_a_row_moving_in_the_page_it_re_reads() {
+        let pages = [vec![0, 1, 2, 3, 4, 5], vec![6, 7]];
+        let first = read_by_page_cursor(&pages, None).unwrap();
+        assert_eq!(first.items, [0, 1, 2]);
+        let cursor = first.info.next_cursor;
+
+        // A row arrives at the top, and one already returned leaves.
+        let moved = [vec![99, 0, 2, 3, 4, 5], vec![6, 7]];
+        let next = read_by_page_cursor(&moved, cursor.as_deref()).unwrap();
+        assert_eq!(next.items, [3, 4, 5]);
+    }
+
+    #[test]
+    fn a_page_level_cursor_says_when_its_own_row_has_gone() {
+        let pages = [vec![0, 1, 2, 3, 4, 5], vec![6, 7]];
+        let first = read_by_page_cursor(&pages, None).unwrap();
+        let moved = [vec![0, 1, 3, 4, 5], vec![6, 7]];
+        let e = read_by_page_cursor(&moved, first.info.next_cursor.as_deref()).unwrap_err();
+        assert!(e.message().contains("changed"), "{e}");
+    }
+
+    #[test]
+    fn a_resume_cursor_keeps_a_key_with_colons_and_is_bound_to_its_filters() {
+        let keyed = vec![("a:b:c".to_string(), 1), ("d".to_string(), 2)];
+        let r = ResumeRequest::new(&args(Some(1), None), &json!({"state": "open"})).unwrap();
+        let cursor = r.page(keyed, None, "state").unwrap().info.next_cursor;
+        let again =
+            ResumeRequest::new(&args(Some(1), cursor.as_deref()), &json!({"state": "open"}));
+        assert_eq!(again.unwrap().resume(), Some("a:b:c"));
+        let other = ResumeRequest::new(
+            &args(Some(1), cursor.as_deref()),
+            &json!({"state": "closed"}),
+        );
+        assert!(other.unwrap_err().message().contains("different filters"));
+    }
+
+    #[test]
+    fn each_request_refuses_a_cursor_of_another_kind() {
+        let resume = encode_resume_cursor(fingerprint(&()).unwrap(), "key");
+        let e = PageRequest::new(&args(None, Some(&resume)), &()).unwrap_err();
+        assert!(e.message().contains("not one this tool returned"), "{e}");
+        let e = PositionRequest::new(&args(None, Some(&resume)), &()).unwrap_err();
+        assert!(e.message().contains("not one this tool returned"), "{e}");
+
+        let count = encode_cursor(5, fingerprint(&()).unwrap());
+        let e = ResumeRequest::new(&args(None, Some(&count)), &()).unwrap_err();
+        assert!(e.message().contains("not one this tool returned"), "{e}");
+    }
+
+    #[test]
+    fn a_key_a_cursor_cannot_hold_fails_only_when_it_would_be_used() {
+        let long = "k".repeat(MAX_RESUME_BYTES + 1);
+        let r = ResumeRequest::new(&args(Some(1), None), &()).unwrap();
+        // The last page makes no cursor.
+        r.page(vec![(long.clone(), 1)], None, "since").unwrap();
+        let two = |key: &str| vec![(key.to_string(), 1), ("next".to_string(), 2)];
+        for bad in [long.as_str(), ""] {
+            let e = r.page(two(bad), None, "since").unwrap_err();
+            assert!(e.message().contains("too long"), "{e}");
+        }
+
+        // The longest key a page can make, the next call can read.
+        let longest = "k".repeat(MAX_RESUME_BYTES);
+        let cursor = r
+            .page(two(&longest), None, "since")
+            .unwrap()
+            .info
+            .next_cursor;
+        let next = ResumeRequest::new(&args(Some(1), cursor.as_deref()), &()).unwrap();
+        assert_eq!(next.resume(), Some(longest.as_str()));
+    }
+
+    /// The longest key on a page filled to the budget still fits the size the spec promises.
+    #[test]
+    fn a_full_page_with_the_longest_key_stays_under_the_budget() {
+        let key = "k".repeat(MAX_RESUME_BYTES);
+        let row = "x".repeat(1_000);
+        let keyed: Vec<(String, String)> = (0..200).map(|_| (key.clone(), row.clone())).collect();
+        let r = ResumeRequest::new(&args(Some(200), None), &json!({"a": 1})).unwrap();
+        let page = r.page(keyed, None, "a narrowing argument").unwrap();
+        assert!(page.info.truncated);
+        assert!(page.info.next_cursor.is_some());
+        let size = serde_json::to_string(&page).unwrap().chars().count();
+        assert!(size < SIZE_BUDGET, "{size}");
+    }
+
+    /// A provider can answer an empty page and still have more.
+    #[test]
+    fn a_page_with_no_rows_moves_on_by_the_position_the_provider_gave() {
+        let r = ResumeRequest::new(&args(Some(5), None), &()).unwrap();
+        let page = r
+            .page(Vec::<(String, u32)>::new(), Some("p2".into()), "since")
+            .unwrap();
+        assert!(page.items.is_empty());
+        let next = ResumeRequest::new(&args(Some(5), page.info.next_cursor.as_deref()), &());
+        let next = next.unwrap();
+        assert_eq!(next.resume(), Some("p2"));
+
+        // The same position again would read the same page forever.
+        let e = next
+            .page(Vec::<(String, u32)>::new(), Some("p2".into()), "since")
+            .unwrap_err();
+        assert!(e.message().contains("cannot be read further"), "{e}");
+    }
+
+    #[test]
+    fn a_page_of_every_row_read_with_more_upstream_reads_on_by_the_rest() {
+        let r = ResumeRequest::new(&args(Some(5), None), &()).unwrap();
+        let keyed = vec![("a".to_string(), 1), ("b".to_string(), 2)];
+        let page = r.page(keyed, Some("c".into()), "since").unwrap();
+        assert_eq!(page.items, [1, 2]);
+        let next = ResumeRequest::new(&args(Some(5), page.info.next_cursor.as_deref()), &());
+        assert_eq!(next.unwrap().resume(), Some("c"));
+    }
+
+    #[test]
+    fn a_hand_built_cursor_with_an_empty_key_is_refused() {
+        let empty = encode_resume_cursor(fingerprint(&()).unwrap(), "");
+        let e = ResumeRequest::new(&args(None, Some(&empty)), &()).unwrap_err();
+        assert!(e.message().contains("not one this tool returned"), "{e}");
+    }
 
     fn args(limit: Option<u32>, cursor: Option<&str>) -> ListArgs {
         ListArgs {
