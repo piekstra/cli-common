@@ -7,14 +7,21 @@
 # `exit-early` makes it exit before writing the port, like a Chrome that
 # fails to start. One containing `flush-on-stop` makes it write to its site
 # storage when told to stop, like a Chrome flushing as it shuts down, leaving
-# `flushed-on-stop` beside it as the proof.
+# `flushed-on-stop` beside it as the proof. One containing
+# `leave-holder-<pid>.` makes it name that pid in SingletonLock and exit once
+# the port is written, like a wrapper that leaves the browser running.
 dir=
 flush=
+holder=
 for arg in "$@"; do
   case "$arg" in
     --user-data-dir=*) dir="${arg#--user-data-dir=}" ;;
     *exit-early*) exit 3 ;;
     *flush-on-stop*) flush=1 ;;
+    *leave-holder-*)
+      holder="${arg#*leave-holder-}"
+      holder="${holder%%.*}"
+      ;;
   esac
 done
 [ -n "$dir" ] || exit 2
@@ -22,6 +29,7 @@ for arg in "$@"; do
   printf '%s\n' "$arg"
 done > "$dir/args"
 ls -A "$dir/Default" > "$dir/default-at-launch" 2>/dev/null
+[ -z "$holder" ] || ln -s "fake-host-$holder" "$dir/SingletonLock"
 if [ -n "$flush" ]; then
   sleep 600 &
   nap=$!
@@ -33,6 +41,7 @@ if [ -n "$flush" ]; then
 fi
 printf '9222\n/devtools/browser/fake-browser-id\n' > "$dir/DevToolsActivePort.tmp"
 mv "$dir/DevToolsActivePort.tmp" "$dir/DevToolsActivePort"
+[ -z "$holder" ] || exit 0
 if [ -n "$flush" ]; then
   wait "$nap"
   exit 0

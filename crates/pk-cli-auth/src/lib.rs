@@ -26,8 +26,11 @@ pub enum AuthMethod {
     None,
 }
 
-/// The canonical `auth status --json` DTO (`auth-status/v1`).
+/// The canonical `auth status --json` DTO (`auth-status/v1`). Build it with
+/// [`AuthStatus::new`] or [`AuthStatus::not_required`] and set the optional
+/// fields, so a field added within the version is not a source break.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AuthStatus {
     pub schema: String,
     /// Whether this CLI needs a credential at all.

@@ -264,7 +264,10 @@ impl Launch {
     /// path and starting no Chrome, if it cannot. When the [`Browser`] guard
     /// has stopped Chrome on drop they are removed again, best effort, with a
     /// warning on stderr for what would not go. A crash or a second Ctrl-C
-    /// skips that second removal; the next launch's covers it.
+    /// skips that second removal, and so does a Chrome still running in the
+    /// profile once the process the guard spawned has ended (a wrapper that
+    /// does not `exec` it, a relaunch to update), with a warning; the next
+    /// launch's removal covers each, once that window is closed.
     ///
     /// A symlink at one of those paths, or inside them, is removed as a link
     /// and its target never touched; a `Default` that is a symlink, is not a
@@ -943,6 +946,61 @@ mod tests {
                 .spawn()
                 .unwrap(),
         );
+        assert_cookies_kept(&kept);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The process the guard spawned ends and the browser does not, as with a
+    /// wrapper that does not `exec` it: the storage is not removed under it,
+    /// and the next launch clears it once that browser is gone.
+    #[cfg(unix)]
+    #[test]
+    fn a_chrome_still_running_after_the_spawned_process_ends_keeps_its_storage() {
+        let root = temp_root("storage-holder");
+        let bin = "pk-cli-browser-storage-holder";
+        let kept = kept_profile_with_storage(&root, bin);
+        let mut holder = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+
+        let mut browser = fake_launch(bin, &root)
+            .url(format!("https://leave-holder-{}.example/", holder.id()))
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap();
+        let wrapper_gone = Instant::now() + Duration::from_secs(10);
+        while !browser.exited() {
+            assert!(Instant::now() < wrapper_gone, "the wrapper exits by itself");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        plant_site_storage(&kept);
+        drop(browser);
+        assert!(alive(holder.id()));
+        assert_eq!(storage_left(&kept), SITE_STORAGE, "not removed under it");
+        assert_cookies_kept(&kept);
+
+        // The lock is what the next launch reads too, and it refuses.
+        let err = fake_launch(bin, &root)
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap_err();
+        assert!(matches!(err, BrowserError::ProfileInUse(_)), "{err:?}");
+        assert_eq!(storage_left(&kept), SITE_STORAGE);
+
+        // That window closed: the next launch clears the storage.
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        let browser = fake_launch(bin, &root)
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap();
+        let found = default_at_launch(&kept);
+        for name in SITE_STORAGE {
+            assert!(!found.iter().any(|f| f == name), "{name} in {found:?}");
+        }
+        drop(browser);
+        assert_eq!(storage_left(&kept), [] as [&str; 0]);
         assert_cookies_kept(&kept);
         std::fs::remove_dir_all(&root).unwrap();
     }

@@ -270,10 +270,7 @@ fn a_directory_is_usable_only_when_it_is_a_private_one_of_the_owners() {
     let cases = [
         (facts(true, false, me, 0o777), "is a symlink"),
         (facts(false, false, me, 0o600), "is not a directory"),
-        (
-            facts(false, true, 0, 0o700),
-            "is owned by uid 0, not by you (uid 501)",
-        ),
+        (facts(false, true, 0, 0o700), "belongs to another user"),
         (
             facts(false, true, me, 0o755),
             "has mode 0755, not 0700 (`chmod 700` it to use it)",
@@ -853,6 +850,44 @@ fn a_chrome_profile_that_is_not_a_directory_is_refused_untouched() {
         let kept = outside.join(CHROME_PROFILE).join(name).join("000003.log");
         assert!(kept.exists(), "{name}");
     }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A lock naming a live program the record knows, at the close: nothing is
+/// removed. One naming a pid that is gone is stale, and the removal goes ahead.
+#[cfg(unix)]
+#[test]
+fn the_close_leaves_site_storage_under_a_running_chrome_only() {
+    let root = temp_root("clear-holder");
+    let mut profile = ProfileDir::open_kept(&root, "t", None, Path::new(STAND_IN)).unwrap();
+    let path = profile.path().to_path_buf();
+    profile.clear_site_storage().unwrap();
+    plant_site_storage(&path);
+    let mut process = running_process();
+    let pid = process.id();
+    std::os::unix::fs::symlink(format!("some-host.local-{pid}"), path.join(SINGLETON_LOCK))
+        .unwrap();
+    drop(profile);
+    assert!(path.join(CHROME_PROFILE).join(SITE_STORAGE[0]).exists());
+
+    let warning = still_running_warning(&path, pid);
+    assert!(warning.starts_with("warning: a Chrome (pid "), "{warning}");
+    assert!(warning.contains(&path.display().to_string()), "{warning}");
+    assert!(
+        warning.contains("site storage was not removed"),
+        "{warning}"
+    );
+    assert!(warning.contains("next launch clears it"), "{warning}");
+
+    process.kill().unwrap();
+    process.wait().unwrap();
+    let mut profile = ProfileDir::open_kept(&root, "t", None, Path::new(STAND_IN)).unwrap();
+    profile.clear_site_storage().unwrap();
+    plant_site_storage(&path);
+    std::os::unix::fs::symlink(format!("some-host.local-{pid}"), path.join(SINGLETON_LOCK))
+        .unwrap();
+    drop(profile);
+    assert_no_site_storage(&path);
     std::fs::remove_dir_all(&root).unwrap();
 }
 

@@ -170,8 +170,9 @@ impl ProfileDir {
     }
 
     /// Remove the kept profile's site storage ([`SITE_STORAGE`]) before
-    /// Chrome starts, and again, best effort, when this is dropped. The
-    /// cookie store and the rest of the profile stay.
+    /// Chrome starts, and again, best effort, when this is dropped, unless a
+    /// Chrome is still running there. The cookie store and the rest of the
+    /// profile stay.
     ///
     /// Refused as [`BrowserError::Profile`], naming the path, when any of it
     /// cannot be removed, or when the Chrome profile is a symlink, is not a
@@ -239,7 +240,12 @@ impl Drop for ProfileDir {
     fn drop(&mut self) {
         if self.kept {
             if self.clear_on_drop {
-                clear_site_storage_on_close(&self.path);
+                let known = self
+                    .run_lock
+                    .as_mut()
+                    .map(|held| read_record(&mut held.0))
+                    .unwrap_or_default();
+                clear_site_storage_on_close(&self.path, &known);
             }
             return;
         }
@@ -653,10 +659,7 @@ impl DirFacts {
         } else if !self.dir {
             Some("is not a directory".into())
         } else if self.owner != me {
-            Some(format!(
-                "is owned by uid {}, not by you (uid {me})",
-                self.owner
-            ))
+            Some("belongs to another user".into())
         } else if private && self.mode != 0o700 {
             Some(format!(
                 "has mode {:04o}, not 0700 (`chmod 700` it to use it)",
@@ -1027,7 +1030,24 @@ fn remove_storage_patiently(path: &Path, attempts: u32, pause: Duration) -> std:
 /// Remove the site storage once Chrome has stopped, so a token does not sit
 /// on disk between runs. Best effort: what will not go is warned about, even
 /// under `-q`, and the next launch removes it or refuses to start.
-fn clear_site_storage_on_close(profile: &Path) {
+///
+/// The guard knows only that the process it spawned has ended, and the browser
+/// may be another one: a wrapper that does not `exec` it, or a relaunch to
+/// update in the window. So a Chrome the profile's lock names (`known` being
+/// the programs its record names) keeps its storage, with a warning, and the
+/// next launch refuses until that window is closed, then clears it.
+fn clear_site_storage_on_close(profile: &Path, known: &[PathBuf]) {
+    match chrome_holder(profile, known) {
+        Ok(None) => {}
+        Ok(Some(pid)) => {
+            eprintln!("{}", still_running_warning(profile, pid));
+            return;
+        }
+        Err(e) => {
+            eprintln!("warning: {e}; the profile's site storage was not removed");
+            return;
+        }
+    }
     let paths = match site_storage_paths(profile) {
         Ok(paths) => paths,
         Err(problem) => {
@@ -1044,6 +1064,14 @@ fn clear_site_storage_on_close(profile: &Path) {
             attempts = 1;
         }
     }
+}
+
+pub(crate) fn still_running_warning(profile: &Path, pid: u32) -> String {
+    format!(
+        "warning: a Chrome (pid {pid}) is still running in the browser profile {}, so its site \
+         storage was not removed; the next launch clears it once that window is closed",
+        profile.display()
+    )
 }
 
 pub(crate) fn storage_warning(path: &Path, e: &std::io::Error) -> String {

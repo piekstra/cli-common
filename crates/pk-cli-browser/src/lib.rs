@@ -169,7 +169,11 @@
 //! - on close, once the [`Browser`] guard has stopped Chrome on drop, so a
 //!   refresh token does not sit on disk between runs. This is best effort,
 //!   with a warning on stderr for what would not go. A crash or a second Ctrl-C
-//!   skips it, and the next launch's removal covers that.
+//!   skips it, and the next launch's removal covers that. So does a Chrome
+//!   still running in the profile once the process the guard spawned has ended
+//!   (a wrapper that does not `exec` it, a relaunch to update): its storage
+//!   stays, with a warning, and the next launch clears it once that window is
+//!   closed.
 //!
 //! A symlink at one of those paths, or inside them, is removed as a link and
 //! its target is never touched; a `Default` that is a symlink, is not a
