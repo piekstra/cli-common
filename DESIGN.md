@@ -566,8 +566,9 @@ WebCrypto) in B, behind a provider seam the toolset awaits (§2.3).
 | Size budget | a page stops before 32,000 characters of JSON and says so: `truncated: true` and a `hint` naming the cursor and the tool's own narrowing arguments. Claude Code warns above 10,000 tokens per result and cuts at 25,000; Claude Desktop and claude.ai cut at about 150,000 characters and 240 s per call |
 | Hard limit | any result over 64,000 characters, list or not, is replaced by an error telling the model to narrow the call |
 
-`pk_cli_mcp::ListArgs` is the argument block, `PageRequest` or `PositionRequest` resolves it
-and cuts the page, `Page<T>` is the envelope. Sizes count characters, as the
+`pk_cli_mcp::ListArgs` is the argument block, `PageRequest`, `PositionRequest` or
+`ResumeRequest` (a list the provider reads on from a position, too long to read whole on every
+page) resolves it and cuts the page, `Page<T>` is the envelope. Sizes count characters, as the
 hosts' caps do, not UTF-8 bytes.
 
 #### Errors

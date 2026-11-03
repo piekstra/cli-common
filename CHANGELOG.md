@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `pk-cli-mcp`: `ResumeRequest`, for a list the provider reads on from a position (an id or a
+  cursor of its own), whose rows can arrive or leave between pages. The next cursor holds the
+  tool's key for where to read on, so a row that leaves between pages skips nothing and a deep
+  page costs one page. `PositionRequest` stays for a list a tool reads whole on every page.
+
 ## v0.26.0 — 2026-11-03
 
 - `pk-cli-config`: `~` is `HOME`, then `USERPROFILE`, so a config resolves on Windows, where

@@ -121,6 +121,7 @@ pub use pk_cli_core::block_on;
 pub use result::{CallToolResult, ToolOutput};
 pub use shape::{
     ListArgs, Order, Page, PageInfo, PageRequest, PositionKey, PositionRequest, ResponseFormat,
+    ResumeRequest, MAX_RESUME_BYTES,
 };
 pub use tool::{Annotations, ToolDef};
 pub use toolset::{
