@@ -302,7 +302,7 @@ impl Launch {
     }
 
     /// Launch Chrome and wait (up to 20 s) for its debug port. The returned
-    /// [`Browser`] kills Chrome when dropped, on every path including errors
+    /// [`Browser`] stops Chrome when dropped, on every path including errors
     /// after this point, and removes a scratch profile; the kept profile
     /// stays for the next sign-in.
     ///

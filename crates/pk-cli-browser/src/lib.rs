@@ -10,7 +10,8 @@
 //! (password and MFA happen on the provider's page, never through the CLI),
 //! reads the session the web app keeps (a `localStorage` entry, a cookie,
 //! `HttpOnly` cookies included, or a domain's whole cookie jar) over the
-//! Chrome DevTools Protocol, closes the tab at once and kills Chrome. The
+//! Chrome DevTools Protocol, closes the tab at once and stops Chrome (on a
+//! kept profile by asking it to quit, so a fresh cookie is written). The
 //! profile is kept for the next sign-in ([below](#the-kept-profile)).
 //!
 //! ```no_run
