@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.25.0 — 2026-11-03
+
+- `pk-cli-mcp`: `SendDeadline` is DESIGN.md §1.9's "A late write sends nothing" in one
+  place. A toolset starts it when a call begins and calls `check()` right before each
+  send: at its limit or past it, on the monotonic or the wall clock, the answer is an
+  error (exit 1) saying the command was not sent, to check the current state, and to call
+  again only if the user still wants the change. `elapsed()` is for a write's later limits,
+  such as when a read-back may last start. The clocks sit behind `Clock`, in the core, so
+  the type builds for WebAssembly; `SystemClock`, the machine's own, is native only, since
+  the real clocks panic on `wasm32-unknown-unknown`. `CALL_LIMIT` is the 120 s `--http`
+  gives a call.
+- `pk-cli-mcp`: feature `test-util` adds `conformance::ManualClock`, which a test moves by
+  hand (`advance`, `sleep`, `set_wall_back`), so a deadline needs no real sleep to test.
+- `example-cli`: its write checks a `SendDeadline`, for a CLI copying the shape.
+
 ## v0.24.0 — 2026-11-03
 
 - `pk-cli-core`: `transport::require_secure_url` refuses a URL that is not `https`,
