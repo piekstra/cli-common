@@ -23,7 +23,7 @@
   what crosses Cloudflare, and revoking.
 - `DESIGN.md`: the `--no-color` row says how `NO_COLOR` is read.
 
-## Unreleased
+## v0.16.0 — 2026-11-03
 
 Behaviour change in `pk-cli-browser`: a sign-in now runs in a profile each
 CLI keeps, where it used to run in a scratch profile deleted after every
