@@ -530,7 +530,12 @@ WebCrypto) in B, behind a provider seam the toolset awaits (§2.3).
   so a command waiting on a keychain prompt or a lock would otherwise go out
   when someone answers it, with nobody told. `Instant` alone misses a Mac that
   slept through the wait. `pk_cli_mcp::SendDeadline` is this check: start it
-  when the call begins, `check()` it right before each send.
+  when the call begins, `check()` it right before each send. Past its limit
+  that answers exit 1, with the remedy in the message: not `upstream`, whose
+  remedy is to try again in a minute when the wait may have been on this machine
+  and a retry nobody watches is the late write itself, and not
+  `confirmation_required`, which says nothing changed and that `--force` was
+  missing.
 - **Stable.** `tools/list` returns the same tools in the same order every
   time (clients cache it and it is part of the prompt), and listing touches
   no credential, file or network: a client lists tools before anyone has

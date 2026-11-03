@@ -4,10 +4,9 @@
 
 - `pk-cli-mcp`: `SendDeadline` is DESIGN.md §1.9's "A late write sends nothing" in one
   place. A toolset starts it when a call begins and calls `check()` right before each
-  send: at its limit or past it, on the monotonic or the wall clock, the answer is a
-  confirmation-required error saying nothing was sent. Not an upstream one, whose remedy
-  is to try again in a minute: the wait may have been on this machine, and a retry nobody
-  watches is the late write itself. `elapsed()` is for a write's later limits,
+  send: at its limit or past it, on the monotonic or the wall clock, the answer is an
+  error (exit 1) saying the command was not sent, to check the current state, and to call
+  again only if the user still wants the change. `elapsed()` is for a write's later limits,
   such as when a read-back may last start. The clocks sit behind `Clock`, in the core, so
   the type builds for WebAssembly; `SystemClock`, the machine's own, is native only, since
   the real clocks panic on `wasm32-unknown-unknown`. `CALL_LIMIT` is the 120 s `--http`

@@ -93,21 +93,22 @@ impl<'c> SendDeadline<'c> {
         monotonic.max(wall)
     }
 
-    /// Call right before each send. At the limit or past it, an error saying nothing was sent,
-    /// which a caller can act on as it stands: return it, send nothing, read nothing back.
+    /// Call right before each send. At the limit or past it, an error saying this command was not
+    /// sent, which a caller returns as it stands, sending nothing more.
     ///
-    /// The kind is [`CliError::ConfirmationRequired`], not `Upstream`: the wait may have been on
-    /// this machine with the provider never contacted, and `Upstream`'s remedy is to try again in
-    /// a minute. A retry nobody watches is the late write this exists to stop, so the remedy here
-    /// is the user's fresh say-so, and what a client asks before each write gets it.
+    /// The kind is [`CliError::Other`]. `Upstream`'s remedy is to try again in a minute, when the
+    /// wait may have been on this machine and a retry nobody watches is the late write this
+    /// exists to stop. `ConfirmationRequired` says nothing changed, which an earlier send in the
+    /// same call could make false, and its exit 6 means `--force` was missing. So the message
+    /// carries its own remedy, and says to read the state because of that earlier send.
     pub fn check(&self) -> Result<(), CliError> {
         if self.elapsed() < self.limit {
             return Ok(());
         }
-        Err(CliError::ConfirmationRequired(format!(
-            "nothing was sent: this call took over {} s to reach the command, on a prompt, a \
-             lock, a slow request or a machine asleep, and whoever asked may have stopped \
-             waiting. Call it again only if the user still wants the change.",
+        Err(CliError::Other(format!(
+            "this command was not sent: the call took over {} s to reach it, on a prompt, a lock, \
+             a slow request or a machine asleep, and whoever asked may have stopped waiting. \
+             Check the current state, and call again only if the user still wants the change.",
             self.limit.as_secs()
         )))
     }
@@ -148,27 +149,31 @@ mod tests {
         let deadline = SendDeadline::start(&clock, LIMIT);
         clock.advance(LIMIT);
         let err = deadline.check().unwrap_err();
-        assert_eq!(err.exit_code(), 6, "{err:?}");
+        assert_eq!(err.exit_code(), 1, "{err:?}");
         let text = err.to_string();
-        assert!(text.contains("nothing was sent"), "{text}");
+        assert!(text.contains("was not sent"), "{text}");
         assert!(text.contains("over 60 s"), "{text}");
     }
 
     /// The wait may have been on this machine, and a retry nobody watches is what this stops, so
-    /// what the model reads must not blame the provider or send it back in a minute.
+    /// what the model reads must not blame the provider or send it back in a minute. An earlier
+    /// send in the same call may have landed, so it must not say nothing changed either.
     #[test]
-    fn a_late_write_tells_the_model_to_ask_and_not_to_retry() {
+    fn a_late_write_says_what_to_do_without_a_claim_it_cannot_make() {
         let clock = ManualClock::new();
         let deadline = SendDeadline::start(&clock, LIMIT);
         clock.advance(LIMIT);
         let server = Server::new("demo", "0.0.0", "Demo", "demo");
         let text = ToolError::from(deadline.check().unwrap_err()).render(&server);
-        assert!(text.starts_with("confirmation_required: "), "{text}");
-        assert!(text.contains("nothing was sent"), "{text}");
+        assert!(
+            text.starts_with("other: this command was not sent"),
+            "{text}"
+        );
+        assert!(text.contains("Check the current state"), "{text}");
         assert!(text.contains("only if the user still wants"), "{text}");
-        assert!(text.contains("needs the user's confirmation"), "{text}");
         assert!(!text.contains("provider failed"), "{text}");
         assert!(!text.contains("in a minute"), "{text}");
+        assert!(!text.to_lowercase().contains("nothing was"), "{text}");
     }
 
     /// `Instant` stands still while a Mac sleeps, so only the wall clock sees this night pass.
