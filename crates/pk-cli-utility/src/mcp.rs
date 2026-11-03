@@ -148,8 +148,20 @@ impl<S: UtilitySource> UtilityTools<S> {
         )
         .map(|a| a.id.clone())
         .map_err(|e| {
-            ToolError::from(e).with_fix(format!(
-                "Call {} with no account to see the accounts on this login, then call again",
+            // The ladder's message lists each candidate's id; concise output
+            // holds account numbers back, and this path has no format to ask
+            // for them with.
+            let error = match e {
+                CliError::NotFound(message) => ToolError::not_found(
+                    accounts
+                        .iter()
+                        .fold(message, |m, a| m.replace(&a.id, &masked(&a.id))),
+                ),
+                other => other.into(),
+            };
+            error.with_fix(format!(
+                "Call {} with no account to see the accounts on this login (response_format \
+                 detailed adds their numbers, which always match one), then call again",
                 self.name("balance")
             ))
         })
@@ -173,16 +185,11 @@ impl<S: UtilitySource> UtilityTools<S> {
             (true, Some(_)) => self.source.accounts().await?,
             // Nothing needs the list to resolve, so failing to read it must not
             // cost the balance. The result says so, or a login with several
-            // accounts would read as a login with one. Auth is left for the
-            // summary read below to report.
-            (true, None) => match self.source.accounts().await {
-                Ok(accounts) => accounts,
-                Err(CliError::Auth(_)) => Vec::new(),
-                Err(_) => {
-                    accounts_unavailable = true;
-                    Vec::new()
-                }
-            },
+            // accounts would read as a login with one.
+            (true, None) => self.source.accounts().await.unwrap_or_else(|_| {
+                accounts_unavailable = true;
+                Vec::new()
+            }),
         };
         let account = query.map(|q| self.pick_account(&accounts, q)).transpose()?;
         let summary = self.source.summary(account.as_deref()).await?;
@@ -201,13 +208,16 @@ impl<S: UtilitySource> UtilityTools<S> {
             account_id: id.filter(|_| detailed),
             accounts_unavailable,
             accounts: if accounts.len() > 1 {
+                // An account whose name does not single it out can only be
+                // asked for by its number.
+                let names = |name: &Option<String>| {
+                    name.is_some() && accounts.iter().filter(|a| a.name == *name).count() == 1
+                };
                 accounts
-                    .into_iter()
+                    .iter()
                     .map(|a| AccountItem {
-                        // An account with no name can only be asked for by
-                        // its number.
-                        id: (detailed || a.name.is_none()).then_some(a.id),
-                        name: a.name,
+                        id: (detailed || !names(&a.name)).then(|| a.id.clone()),
+                        name: a.name.clone(),
                     })
                     .collect()
             } else {
@@ -409,8 +419,9 @@ impl<S: UtilitySource> Toolset for UtilityTools<S> {
 /// `<prefix>_balance`'s arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct BalanceArgs {
-    /// The account: its number, or its address or a unique part of it. Omit
-    /// for the default account.
+    /// The account: its number, or its address or a unique part of it (only
+    /// the number when the login lists no addresses). Omit for the default
+    /// account.
     #[serde(default)]
     account: Option<String>,
     /// `concise` (default) names accounts by address. `detailed` adds their
@@ -422,8 +433,9 @@ struct BalanceArgs {
 /// The list tools' arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ListToolArgs {
-    /// The account: its number, or its address or a unique part of it. Omit
-    /// for the default account.
+    /// The account: its number, or its address or a unique part of it (only
+    /// the number when the login lists no addresses). Omit for the default
+    /// account.
     #[serde(default)]
     account: Option<String>,
     /// Earliest date, YYYY-MM-DD.

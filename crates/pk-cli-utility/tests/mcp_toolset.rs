@@ -240,12 +240,13 @@ fn an_unreadable_account_list_keeps_the_balance_and_says_the_list_is_missing() {
 }
 
 #[test]
-fn an_auth_failure_on_the_account_list_is_left_to_the_read_that_needs_the_login() {
+fn an_auth_failure_on_the_list_alone_is_also_flagged_rather_than_read_as_one_account() {
     let mut source = Fixtures::new();
     source.fail = |m| (m == "accounts").then(|| CliError::Auth("signed out".into()));
     let (t, _) = over(source);
     let out = ok(&t, "util_balance", json!({}));
-    assert!(out.get("accounts_unavailable").is_none(), "{out}");
+    assert_eq!(out["balance"], "12.34");
+    assert_eq!(out["accounts_unavailable"], true);
 }
 
 #[test]
@@ -263,7 +264,21 @@ fn an_ambiguous_account_names_the_candidates_rather_than_picking_one() {
     let text = err(&t, "util_balance", json!({"account": "Example Street"}));
     assert!(text.contains("100 Example Street"), "{text}");
     assert!(text.contains("200 Example Street"), "{text}");
+    assert!(!text.contains("1234567890"), "{text}");
+    assert!(!text.contains("2345678901"), "{text}");
+    assert!(text.contains("ending 7890"), "{text}");
+    assert!(text.contains("response_format"), "{text}");
     assert_eq!(*log.borrow(), ["accounts"]);
+}
+
+#[test]
+fn accounts_sharing_a_name_keep_the_numbers_that_tell_them_apart() {
+    let mut source = Fixtures::new();
+    source.accounts[1].name = source.accounts[0].name.clone();
+    let (t, _) = over(source);
+    let out = ok(&t, "util_balance", json!({}));
+    assert_eq!(out["accounts"][0]["id"], "1234567890");
+    assert_eq!(out["accounts"][1]["id"], "2345678901");
 }
 
 #[test]
