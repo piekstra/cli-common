@@ -4,8 +4,8 @@
 
 - `pk-cli-mcp`: `ResumeRequest`, for a list the provider reads on from a position (an id or a
   cursor of its own), whose rows can arrive or leave between pages. The next cursor holds the
-  tool's key for where to read on, so a row that leaves between pages skips nothing and a deep
-  page costs one page. `PositionRequest` stays for a list a tool reads whole on every page.
+  tool's key for where to read on, which must resume immediately after its row, so a row that
+  leaves between pages skips nothing and a deep page costs one page. `PositionRequest` stays for a list a tool reads whole on every page.
 - `pk-cli-secrets`: on Windows, `CredentialStore::set` stores a value over one credential's
   limit across several and `get` puts it back together, so a browser session's tokens no
   longer fail at the end of a sign-in. The limit is 2,560 bytes, which `keyring` fills as
