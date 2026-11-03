@@ -14,6 +14,8 @@
 //!   sets it, which costs one request when a result ends on a page boundary.
 //! - **A changed response fails.** A body without `features`, a feature without
 //!   `attributes`, or a flag that is not a boolean cannot read as "no parcels here".
+//! - **A layer that ignores the offset fails** on the second page. Each row carries the
+//!   sort's columns, which identify it, so a repeated page is the same rows.
 //!
 //! It runs over [`Transport`], whose errors name the origin only: a `where` clause holds
 //! what someone searched for, and does not belong in an error message. Native code passes
@@ -38,7 +40,8 @@ pub struct Layer<T> {
 
 /// What to ask a layer for. The sort is required because paging is only coherent over
 /// a stable order: without one, a row can repeat or go missing between pages. It has to
-/// identify a row uniquely, or tied rows can do the same.
+/// identify a row uniquely, or tied rows can do the same. Its columns come back with each
+/// row, whatever [`Query::fields`] says, so a page repeating can only be the same rows.
 #[derive(Debug, Clone)]
 pub struct Query<'a> {
     where_clause: &'a str,
@@ -59,7 +62,8 @@ impl<'a> Query<'a> {
         }
     }
 
-    /// A comma-separated list of columns, to avoid carrying all of them.
+    /// A comma-separated list of columns, to avoid carrying all of them. The sort's columns
+    /// come back too.
     pub fn fields(mut self, fields: &'a str) -> Self {
         self.fields = fields;
         self
@@ -69,6 +73,24 @@ impl<'a> Query<'a> {
     pub fn limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
+    }
+
+    fn out_fields(&self) -> String {
+        if self.fields.trim() == "*" {
+            return "*".to_string();
+        }
+        let mut fields: Vec<&str> = self.fields.split(',').map(str::trim).collect();
+        // Each sort term is a column, optionally followed by ASC or DESC.
+        for column in self
+            .order_by
+            .split(',')
+            .filter_map(|term| term.split_whitespace().next())
+        {
+            if !fields.iter().any(|f| f.eq_ignore_ascii_case(column)) {
+                fields.push(column);
+            }
+        }
+        fields.join(",")
     }
 }
 
@@ -117,7 +139,6 @@ impl<T: Transport> Layer<T> {
         let page_size = self.page_size as usize;
         let mut rows: Vec<Value> = Vec::new();
         let mut last_page: Vec<Value> = Vec::new();
-        let mut total = None;
         loop {
             let want = match query.limit {
                 Some(limit) => (limit as usize).saturating_sub(rows.len()).min(page_size),
@@ -128,7 +149,7 @@ impl<T: Transport> Layer<T> {
             }
             let params = [
                 ("where", query.where_clause.to_string()),
-                ("outFields", query.fields.to_string()),
+                ("outFields", query.out_fields()),
                 ("orderByFields", query.order_by.to_string()),
                 ("returnGeometry", "false".to_string()),
                 ("resultOffset", rows.len().to_string()),
@@ -158,19 +179,13 @@ impl<T: Transport> Layer<T> {
                     })
                 })
                 .collect::<Result<Vec<Value>, CliError>>()?;
-            // A server that ignores the offset would send this page forever. Two identical
-            // pages can also be honest, when the chosen columns do not identify a row, so
-            // the count decides.
+            // A server that ignores the offset would send this page forever.
             if page == last_page {
-                let total = match total {
-                    Some(total) => total,
-                    None => *total.insert(self.count(query.where_clause).await?),
-                };
-                if (rows.len() + page.len()) as u64 > total {
-                    return Err(CliError::Upstream(
-                        "ArcGIS sent the same page twice, so the layer does not page".into(),
-                    ));
-                }
+                return Err(CliError::Upstream(
+                    "ArcGIS sent the same rows twice: the layer does not page, or the sort does \
+                     not identify a row"
+                        .into(),
+                ));
             }
             rows.extend_from_slice(&page);
             last_page = page;

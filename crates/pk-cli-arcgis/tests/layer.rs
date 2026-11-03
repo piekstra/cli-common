@@ -115,35 +115,33 @@ fn a_result_ending_on_a_page_boundary_ends_on_the_empty_page() {
 }
 
 #[test]
-fn a_layer_that_ignores_the_offset_fails_instead_of_looping() {
-    let server = server(|url| {
-        if url.contains("returnCountOnly") {
-            ok(r#"{"count":2}"#)
-        } else {
-            ok(&page_of(&["A1", "A2"], ""))
-        }
-    });
-    let err = block_on(
-        layer(&server)
-            .page_size(2)
-            .rows(&Query::new("1=1", "PARCEL")),
-    )
-    .unwrap_err();
-    assert_eq!(err.exit_code(), 5);
-    assert!(err.to_string().contains("same page twice"), "{err}");
-    assert_eq!(server.seen.borrow().len(), 3);
+fn a_layer_that_ignores_the_offset_fails_on_the_second_page() {
+    for query in [
+        Query::new("1=1", "PARCEL"),
+        // A limit below what the layer holds must not hide it.
+        Query::new("1=1", "PARCEL").limit(5),
+    ] {
+        let server = server(|_| ok(&page_of(&["A1", "A2"], "")));
+        let err = block_on(layer(&server).page_size(2).rows(&query)).unwrap_err();
+        assert_eq!(err.exit_code(), 5);
+        assert!(err.to_string().contains("same rows twice"), "{err}");
+        assert_eq!(server.seen.borrow().len(), 2);
+    }
 }
 
 #[test]
-fn identical_pages_are_kept_when_the_chosen_columns_do_not_identify_a_row() {
+fn rows_alike_in_the_chosen_columns_differ_by_the_sort_and_page_normally() {
     let server = server(|url| {
-        if url.contains("returnCountOnly") {
-            ok(r#"{"count":5}"#)
-        } else if url.contains("resultOffset=4") {
-            ok(&page_of(&["A"], ""))
+        assert!(url.contains("outFields=OWNER%2CID"), "{url}");
+        let row = |id: u32| format!(r#"{{"attributes":{{"OWNER":"CITY","ID":{id}}}}}"#);
+        let rows = if url.contains("resultOffset=0") {
+            [row(1), row(2)].join(",")
+        } else if url.contains("resultOffset=2") {
+            [row(3), row(4)].join(",")
         } else {
-            ok(&page_of(&["A", "A"], ""))
-        }
+            row(5)
+        };
+        ok(&format!(r#"{{"features":[{rows}]}}"#))
     });
     let got = block_on(
         layer(&server)
@@ -152,9 +150,19 @@ fn identical_pages_are_kept_when_the_chosen_columns_do_not_identify_a_row() {
     )
     .unwrap();
     assert_eq!(got.len(), 5);
-    let counts = server.seen.borrow();
-    let counts = counts.iter().filter(|u| u.contains("returnCountOnly"));
-    assert_eq!(counts.count(), 1);
+}
+
+#[test]
+fn only_the_sort_columns_missing_from_the_fields_are_added() {
+    let asked = |query: Query| {
+        let server = server(|_| ok(r#"{"features":[]}"#));
+        block_on(layer(&server).rows(&query)).unwrap();
+        let url = server.seen.borrow()[0].clone();
+        url
+    };
+    assert!(asked(Query::new("1=1", "A DESC, B ASC").fields("A")).contains("outFields=A%2CB&"));
+    assert!(asked(Query::new("1=1", "a").fields("A")).contains("outFields=A&"));
+    assert!(asked(Query::new("1=1", "A")).contains("outFields=%2A&"));
 }
 
 #[test]
