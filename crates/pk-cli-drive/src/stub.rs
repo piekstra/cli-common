@@ -78,6 +78,8 @@ fn write_from_a_child(path: &Path, content: &str) {
     assert!(status.success(), "writing {}", path.display());
 }
 
+// Linux only: macOS has no ETXTBSY here, and takes 40 s over this many new scripts.
+#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
 
