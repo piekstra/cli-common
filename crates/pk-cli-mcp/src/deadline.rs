@@ -95,13 +95,19 @@ impl<'c> SendDeadline<'c> {
 
     /// Call right before each send. At the limit or past it, an error saying nothing was sent,
     /// which a caller can act on as it stands: return it, send nothing, read nothing back.
+    ///
+    /// The kind is [`CliError::ConfirmationRequired`], not `Upstream`: the wait may have been on
+    /// this machine with the provider never contacted, and `Upstream`'s remedy is to try again in
+    /// a minute. A retry nobody watches is the late write this exists to stop, so the remedy here
+    /// is the user's fresh say-so, and what a client asks before each write gets it.
     pub fn check(&self) -> Result<(), CliError> {
         if self.elapsed() < self.limit {
             return Ok(());
         }
-        Err(CliError::Upstream(format!(
-            "nothing was sent: this call waited over {} s to reach the command, and its caller \
-             may have stopped waiting. Call it again if the change is still wanted.",
+        Err(CliError::ConfirmationRequired(format!(
+            "nothing was sent: this call took over {} s to reach the command, on a prompt, a \
+             lock, a slow request or a machine asleep, and whoever asked may have stopped \
+             waiting. Call it again only if the user still wants the change.",
             self.limit.as_secs()
         )))
     }
@@ -120,6 +126,7 @@ impl fmt::Debug for SendDeadline<'_> {
 mod tests {
     use super::*;
     use crate::conformance::ManualClock;
+    use crate::{Server, ToolError};
 
     const LIMIT: Duration = Duration::from_secs(60);
     const JUST_UNDER: Duration = Duration::from_millis(59_999);
@@ -141,10 +148,27 @@ mod tests {
         let deadline = SendDeadline::start(&clock, LIMIT);
         clock.advance(LIMIT);
         let err = deadline.check().unwrap_err();
-        assert!(matches!(err, CliError::Upstream(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 6, "{err:?}");
         let text = err.to_string();
         assert!(text.contains("nothing was sent"), "{text}");
         assert!(text.contains("over 60 s"), "{text}");
+    }
+
+    /// The wait may have been on this machine, and a retry nobody watches is what this stops, so
+    /// what the model reads must not blame the provider or send it back in a minute.
+    #[test]
+    fn a_late_write_tells_the_model_to_ask_and_not_to_retry() {
+        let clock = ManualClock::new();
+        let deadline = SendDeadline::start(&clock, LIMIT);
+        clock.advance(LIMIT);
+        let server = Server::new("demo", "0.0.0", "Demo", "demo");
+        let text = ToolError::from(deadline.check().unwrap_err()).render(&server);
+        assert!(text.starts_with("confirmation_required: "), "{text}");
+        assert!(text.contains("nothing was sent"), "{text}");
+        assert!(text.contains("only if the user still wants"), "{text}");
+        assert!(text.contains("needs the user's confirmation"), "{text}");
+        assert!(!text.contains("provider failed"), "{text}");
+        assert!(!text.contains("in a minute"), "{text}");
     }
 
     /// `Instant` stands still while a Mac sleeps, so only the wall clock sees this night pass.
