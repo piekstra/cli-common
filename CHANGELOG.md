@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.23.0 — 2026-11-03
+
+- `pk-cli-arcgis`: read-only queries against an ArcGIS REST layer, for CLIs over the
+  public GIS services many US counties publish parcel data from. Written over `Transport`,
+  so it also runs in a Worker. `Layer::rows` pages by the rows received, asks past a full
+  page even without `exceededTransferLimit`, and requires a sort. An error in an HTTP 200
+  body keeps its exit code on the first request, and is upstream on a later page. A body
+  without `features`, a feature without `attributes` or a flag that is not a boolean
+  fails instead of reading as no rows. `quote` makes a SQL string literal.
+
 ## v0.22.0 — 2026-11-03
 
 - `pk-cli-mcp`: feature `http` exports `HTTP_TOKEN_ACCOUNT`, the keychain item
