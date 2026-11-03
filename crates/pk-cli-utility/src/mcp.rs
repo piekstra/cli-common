@@ -18,8 +18,8 @@
 
 use pk_cli_core::{dates, resolve, CliError, Money};
 use pk_cli_mcp::{
-    parse_args, ListArgs, Page, PageRequest, ResponseFormat, Server, ToolDef, ToolError,
-    ToolOutput, Toolset,
+    parse_args, ListArgs, Order, Page, PageRequest, PositionKey, PositionRequest, ResponseFormat,
+    Server, ToolDef, ToolError, ToolOutput, Toolset,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -228,7 +228,7 @@ impl<S: UtilitySource> UtilityTools<S> {
 
     async fn bills(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let args: ListToolArgs = parse_args(args)?;
-        let page = args.page_request()?;
+        let page = PositionRequest::new(&args.list, &args.filter())?;
         let (since, until) = args.bounds()?;
         let account = self.account(args.account.as_deref()).await?;
         let detailed = args.list.format().is_detailed();
@@ -244,23 +244,31 @@ impl<S: UtilitySource> UtilityTools<S> {
                     .map_or(true, |d| in_range(d, since.as_deref(), until.as_deref()))
             })
             .map(|s| {
+                let key = PositionKey::new(
+                    s.date
+                        .as_deref()
+                        .or(s.due_date.as_deref())
+                        .unwrap_or_default(),
+                    &s.id,
+                );
                 let (amount, currency) = amount(&s.amount);
-                BillItem {
+                let item = BillItem {
                     date: s.date,
                     amount,
                     currency,
                     due_date: s.due_date,
                     paid: s.paid,
                     id: detailed.then_some(s.id),
-                }
+                };
+                (key, item)
             })
             .collect();
-        ToolOutput::new(&page.page(rows, self.narrow())?)
+        ToolOutput::new(&page.page(rows, Order::Descending, self.narrow())?)
     }
 
     async fn payments(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let args: ListToolArgs = parse_args(args)?;
-        let page = args.page_request()?;
+        let page = PositionRequest::new(&args.list, &args.filter())?;
         let (since, until) = args.bounds()?;
         let account = self.account(args.account.as_deref()).await?;
         let detailed = args.list.format().is_detailed();
@@ -271,23 +279,28 @@ impl<S: UtilitySource> UtilityTools<S> {
             .into_iter()
             .filter(|p| in_range(&p.date, since.as_deref(), until.as_deref()))
             .map(|p| {
+                // A confirmation number when the provider gives one. Its status can change
+                // while a payment posts, so the status is no part of this.
+                let id = p.confirmation.as_deref().unwrap_or(&p.amount.amount);
+                let key = PositionKey::new(&*p.date, id);
                 let (amount, currency) = amount(&p.amount);
-                PaymentItem {
+                let item = PaymentItem {
                     date: p.date,
                     amount,
                     currency,
                     status: p.status,
                     method: p.method.filter(|_| detailed),
                     confirmation: p.confirmation.filter(|_| detailed),
-                }
+                };
+                (key, item)
             })
             .collect();
-        ToolOutput::new(&page.page(rows, self.narrow())?)
+        ToolOutput::new(&page.page(rows, Order::Descending, self.narrow())?)
     }
 
     async fn usage(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let args: ListToolArgs = parse_args(args)?;
-        let page = args.page_request()?;
+        let page = PageRequest::new(&args.list, &args.filter())?;
         let (since, until) = args.bounds()?;
         let account = self.account(args.account.as_deref()).await?;
         let rows = self
@@ -310,6 +323,8 @@ impl<S: UtilitySource> UtilityTools<S> {
                 }
             })
             .collect();
+        // By count of rows: a period's label can be a provider's cycle name, which says
+        // nothing about where it sorts, and a new period arrives once a billing cycle.
         ToolOutput::new(&page.page(rows, self.narrow())?)
     }
 }
@@ -457,15 +472,12 @@ struct ListFilter<'a> {
 }
 
 impl ListToolArgs {
-    fn page_request(&self) -> Result<PageRequest, ToolError> {
-        PageRequest::new(
-            &self.list,
-            &ListFilter {
-                account: present(self.account.as_deref()),
-                since: present(self.since.as_deref()),
-                until: present(self.until.as_deref()),
-            },
-        )
+    fn filter(&self) -> ListFilter<'_> {
+        ListFilter {
+            account: present(self.account.as_deref()),
+            since: present(self.since.as_deref()),
+            until: present(self.until.as_deref()),
+        }
     }
 
     /// `since` and `until` in canonical ISO form, so they compare as text.

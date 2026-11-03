@@ -8,6 +8,17 @@
   whoever ran it once it has removed the connector token: a running `<bin> mcp --http` keeps
   the token it started with, the environment variable is beyond the command, and a connector
   still in use needs a new token. On macOS it gives the `launchctl bootout` command.
+- `pk-cli-mcp`: a position cursor. `PositionRequest`, beside `PageRequest`, takes every
+  matching row paired with its `PositionKey` and an `Order`, sorts them, and returns a cursor
+  holding the last row's position instead of a count of rows, so a row that arrives between
+  pages cannot repeat one and a row that leaves cannot skip one. A `PositionKey` is a sort value
+  and an id; the cursor holds the sort value encoded and a fingerprint of the id. A cursor from
+  before a tool moved is honoured as its count, and `PageRequest` refuses a position cursor
+  before anything is fetched.
+- `pk-cli-utility`: `<prefix>_bills` and `<prefix>_payments` page by position, so every
+  `utility/v1` CLI moves on its bump. Rows sharing a date now run in a fixed order of their
+  own, the provider's within a day aside. `<prefix>_usage` stays by count of rows: a period's label can be
+  a provider's cycle name, which says nothing about where it sorts.
 - `pk-cli-core`: `CliError::because(Reason)` types why an error happened and
   `CliError::with_remedy` keeps what to do next apart from what went wrong, on any kind
   of error, so a caller answers by cause without reading the message: `reason()`,
