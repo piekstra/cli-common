@@ -118,6 +118,12 @@
 //!   created `0700`, exclusively, under an unpredictable name in the temp
 //!   dir, and removed when the window closes, leaving the kept one alone.
 //!
+//! Chrome holds a cookie it just received in memory until it writes it, so
+//! dropping the [`Browser`] asks Chrome to quit over its debug port and waits
+//! for it to exit, which writes the cookie for the next sign-in. If the port is
+//! dead or Chrome has not exited within 5 seconds, it gets SIGTERM, then SIGKILL
+//! after 3 more, and SIGTERM can lose that cookie.
+//!
 //! A CLI that signs in more than one account at a provider keeps one
 //! profile per account ([`Launch::profile_name`],
 //! [`forget_named_profile`]), so one account's sign-in never opens already
