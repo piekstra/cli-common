@@ -143,6 +143,10 @@ Google Home's, replacing a hand-kept device→room table. Producers declare
 | nelnet-cli (`nlnt`) | `nelnet_loans`, `nelnet_payments`, `nelnet_repayment`, `nelnet_tax`, `nelnet_documents` | `.mcpb` on each release from v0.3.0, macOS and Linux only: no Windows build, because the session bundle is unmeasured against Windows's 2,560-byte credential limit; `nelnet-cli` plugin in `claude-plugins` | home module: `nlnt mcp --http` from v0.3.0 |
 | chase-cli (`chse`) | `chase_transactions`, `chase_exports` (over CSV files in a folder; no provider, no credential) | `.mcpb` on each release from v0.2.0; `chase-cli` plugin in `claude-plugins` | home module: `chse mcp --http` from v0.2.0 |
 | lofty-cli (`lofty`) | `lofty_account`, `lofty_orders`, `lofty_trades`, `lofty_property` | `.mcpb` on each release from v0.2.0; `lofty-cli` plugin in `claude-plugins` | home module: `lofty mcp --http` from v0.2.0 |
+| campbell-property-management-hoa-cli (`cpmfl`) | `campbell_balance`, `campbell_bills`, `campbell_payments` (`utility/v1`), `campbell_requests`, `campbell_documents` | `.mcpb` on each release from v0.2.0; `campbell-property-management-hoa-cli` plugin in `claude-plugins` | home module: `cpmfl mcp --http` from v0.2.0 |
+| rpm-fl-cli (`rpmfl`) | `rpm_summary`, `rpm_properties`, `rpm_transactions`, `rpm_rent`, `rpm_documents` | `.mcpb` on each release from v0.3.0; `rpm-fl-cli` plugin in `claude-plugins` | home module: `rpmfl mcp --http` from v0.3.0 |
+| lofty-pm-cli (`lofty-pm`) | `loftypm_pending`, `loftypm_votes`, `loftypm_digest`, `loftypm_ledger` (over the store `scan` fills; no provider, no credential on stdio) | `.mcpb` on each release from v0.2.0; `lofty-pm-cli` plugin in `claude-plugins` | home module: `lofty-pm mcp --http` from v0.2.0 |
+| kin-cli (`kin`) | `kin_policies`, `kin_policy`, `kin_documents`, `kin_payments` | `.mcpb` on each release from v0.2.0; `kin-cli` plugin in `claude-plugins` | home module: `kin mcp --http` from v0.2.0 |
 
 Consumers: Claude Code, Claude Desktop, and (path B) a deploy-your-own
 Cloudflare Worker reached from claude.ai, which runs a portal CLI's tools on
