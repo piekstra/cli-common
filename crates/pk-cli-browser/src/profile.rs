@@ -8,8 +8,10 @@
 //! is a real directory, owned by the current user, with that mode. One
 //! sign-in uses it at a time: the run holds an advisory lock on a file in
 //! it, and a Chrome still running in it (Chrome's own `SingletonLock` naming
-//! a live pid that runs a Chrome) refuses the launch. Nothing outside the
-//! profile directory is ever removed or rewritten.
+//! a live pid that runs a Chrome) refuses the launch. A CLI whose provider
+//! keeps tokens in site storage has it removed from the profile at both ends
+//! of a run ([`ProfileDir::clear_site_storage`]). Nothing outside the profile
+//! directory is ever removed or rewritten.
 //!
 //! The kept profile needs a unix system (macOS, Linux): the run lock is
 //! `flock(2)` and Chrome's lock a symlink. Elsewhere every sign-in uses a
@@ -51,6 +53,25 @@ const LEFTOVERS: [&str; 4] = [
     "DevToolsActivePort",
 ];
 
+/// The Chrome profile inside the kept directory: the one Chrome opens for a
+/// launch that names none, unless the owner added another in the window.
+pub(crate) const CHROME_PROFILE: &str = "Default";
+/// What in the Chrome profile a page's script can read back on the next
+/// launch. The cookie store is not here: it is what a kept profile is for.
+pub(crate) const SITE_STORAGE: [&str; 7] = [
+    "Local Storage",
+    "Session Storage",
+    "IndexedDB",
+    // Storage buckets: each one's IndexedDB, Cache API and file system.
+    "WebStorage",
+    // The Cache API, and the service workers that can read it.
+    "Service Worker",
+    // The origin-private file system.
+    "File System",
+    // Web SQL, in a Chromium old enough to have it.
+    "databases",
+];
+
 /// The profile Chrome runs in for one sign-in.
 ///
 /// A scratch profile ([`ProfileDir::create`]) holds the live session only
@@ -64,9 +85,11 @@ const LEFTOVERS: [&str; 4] = [
 pub(crate) struct ProfileDir {
     path: PathBuf,
     kept: bool,
-    // Held while a kept profile is in use; closing it releases the lock.
+    // Held while a kept profile is in use; dropping it releases the lock.
     // The record of what runs there is written through it.
-    run_lock: Option<File>,
+    run_lock: Option<HeldRunLock>,
+    // Set once `clear_site_storage` has run: dropping removes it again.
+    clear_on_drop: bool,
 }
 
 impl ProfileDir {
@@ -86,6 +109,7 @@ impl ProfileDir {
             path,
             kept: false,
             run_lock: None,
+            clear_on_drop: false,
         })
     }
 
@@ -121,7 +145,7 @@ impl ProfileDir {
             RunLock::Unsupported => return Err(unsupported()),
         };
         let launched = canonical(chrome);
-        let mut known = read_record(&mut run_lock);
+        let mut known = read_record(&mut run_lock.0);
         known.push(launched.clone());
         if let Some(pid) = chrome_holder(&path, &known)? {
             return Err(BrowserError::ProfileInUse(format!(
@@ -131,7 +155,7 @@ impl ProfileDir {
             )));
         }
         remove_leftovers(&path)?;
-        write_record(&mut run_lock, &[launched]).map_err(|e| {
+        write_record(&mut run_lock.0, &[launched]).map_err(|e| {
             BrowserError::Profile(format!(
                 "recording the browser in {}: {e}",
                 path.join(RUN_LOCK).display()
@@ -141,7 +165,32 @@ impl ProfileDir {
             path,
             kept: true,
             run_lock: Some(run_lock),
+            clear_on_drop: false,
         })
+    }
+
+    /// Remove the kept profile's site storage ([`SITE_STORAGE`]) before
+    /// Chrome starts, and again, best effort, when this is dropped. The
+    /// cookie store and the rest of the profile stay.
+    ///
+    /// Refused as [`BrowserError::Profile`], naming the path, when any of it
+    /// cannot be removed, or when the Chrome profile is a symlink, is not a
+    /// directory or is another user's: the site would read what is left.
+    /// The refusal leaves the drop's removal off.
+    pub fn clear_site_storage(&mut self) -> Result<(), BrowserError> {
+        let paths = site_storage_paths(&self.path)
+            .map_err(|problem| BrowserError::Profile(format!("{problem}; refusing to launch")))?;
+        for path in paths {
+            remove_storage_patiently(&path, 10, Duration::from_millis(100)).map_err(|e| {
+                BrowserError::Profile(format!(
+                    "could not remove the site storage {} ({e}), and the site would read what is \
+                     left; refusing to launch. Delete it and try again, or pass --fresh-profile",
+                    path.display()
+                ))
+            })?;
+        }
+        self.clear_on_drop = true;
+        Ok(())
     }
 
     /// Once Chrome is up, add the program it runs as, read from the pid its
@@ -152,7 +201,7 @@ impl ProfileDir {
     /// browser by its own program. Best effort: without a lock or a
     /// readable program, the record keeps what was spawned.
     pub fn note_running_chrome(&mut self) {
-        let Some(file) = self.run_lock.as_mut() else {
+        let Some(HeldRunLock(file)) = self.run_lock.as_mut() else {
             return;
         };
         let pid = std::fs::read_link(self.path.join(SINGLETON_LOCK))
@@ -183,9 +232,15 @@ impl ProfileDir {
 impl Drop for ProfileDir {
     /// A scratch profile left behind may hold the signed-in session, so a
     /// failure to remove it is reported even under `-q`: it is the one
-    /// outcome the owner has to act on. A kept profile stays.
+    /// outcome the owner has to act on. A kept profile stays, without the
+    /// site storage [`clear_site_storage`](Self::clear_site_storage) was
+    /// asked to keep out of it; this runs before the run lock is released,
+    /// so no sign-in starts in the profile until it is done.
     fn drop(&mut self) {
         if self.kept {
+            if self.clear_on_drop {
+                clear_site_storage_on_close(&self.path);
+            }
             return;
         }
         if let Err(e) = remove_dir_patiently(&self.path, 10, Duration::from_millis(100)) {
@@ -333,6 +388,50 @@ pub fn forget_named_profile_in(root: &Path, bin: &str, name: &str) -> Result<boo
     forget_in(root, bin, Some(name))
 }
 
+/// Whether `bin` keeps a browser profile, for a CLI's `auth status`. `Ok(true)`
+/// when the profile directory is there, `Ok(false)` when it is not. It says
+/// that a profile is kept, not that anything is signed in there.
+///
+/// Read-only: it takes no lock, so it answers while a sign-in runs, and it
+/// creates nothing. Refused as [`BrowserError::Profile`] when the path is a
+/// symlink, is not a directory or belongs to another user, as
+/// [`forget_profile`] refuses it.
+///
+/// It reads the owner's real data dir, so a CLI's tests fill the same seam
+/// as the logout's with `profile_exists_in` (the `test-util` feature) and a
+/// temp dir.
+pub fn profile_exists(bin: &str) -> Result<bool, BrowserError> {
+    exists_in(&default_root()?, bin, None)
+}
+
+/// [`profile_exists`] for a profile kept under `name`
+/// ([`Launch::profile_name`](crate::Launch::profile_name)). A `name` a launch
+/// would refuse is [`BrowserError::Invalid`].
+pub fn named_profile_exists(bin: &str, name: &str) -> Result<bool, BrowserError> {
+    if !profile_name_ok(name) {
+        return Err(invalid_name(name));
+    }
+    exists_in(&default_root()?, bin, Some(name))
+}
+
+/// [`profile_exists`] under `root` instead of the per-user data dir: the
+/// profile at `<root>/piekstra.<bin>/browser-profile`. For a CLI's tests only
+/// (the `test-util` feature).
+#[cfg(any(test, feature = "test-util"))]
+pub fn profile_exists_in(root: &Path, bin: &str) -> Result<bool, BrowserError> {
+    exists_in(root, bin, None)
+}
+
+/// [`named_profile_exists`] under `root` instead of the per-user data dir.
+/// For a CLI's tests only (the `test-util` feature).
+#[cfg(any(test, feature = "test-util"))]
+pub fn named_profile_exists_in(root: &Path, bin: &str, name: &str) -> Result<bool, BrowserError> {
+    if !profile_name_ok(name) {
+        return Err(invalid_name(name));
+    }
+    exists_in(root, bin, Some(name))
+}
+
 pub(crate) fn invalid_name(name: &str) -> BrowserError {
     BrowserError::Invalid(format!(
         "browser profile name `{name}` must be 1 to 64 ASCII letters, digits, `-` or `_`"
@@ -389,29 +488,13 @@ pub(crate) fn profile_name_ok(name: &str) -> bool {
 /// only, never its parent or anything a link in it points to.
 pub(crate) fn forget_in(root: &Path, bin: &str, name: Option<&str>) -> Result<bool, BrowserError> {
     let path = kept_profile_path(root, bin, name);
-    let meta = match std::fs::symlink_metadata(&path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => {
-            return Err(BrowserError::Profile(format!(
-                "checking the browser profile {}: {e}",
-                path.display()
-            )))
-        }
-    };
-    #[cfg(unix)]
-    if let Some(problem) = DirFacts::of(&meta).problem(current_uid(), false) {
-        return Err(BrowserError::Profile(format!(
-            "the browser profile dir {} {problem}; refusing to remove it",
-            path.display()
-        )));
+    if !kept_profile_there(&path, "refusing to remove it")? {
+        return Ok(false);
     }
-    #[cfg(not(unix))]
-    let _ = meta;
     let (run_lock, known) = match lock_for_run(&path)? {
-        RunLock::Acquired(mut file) => {
-            let known = read_record(&mut file);
-            (Some(file), known)
+        RunLock::Acquired(mut held) => {
+            let known = read_record(&mut held.0);
+            (Some(held), known)
         }
         RunLock::Busy => {
             return Err(BrowserError::ProfileInUse(format!(
@@ -438,6 +521,39 @@ pub(crate) fn forget_in(root: &Path, bin: &str, name: Option<&str>) -> Result<bo
         ))
     })?;
     drop(run_lock);
+    Ok(true)
+}
+
+/// Whether `bin`'s kept profile is there under `root`, with the refusals of
+/// [`forget_in`]. No lock, nothing created.
+pub(crate) fn exists_in(root: &Path, bin: &str, name: Option<&str>) -> Result<bool, BrowserError> {
+    kept_profile_there(&kept_profile_path(root, bin, name), "refusing to use it")
+}
+
+/// Whether a kept profile is at `path`, seen without following a link.
+/// `Err` with `refusal` when something is there that is no profile of the
+/// current user's; its mode is not asked about, since an exposed profile is
+/// still one.
+fn kept_profile_there(path: &Path, refusal: &str) -> Result<bool, BrowserError> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(BrowserError::Profile(format!(
+                "checking the browser profile {}: {e}",
+                path.display()
+            )))
+        }
+    };
+    #[cfg(unix)]
+    if let Some(problem) = DirFacts::of(&meta).problem(current_uid(), false) {
+        return Err(BrowserError::Profile(format!(
+            "the browser profile dir {} {problem}; {refusal}",
+            path.display()
+        )));
+    }
+    #[cfg(not(unix))]
+    let _ = (meta, refusal);
     Ok(true)
 }
 
@@ -562,14 +678,35 @@ fn current_uid() -> u32 {
 #[derive(Debug)]
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) enum RunLock {
-    /// Held until the file is closed. The kernel releases it if the process
+    /// Held until this is dropped. The kernel releases it if the process
     /// dies, so it is never stale.
-    Acquired(File),
+    Acquired(HeldRunLock),
     /// Another sign-in holds it.
     Busy,
     /// This platform has no run lock.
     #[cfg_attr(unix, allow(dead_code))]
     Unsupported,
+}
+
+/// The open lock file, with the lock on it.
+#[derive(Debug)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) struct HeldRunLock(File);
+
+impl Drop for HeldRunLock {
+    /// Unlocks rather than relying on the close: a process another thread is
+    /// spawning has a copy of the descriptor until it execs, and the lock
+    /// would last as long as that copy, refusing the next sign-in.
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: flock(2) on a descriptor `self` owns for the whole call.
+            unsafe {
+                libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
 }
 
 /// Take the kept profile's run lock without waiting. The file is opened
@@ -598,7 +735,7 @@ fn lock_file(profile: &Path) -> std::io::Result<RunLock> {
         .open(profile.join(RUN_LOCK))?;
     // SAFETY: flock(2) on a descriptor `file` owns for the whole call.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        return Ok(RunLock::Acquired(file));
+        return Ok(RunLock::Acquired(HeldRunLock(file)));
     }
     let err = std::io::Error::last_os_error();
     if err.kind() == std::io::ErrorKind::WouldBlock {
@@ -842,6 +979,79 @@ fn remove_leftovers(profile: &Path) -> Result<(), BrowserError> {
         }
     }
     Ok(())
+}
+
+/// The site storage paths in `profile`, or none when Chrome has made no
+/// profile there yet. `Err` says why they cannot be touched: a link in place
+/// of the Chrome profile would take every removal outside the kept directory.
+fn site_storage_paths(profile: &Path) -> Result<Vec<PathBuf>, String> {
+    let dir = profile.join(CHROME_PROFILE);
+    let meta = match std::fs::symlink_metadata(&dir) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(format!(
+                "checking the browser profile {}: {e}",
+                dir.display()
+            ))
+        }
+    };
+    #[cfg(unix)]
+    if let Some(problem) = DirFacts::of(&meta).problem(current_uid(), false) {
+        return Err(format!(
+            "the browser profile dir {} {problem}",
+            dir.display()
+        ));
+    }
+    #[cfg(not(unix))]
+    let _ = meta;
+    Ok(SITE_STORAGE.iter().map(|name| dir.join(name)).collect())
+}
+
+/// Remove one site storage path. A symlink or a file is unlinked, never
+/// followed; a directory goes as [`remove_dir_patiently`] removes one, links
+/// inside it included and what they point to left alone. A path already gone
+/// counts as removed.
+fn remove_storage_patiently(path: &Path, attempts: u32, pause: Duration) -> std::io::Result<()> {
+    let removed = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => remove_dir_patiently(path, attempts, pause),
+        Ok(_) => std::fs::remove_file(path),
+        Err(e) => Err(e),
+    };
+    match removed {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+/// Remove the site storage once Chrome has stopped, so a token does not sit
+/// on disk between runs. Best effort: what will not go is warned about, even
+/// under `-q`, and the next launch removes it or refuses to start.
+fn clear_site_storage_on_close(profile: &Path) {
+    let paths = match site_storage_paths(profile) {
+        Ok(paths) => paths,
+        Err(problem) => {
+            eprintln!("warning: {problem}; its site storage was not removed");
+            return;
+        }
+    };
+    let mut attempts = 10;
+    for path in paths {
+        if let Err(e) = remove_storage_patiently(&path, attempts, Duration::from_millis(100)) {
+            eprintln!("{}", storage_warning(&path, &e));
+            // The wait for Chrome's helper processes is spent, and a drop
+            // must not hold the CLI up for each path in turn.
+            attempts = 1;
+        }
+    }
+}
+
+pub(crate) fn storage_warning(path: &Path, e: &std::io::Error) -> String {
+    format!(
+        "warning: could not remove the site storage {} ({e}); it may hold the provider's tokens, \
+         so delete it",
+        path.display()
+    )
 }
 
 /// Remove `path`, retrying `attempts` times `pause` apart: Chrome's helper

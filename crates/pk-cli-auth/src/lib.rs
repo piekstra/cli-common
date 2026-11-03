@@ -46,6 +46,11 @@ pub struct AuthStatus {
     /// RFC 3339, when the session's lifetime is known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// Whether the CLI keeps a browser profile between `auth login --browser`
+    /// sign-ins (DESIGN.md §2.2). A kept profile, not a signed-in one. Left
+    /// out by a CLI with no browser sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_profile: Option<bool>,
 }
 
 impl AuthStatus {
@@ -60,6 +65,7 @@ impl AuthStatus {
             credential_in_keychain: None,
             session_valid: None,
             expires_at: None,
+            browser_profile: None,
         }
     }
 
@@ -104,6 +110,12 @@ impl AuthStatus {
         }
         if let Some(e) = &self.expires_at {
             println!("Expires:       {e}");
+        }
+        if let Some(b) = self.browser_profile {
+            println!(
+                "Browser:       {}",
+                if b { "profile kept" } else { "no profile kept" }
+            );
         }
     }
 
@@ -167,6 +179,27 @@ mod tests {
         assert_eq!(v["method"], "password");
         assert_eq!(v["credential_in_keychain"], true);
         assert!(v.get("expires_at").is_none());
+        assert!(v.get("browser_profile").is_none());
+    }
+
+    /// An optional field added within `auth-status/v1`: left off the wire by
+    /// a CLI that does not set it, and missing from an older payload.
+    #[test]
+    fn the_browser_profile_is_reported_only_when_set() {
+        let mut s = AuthStatus::new(true, true, AuthMethod::BrowserSession);
+        s.browser_profile = Some(false);
+        assert_eq!(s.to_json()["browser_profile"], false);
+        s.browser_profile = Some(true);
+        assert_eq!(s.to_json()["browser_profile"], true);
+
+        let older = serde_json::json!({
+            "schema": "auth-status/v1",
+            "required": true,
+            "authenticated": true,
+            "method": "browser-session",
+        });
+        let read: AuthStatus = serde_json::from_value(older).unwrap();
+        assert_eq!(read.browser_profile, None);
     }
 
     #[test]

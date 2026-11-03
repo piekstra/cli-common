@@ -14,8 +14,10 @@
 //! --browser` is the browser sign-in (`pk-cli-browser`) a bot-protected
 //! portal offers: a Chrome window the owner signs in through, in a profile
 //! the CLI keeps so the portal remembers the device (`--fresh-profile` for
-//! a one-off scratch one, `auth logout` removes it), and the web session
-//! read back out of it. `mcp` serves the demo devices as MCP tools
+//! a one-off scratch one, `auth status` reports it, `auth logout` removes
+//! it), and the web session read back out of it. The demo portal keeps its
+//! tokens in `localStorage`, so the profile keeps only its cookies. `mcp`
+//! serves the demo devices as MCP tools
 //! (`pk-cli-mcp`) over stdio, for Claude and other MCP clients.
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -458,6 +460,9 @@ fn auth(
                 let session = pk_cli_browser::capture(
                     Launch::new(BIN)
                         .url("https://app.example.com/login")
+                        // The demo portal keeps its tokens in `localStorage`
+                        // (`browser_session`).
+                        .clear_site_storage(true)
                         .fresh_profile(browser.fresh_profile)
                         .quiet(cli.common.quiet),
                     &browser_session()?,
@@ -496,6 +501,7 @@ fn auth(
             let stored = creds.get(&user)?.is_some();
             status.credential_in_keychain = Some(stored);
             status.authenticated = stored;
+            status.browser_profile = browser_profile_status(|| pk_cli_browser::profile_exists(BIN));
             status.emit(cli.common.json);
             Ok(())
         }
@@ -522,6 +528,22 @@ fn auth(
             creds.set(&user, &secret)?;
             eprintln!("credential stored");
             Ok(())
+        }
+    }
+}
+
+/// `auth status`'s browser field: whether a `--browser` sign-in keeps a
+/// profile here. `auth status` works whatever state the CLI is in, so a
+/// profile that needs repair is a warning on stderr and leaves the field out.
+/// The check is passed in: the binary binds it to `profile_exists(BIN)`, the
+/// tests to `profile_exists_in` under a temp dir, so a test never reads the
+/// owner's real data dir.
+fn browser_profile_status(exists: impl FnOnce() -> Result<bool, BrowserError>) -> Option<bool> {
+    match exists() {
+        Ok(kept) => Some(kept),
+        Err(e) => {
+            eprintln!("warning: {e}");
+            None
         }
     }
 }
@@ -785,6 +807,34 @@ mod tests {
                 other => panic!("{session:?} must keep the wait going: {other:?}"),
             }
         }
+    }
+
+    /// The status's browser field on a temp dir through `test-util`'s
+    /// `profile_exists_in`, the seam a CLI's status tests use so they never
+    /// read the owner's real data dir.
+    #[test]
+    fn auth_status_reports_the_kept_browser_profile() {
+        let root = std::env::temp_dir().join(format!("example-cli-status-{}", std::process::id()));
+        let exists = || pk_cli_browser::profile_exists_in(&root, BIN);
+        assert_eq!(browser_profile_status(exists), Some(false));
+        assert!(!root.exists(), "asking creates nothing");
+
+        let profile = root.join("piekstra.example-cli").join("browser-profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        assert_eq!(browser_profile_status(exists), Some(true));
+
+        let mut status = AuthStatus::new(true, false, pk_cli_auth::AuthMethod::Password);
+        status.browser_profile = browser_profile_status(exists);
+        assert_eq!(status.to_json()["browser_profile"], true);
+
+        // A profile that needs repair does not fail the status: the field
+        // is left out, and the rest of the status still reports.
+        std::fs::remove_dir(&profile).unwrap();
+        std::fs::write(&profile, "x").unwrap();
+        status.browser_profile = browser_profile_status(exists);
+        assert!(status.to_json().get("browser_profile").is_none());
+        assert_eq!(status.to_json()["schema"], "auth-status/v1");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// The logout's browser step on a temp dir through `test-util`'s

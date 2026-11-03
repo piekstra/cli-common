@@ -116,7 +116,11 @@
 //!   browser out too, and [`Launch::fresh_profile`] (the `--fresh-profile`
 //!   flag of [`BrowserArgs`]) runs one sign-in in a scratch profile instead:
 //!   created `0700`, exclusively, under an unpredictable name in the temp
-//!   dir, and removed when the window closes, leaving the kept one alone.
+//!   dir, and removed when the window closes, leaving the kept one alone;
+//! - [`profile_exists`] and [`named_profile_exists`] say whether one is kept,
+//!   for a CLI's `auth status`. They take no lock and create nothing, and
+//!   they refuse what [`forget_profile`] refuses. A `true` says a profile is
+//!   kept, not that anything is signed in there.
 //!
 //! A CLI that signs in more than one account at a provider keeps one
 //! profile per account ([`Launch::profile_name`],
@@ -128,6 +132,52 @@
 //! The kept profile needs macOS or Linux (the run lock is `flock(2)`, and
 //! Chrome's lock a symlink). Elsewhere every sign-in uses a scratch profile,
 //! with a one-line note on stderr.
+//!
+//! ## A provider that keeps tokens in site storage
+//!
+//! Some providers keep a token bundle, with a rotating refresh token in it,
+//! in `localStorage`. A kept profile retains it. On the next launch the site's
+//! own script can read the stale bundle and present the retired refresh token,
+//! so reuse detection revokes the whole token family; a capture can read the
+//! stale bundle; and the refresh token sits unencrypted on disk between runs.
+//! Removing the bundle from the page as it is read does not solve this: the
+//! removal may not reach disk before Chrome stops, and an expression can be
+//! evaluated more than once, so a lost answer loses the bundle.
+//!
+//! A CLI whose provider keeps tokens in site storage turns on
+//! [`Launch::clear_site_storage`]. The profile keeps its cookies, so the
+//! provider's remembered device and single-sign-on session carry over, and
+//! never its site storage. A provider whose session lives in cookies has no
+//! need of it, and one that remembers the device in site storage sees an
+//! unknown device each time. These are removed from the kept profile:
+//!
+//! | In `Default/` | What a page's script keeps there |
+//! |---|---|
+//! | `Local Storage` | `localStorage` |
+//! | `Session Storage` | `sessionStorage` |
+//! | `IndexedDB` | IndexedDB |
+//! | `WebStorage` | storage buckets: each one's IndexedDB, Cache API and file system |
+//! | `Service Worker` | the Cache API, and the service workers themselves |
+//! | `File System` | the origin-private file system |
+//! | `databases` | Web SQL, in a Chromium old enough to have it |
+//!
+//! They are removed twice:
+//!
+//! - at launch, once the run lock is held and no Chrome is running there,
+//!   before Chrome starts. If that fails, the launch fails as
+//!   [`BrowserError::Profile`] naming the path, and no Chrome starts;
+//! - on close, once the [`Browser`] guard has stopped Chrome on drop, so a
+//!   refresh token does not sit on disk between runs. This is best effort,
+//!   with a warning on stderr for what would not go. A crash or a second Ctrl-C
+//!   skips it, and the next launch's removal covers that.
+//!
+//! A symlink at one of those paths, or inside them, is removed as a link and
+//! its target is never touched; a `Default` that is a symlink, is not a
+//! directory or is another user's refuses the launch. The cookie store and the
+//! rest of the profile stay, including the HTTP cache, which a page reads only
+//! by asking for a URL again. A Chrome profile the owner adds in the window
+//! keeps its own storage: only `Default` is cleared. A scratch profile is
+//! unaffected.
 //!
 //! # Trust boundary
 //!
@@ -189,7 +239,10 @@
 //! and `forget_named_profile_in(root, bin, name)` look under `root` instead
 //! of the per-user data dir, and `Launch::profile_root(root)` does the same
 //! for a launch (the profile is `<root>/piekstra.<bin>/browser-profile`).
-//! `example-cli`'s logout is the worked example.
+//! `auth status` takes [`profile_exists`] through a seam of the same kind,
+//! which tests fill with `profile_exists_in(root, bin)` or
+//! `named_profile_exists_in(root, bin, name)`. `example-cli`'s logout and
+//! status are the worked examples.
 //!
 //! The feature is for a CLI's `[dev-dependencies]` only, at the same tag as
 //! the dependency so both name one crate, which keeps the constructors out
@@ -224,9 +277,11 @@ pub use error::BrowserError;
 pub use host::HostRule;
 pub use interrupt::cancel;
 pub use jar::JarCookie;
-pub use profile::{forget_named_profile, forget_profile};
+pub use profile::{forget_named_profile, forget_profile, named_profile_exists, profile_exists};
 #[cfg(any(test, feature = "test-util"))]
-pub use profile::{forget_named_profile_in, forget_profile_in};
+pub use profile::{
+    forget_named_profile_in, forget_profile_in, named_profile_exists_in, profile_exists_in,
+};
 pub use watch::{CapturedRequest, LoggedRequest, RequestKind};
 
 /// The family's `auth login --browser` flags. Flatten them into the CLI's

@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+- `pk-cli-browser`: `Launch::clear_site_storage(bool)`, default off, for a CLI
+  whose provider keeps tokens in site storage. A kept profile retains that
+  storage, so on the next launch the site's own script can present a retired
+  refresh token, which reuse detection answers by revoking the whole token
+  family, a capture can read a stale bundle, and the token sits unencrypted on
+  disk between runs. With the option on, a kept profile keeps its cookies and
+  never `Default/Local Storage`, `Session Storage`, `IndexedDB`, `WebStorage`,
+  `Service Worker`, `File System` or `databases`. They are removed once the run
+  lock is held and no Chrome is running there, before Chrome starts (a failure
+  is `BrowserError::Profile` naming the path, and no Chrome starts), and again,
+  best effort, once the `Browser` guard has stopped Chrome. A crash or a second
+  Ctrl-C skips the second removal; the next launch's covers it. A symlink is
+  removed as a link and its target never touched; a `Default` that is a symlink
+  refuses the launch. No effect on a scratch profile.
+- `pk-cli-browser`: `profile_exists(bin)` and `named_profile_exists(bin, name)`
+  say whether a kept profile exists, for `auth status`. They answer and refuse
+  as `forget_profile` and `forget_named_profile` do, take no lock and create
+  nothing. `test-util` adds `profile_exists_in` and `named_profile_exists_in`.
+- `pk-cli-browser`: dropping a kept profile unlocks its run lock explicitly. On
+  a close alone, the lock lasted as long as a copy of the descriptor in a process
+  another thread was spawning, which refused the next sign-in as `ProfileInUse`.
+- `pk-cli-auth`: `AuthStatus` gains an optional `browser_profile`, left off the
+  wire when unset, within `auth-status/v1`.
+- `example-cli`: `auth status` reports the kept profile through a seam its tests
+  fill with `profile_exists_in`, and `auth login --browser` turns on
+  `clear_site_storage`, since its demo portal keeps tokens in `localStorage`.
+- `DESIGN.md` §1.4, §1.7, §2.2, `conformance.md`, `README.md`: these calls, and
+  when a CLI turns the option on.
+
 ## v0.18.0 — 2026-11-03
 
 - `pk-cli-auth`: `RefreshLock` covers a person around a login's and a logout's

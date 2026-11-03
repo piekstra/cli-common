@@ -144,7 +144,9 @@ pub(crate) fn chrome_args(profile: &Path, urls: &[String]) -> Vec<OsString> {
 /// (its remembered device, its single-sign-on session, a bot check's
 /// clearance) carry over to the next sign-in, which often finishes with no
 /// password or code. [`Launch::fresh_profile`] opts out for one run;
-/// [`forget_profile`](crate::forget_profile) removes the kept profile.
+/// [`forget_profile`](crate::forget_profile) removes the kept profile;
+/// [`Launch::clear_site_storage`] keeps its cookies but never its site
+/// storage.
 #[derive(Debug, Clone)]
 pub struct Launch {
     pub(crate) bin: String,
@@ -155,6 +157,7 @@ pub struct Launch {
     pub(crate) login_hint: Option<String>,
     fresh_profile: bool,
     profile_name: Option<String>,
+    clear_site_storage: bool,
     // The data dir the kept profile lives under; `None` is the real one.
     profile_root: Option<PathBuf>,
 }
@@ -172,6 +175,7 @@ impl Launch {
             login_hint: None,
             fresh_profile: false,
             profile_name: None,
+            clear_site_storage: false,
             profile_root: None,
         }
     }
@@ -241,6 +245,41 @@ impl Launch {
         self
     }
 
+    /// This CLI's provider keeps tokens in site storage, so keep the profile's
+    /// cookies but never its site storage. Turn it on when the provider keeps
+    /// tokens there (a rotating refresh token in `localStorage`, say); a
+    /// provider whose session lives in cookies has no need of it. Default off.
+    ///
+    /// A kept profile retains what a site stored. On the next launch the
+    /// site's own script can read a stale bundle and present its retired
+    /// refresh token, so reuse detection revokes the whole token family, a
+    /// capture can read the stale bundle, and the token sits unencrypted on
+    /// disk between runs.
+    ///
+    /// With this on, `Default/Local Storage`, `Session Storage`, `IndexedDB`,
+    /// `WebStorage`, `Service Worker`, `File System` and `databases` in the
+    /// kept profile are removed twice. [`spawn`](Launch::spawn) removes them
+    /// once it holds the run lock and no Chrome is running there, before
+    /// Chrome starts, and fails as [`BrowserError::Profile`], naming the
+    /// path and starting no Chrome, if it cannot. When the [`Browser`] guard
+    /// has stopped Chrome on drop they are removed again, best effort, with a
+    /// warning on stderr for what would not go. A crash or a second Ctrl-C
+    /// skips that second removal; the next launch's covers it.
+    ///
+    /// A symlink at one of those paths, or inside them, is removed as a link
+    /// and its target never touched; a `Default` that is a symlink, is not a
+    /// directory or is another user's refuses the launch. The cookie store and
+    /// the rest of the profile stay, so the provider keeps remembering the
+    /// device unless it does that in site storage too. Only `Default` is
+    /// cleared: a Chrome profile the owner adds in the window keeps its
+    /// storage. No effect on a scratch profile
+    /// ([`fresh_profile(true)`](Launch::fresh_profile), or a platform with no
+    /// kept profile).
+    pub fn clear_site_storage(mut self, clear: bool) -> Self {
+        self.clear_site_storage = clear;
+        self
+    }
+
     /// Keep the profile under `root` instead of the per-user data dir
     /// (`<root>/piekstra.<bin>/browser-profile`). For a CLI's tests only
     /// (the `test-util` feature), so a test that launches never reads or
@@ -261,8 +300,9 @@ impl Launch {
     /// the current user's or is not `0700`, and as
     /// [`BrowserError::ProfileInUse`] when another sign-in is using it or a
     /// Chrome is still running in it. What a Chrome that is no longer
-    /// running left in it (its lock, the old debug port) is removed. Off
-    /// unix there is no kept profile: the sign-in uses a scratch one and
+    /// running left in it (its lock, the old debug port) is removed, and so
+    /// is its site storage with [`clear_site_storage(true)`](Launch::clear_site_storage).
+    /// Off unix there is no kept profile: the sign-in uses a scratch one and
     /// says so in a note on stderr (unless quiet).
     pub fn spawn(self) -> Result<Browser, BrowserError> {
         if self.urls.is_empty() {
@@ -310,7 +350,12 @@ impl Launch {
                         ))
                     })?,
                 };
-                ProfileDir::open_kept(&root, &self.bin, self.profile_name.as_deref(), &chrome)?
+                let mut kept =
+                    ProfileDir::open_kept(&root, &self.bin, self.profile_name.as_deref(), &chrome)?;
+                if self.clear_site_storage {
+                    kept.clear_site_storage()?;
+                }
+                kept
             }
         };
         let child = Command::new(&chrome)
@@ -339,7 +384,8 @@ impl Launch {
 
 /// A running sign-in Chrome. Dropping it stops Chrome (SIGTERM, then
 /// SIGKILL after a grace period), then removes a scratch profile or, for
-/// the kept profile, releases it for the next sign-in.
+/// the kept profile, removes its site storage if the launch asked
+/// ([`Launch::clear_site_storage`]) and releases it for the next sign-in.
 pub struct Browser {
     child: Child,
     live: u64,
@@ -433,8 +479,9 @@ impl Drop for Browser {
     fn drop(&mut self) {
         self.stop();
         interrupt::unregister(self.live);
-        // `profile` drops after this: a scratch directory is removed, the
-        // kept one's lock released.
+        // `profile` drops after this, with Chrome stopped: a scratch directory
+        // is removed; the kept one's site storage is, if asked, and its lock
+        // released.
     }
 }
 
@@ -442,6 +489,10 @@ impl Drop for Browser {
 mod tests {
     use super::*;
     use crate::profile::unpredictable;
+    #[cfg(unix)]
+    use crate::profile::{CHROME_PROFILE, SITE_STORAGE};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn the_override_variable_follows_the_family_prefix() {
@@ -781,6 +832,313 @@ mod tests {
         let kept = crate::profile::kept_profile_path(&root, "pk-cli-browser-early", None);
         assert!(kept.is_dir());
         drop(fake_launch("pk-cli-browser-early", &root).spawn().unwrap());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A kept profile as earlier runs leave it, with its directory created
+    /// the way a launch creates it: the cookie store and preferences, and
+    /// every kind of site storage, holding dummy values.
+    #[cfg(unix)]
+    fn kept_profile_with_storage(root: &Path, bin: &str) -> PathBuf {
+        let kept = ProfileDir::open_kept(root, bin, None, Path::new(FAKE_CHROME))
+            .unwrap()
+            .path()
+            .to_path_buf();
+        plant_cookies(&kept);
+        plant_site_storage(&kept);
+        kept
+    }
+
+    #[cfg(unix)]
+    fn plant_cookies(profile: &Path) {
+        let default = profile.join(CHROME_PROFILE);
+        std::fs::create_dir_all(default.join("Network")).unwrap();
+        std::fs::write(default.join("Cookies"), "dummy-cookie").unwrap();
+        std::fs::write(default.join("Network").join("Cookies"), "dummy-cookie").unwrap();
+        std::fs::write(default.join("Preferences"), "{}").unwrap();
+    }
+
+    #[cfg(unix)]
+    fn plant_site_storage(profile: &Path) {
+        for name in SITE_STORAGE {
+            let dir = profile.join(CHROME_PROFILE).join(name).join("leveldb");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("000003.log"), "dummy-refresh-token").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_cookies_kept(profile: &Path) {
+        let default = profile.join(CHROME_PROFILE);
+        for file in [
+            default.join("Cookies"),
+            default.join("Network").join("Cookies"),
+        ] {
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "dummy-cookie");
+        }
+        assert!(default.join("Preferences").exists());
+    }
+
+    /// Which of the site storage paths are there, links included.
+    #[cfg(unix)]
+    fn storage_left(profile: &Path) -> Vec<&'static str> {
+        SITE_STORAGE
+            .into_iter()
+            .filter(|name| {
+                std::fs::symlink_metadata(profile.join(CHROME_PROFILE).join(name)).is_ok()
+            })
+            .collect()
+    }
+
+    /// What the fake Chrome found in `Default` as it started.
+    #[cfg(unix)]
+    fn default_at_launch(profile: &Path) -> Vec<String> {
+        std::fs::read_to_string(profile.join("default-at-launch"))
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    /// The whole run: nothing of the site storage is there when Chrome
+    /// starts, and what a Chrome writes while it runs, and as it stops, is
+    /// gone once the guard has dropped. The cookies stay throughout.
+    #[cfg(unix)]
+    #[test]
+    fn site_storage_goes_before_chrome_starts_and_again_once_it_stops() {
+        let root = temp_root("storage");
+        let bin = "pk-cli-browser-storage";
+        let kept = kept_profile_with_storage(&root, bin);
+
+        let browser = fake_launch(bin, &root)
+            .url("https://flush-on-stop.example/")
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap();
+        let pid = browser.child.id();
+        let found = default_at_launch(&kept);
+        for name in SITE_STORAGE {
+            assert!(!found.iter().any(|f| f == name), "{name} in {found:?}");
+        }
+        for name in ["Cookies", "Network", "Preferences"] {
+            assert!(found.iter().any(|f| f == name), "{name} in {found:?}");
+        }
+        assert_cookies_kept(&kept);
+
+        plant_site_storage(&kept);
+        drop(browser);
+        assert!(!alive(pid), "Chrome is stopped");
+        assert!(
+            kept.join("flushed-on-stop").exists(),
+            "Chrome wrote to its storage as it stopped"
+        );
+        assert_eq!(storage_left(&kept), [] as [&str; 0]);
+        assert_cookies_kept(&kept);
+        assert!(kept.join("pk-cli-browser.lock").exists());
+
+        // The next sign-in goes ahead in the same profile.
+        drop(
+            fake_launch(bin, &root)
+                .clear_site_storage(true)
+                .spawn()
+                .unwrap(),
+        );
+        assert_cookies_kept(&kept);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_profile_is_cleared_on_its_own() {
+        let root = temp_root("storage-named");
+        let bin = "pk-cli-browser-storage-named";
+        let kept = kept_profile_with_storage(&root, bin);
+        let named = crate::profile::kept_profile_path(&root, bin, Some("member-a"));
+        std::fs::create_dir_all(&named).unwrap();
+        std::fs::set_permissions(&named, std::fs::Permissions::from_mode(0o700)).unwrap();
+        plant_cookies(&named);
+        plant_site_storage(&named);
+
+        let browser = fake_launch(bin, &root)
+            .profile_name("member-a")
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap();
+        assert_eq!(storage_left(&named), [] as [&str; 0]);
+        drop(browser);
+        assert_cookies_kept(&named);
+        assert_eq!(storage_left(&kept), SITE_STORAGE, "the default one is left");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Permissions do not bind for root, so it is skipped there.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_that_cannot_remove_site_storage_starts_no_chrome() {
+        // SAFETY: geteuid(2) takes no arguments and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = temp_root("storage-stuck");
+        let bin = "pk-cli-browser-storage-stuck";
+        let kept = kept_profile_with_storage(&root, bin);
+        let default = kept.join(CHROME_PROFILE);
+
+        std::fs::set_permissions(&default, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let err = fake_launch(bin, &root)
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap_err();
+        std::fs::set_permissions(&default, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(matches!(err, BrowserError::Profile(_)), "{err:?}");
+        let msg = err.to_string();
+        let path = default.join(SITE_STORAGE[0]);
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        assert!(msg.contains("refusing to launch"), "{msg}");
+        assert_eq!(err.exit_code(), 1);
+        assert!(!kept.join("args").exists(), "no Chrome started");
+        assert_cookies_kept(&kept);
+
+        // Repaired, the next sign-in goes ahead: the refusal freed the lock.
+        drop(
+            fake_launch(bin, &root)
+                .clear_site_storage(true)
+                .spawn()
+                .unwrap(),
+        );
+        assert!(kept.join("args").exists());
+        assert_eq!(storage_left(&kept), [] as [&str; 0]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A link at each path, at launch and again on close, and one inside a
+    /// real directory: each goes as a link, and what it points to stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_site_storage_is_removed_and_its_target_left() {
+        use std::os::unix::fs::symlink;
+        let root = temp_root("storage-link");
+        let bin = "pk-cli-browser-storage-link";
+        let outside = root.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let keep = outside.join("keep");
+        std::fs::write(&keep, "dummy-refresh-token").unwrap();
+        let kept = ProfileDir::open_kept(&root, bin, None, Path::new(FAKE_CHROME))
+            .unwrap()
+            .path()
+            .to_path_buf();
+        plant_cookies(&kept);
+        let default = kept.join(CHROME_PROFILE);
+        let plant_links = || {
+            symlink(&outside, default.join("Local Storage")).unwrap();
+            symlink(&keep, default.join("Session Storage")).unwrap();
+            symlink(root.join("gone"), default.join("WebStorage")).unwrap();
+            std::fs::create_dir(default.join("IndexedDB")).unwrap();
+            symlink(&outside, default.join("IndexedDB").join("link")).unwrap();
+        };
+        let assert_target_untouched = || {
+            assert_eq!(
+                std::fs::read_to_string(&keep).unwrap(),
+                "dummy-refresh-token"
+            );
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+        };
+
+        plant_links();
+        let browser = fake_launch(bin, &root)
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap();
+        assert_eq!(storage_left(&kept), [] as [&str; 0]);
+        assert_target_untouched();
+
+        plant_links();
+        drop(browser);
+        assert_eq!(storage_left(&kept), [] as [&str; 0]);
+        assert_target_untouched();
+        assert_cookies_kept(&kept);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// `Default` itself a link: every path would go through it, so nothing
+    /// is removed and no Chrome starts.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_chrome_profile_refuses_the_launch_and_keeps_its_target() {
+        let root = temp_root("storage-default-link");
+        let bin = "pk-cli-browser-storage-default-link";
+        let outside = root.join("outside");
+        plant_site_storage(&outside);
+        let kept = ProfileDir::open_kept(&root, bin, None, Path::new(FAKE_CHROME))
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let link = kept.join(CHROME_PROFILE);
+        std::os::unix::fs::symlink(outside.join(CHROME_PROFILE), &link).unwrap();
+
+        let err = fake_launch(bin, &root)
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap_err();
+        assert!(matches!(err, BrowserError::Profile(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains(&link.display().to_string()), "{msg}");
+        assert!(msg.contains("is a symlink; refusing to launch"), "{msg}");
+        assert!(!kept.join("args").exists(), "no Chrome started");
+        assert_eq!(storage_left(&outside), SITE_STORAGE);
+        assert!(std::fs::symlink_metadata(&link).is_ok(), "the link stays");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_the_option_off_site_storage_stays() {
+        let root = temp_root("storage-off");
+        let bin = "pk-cli-browser-storage-off";
+        let kept = kept_profile_with_storage(&root, bin);
+        for launch in [
+            fake_launch(bin, &root),
+            fake_launch(bin, &root).clear_site_storage(false),
+        ] {
+            let browser = launch.spawn().unwrap();
+            let found = default_at_launch(&kept);
+            for name in SITE_STORAGE {
+                assert!(found.iter().any(|f| f == name), "{name} in {found:?}");
+            }
+            drop(browser);
+            assert_eq!(storage_left(&kept), SITE_STORAGE);
+            assert_cookies_kept(&kept);
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A scratch profile runs as it would without the option, and the kept
+    /// one is neither read nor changed.
+    #[cfg(unix)]
+    #[test]
+    fn a_scratch_profile_ignores_the_option() {
+        let root = temp_root("storage-scratch");
+        let bin = "pk-cli-browser-storage-scratch";
+        let kept = kept_profile_with_storage(&root, bin);
+
+        let browser = fake_launch(bin, &root)
+            .fresh_profile(true)
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap();
+        let scratch = browser.profile.path().to_path_buf();
+        assert!(scratch.starts_with(std::env::temp_dir()));
+        assert_ne!(scratch, kept);
+        assert_eq!(browser.profile.scratch_path(), Some(scratch.clone()));
+        assert_eq!(default_at_launch(&scratch), [] as [&str; 0]);
+        plant_site_storage(&scratch);
+        drop(browser);
+
+        assert!(!scratch.exists(), "removed whole, as any scratch profile");
+        assert_eq!(storage_left(&kept), SITE_STORAGE);
+        assert_cookies_kept(&kept);
+        assert!(!kept.join("args").exists(), "the kept one is not launched");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
