@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
+
+use crate::cdp::{Cdp, CdpError, WsTransport};
 use crate::error::BrowserError;
 use crate::host::parse_url;
 use crate::interrupt;
@@ -17,6 +20,11 @@ use crate::profile::{
 const PORT_DEADLINE: Duration = Duration::from_secs(20);
 /// How long Chrome gets to shut down on SIGTERM before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(3);
+/// How long a kept profile's Chrome gets to quit when asked over its debug
+/// port, connecting included, before the signals take over. Its exit ends the
+/// wait, so this costs time only when Chrome is stuck. It is about twice the
+/// slowest exit measured on an overloaded machine (DESIGN.md §2.2).
+const CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 /// Where Chrome (or a Chromium build with the same DevTools protocol) is
 /// installed, in search order.
@@ -294,7 +302,7 @@ impl Launch {
     }
 
     /// Launch Chrome and wait (up to 20 s) for its debug port. The returned
-    /// [`Browser`] kills Chrome when dropped, on every path including errors
+    /// [`Browser`] stops Chrome when dropped, on every path including errors
     /// after this point, and removes a scratch profile; the kept profile
     /// stays for the next sign-in.
     ///
@@ -375,6 +383,7 @@ impl Launch {
             port: 0,
             ws_path: String::new(),
             launch: self,
+            close_grace: CLOSE_GRACE,
             profile,
         };
         let (port, path) = browser.read_active_port()?;
@@ -385,16 +394,20 @@ impl Launch {
     }
 }
 
-/// A running sign-in Chrome. Dropping it stops Chrome (SIGTERM, then
-/// SIGKILL after a grace period), then removes a scratch profile or, for
-/// the kept profile, removes its site storage if the launch asked
-/// ([`Launch::clear_site_storage`]) and releases it for the next sign-in.
+/// A running sign-in Chrome. Dropping it stops Chrome, then removes a scratch
+/// profile or, for the kept profile, removes its site storage if the launch
+/// asked ([`Launch::clear_site_storage`]) and releases it for the next sign-in.
+/// Chrome in the kept profile is first asked to quit over its debug port, so
+/// that it writes a cookie it just received to disk. If that fails or takes too
+/// long, and for a scratch profile, it gets SIGTERM, then SIGKILL after a grace
+/// period.
 pub struct Browser {
     child: Child,
     live: u64,
     pub(crate) port: u16,
     pub(crate) ws_path: String,
     pub(crate) launch: Launch,
+    close_grace: Duration,
     // Last: removed or released after the child has been stopped by
     // `Drop::drop`.
     profile: ProfileDir,
@@ -448,8 +461,42 @@ impl Browser {
         }
     }
 
+    /// Ask Chrome to quit over its debug port and wait for it to exit. Chrome
+    /// holds a cookie it just received in memory and writes it on a normal
+    /// exit, which SIGTERM skips. `false` means it is still running.
+    fn close_over_debug_port(&mut self) -> bool {
+        // Zero is a launch that ended before the port was read.
+        if self.port == 0 {
+            return false;
+        }
+        let deadline = Instant::now() + self.close_grace;
+        let Ok(transport) = WsTransport::connect(self.port, &self.ws_path) else {
+            return false;
+        };
+        let answer_within = deadline.saturating_duration_since(Instant::now());
+        // Never canceled: a first Ctrl-C is one way to get here, and the
+        // cookie is still worth keeping.
+        let mut cdp = Cdp::new(transport, answer_within, || false);
+        match cdp.call("Browser.close", Value::Null, None) {
+            // Chrome can close the socket before it answers.
+            Ok(_) | Err(CdpError::Transport(_)) => {}
+            Err(_) => return false,
+        }
+        while Instant::now() < deadline {
+            if self.try_reap().is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
     fn stop(&mut self) {
         if self.try_reap().is_some() {
+            return;
+        }
+        // A scratch profile is about to be removed, so its cookies do not matter.
+        if self.profile.scratch_path().is_none() && self.close_over_debug_port() {
             return;
         }
         #[cfg(unix)]
@@ -496,6 +543,10 @@ mod tests {
     use crate::profile::{CHROME_PROFILE, SITE_STORAGE};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(unix)]
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn the_override_variable_follows_the_family_prefix() {
@@ -646,8 +697,8 @@ mod tests {
 
     /// A stand-in for Chrome (tests/fixtures/fake-chrome.sh) that writes
     /// `DevToolsActivePort` into the profile and sleeps, or exits early when
-    /// its start page asks it to. Exercises launch, the port read and the
-    /// teardown without a browser.
+    /// its start page asks it to, or plays along with a [`FakeDebugPort`].
+    /// Exercises launch, the port read and the teardown without a browser.
     #[cfg(unix)]
     const FAKE_CHROME: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake-chrome.sh");
 
@@ -838,6 +889,423 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// What the stand-in debug port does when asked for `Browser.close`.
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum OnClose {
+        AnswerAndExit,
+        /// Closes the socket unanswered, and Chrome exits.
+        HangUpAndExit,
+        /// Chrome answers and stays up.
+        AnswerAndStay,
+        NeverAnswer,
+        Refuse,
+    }
+
+    /// A loopback websocket standing in for Chrome's debug port, for a fake
+    /// Chrome started with [`close_url`] in the kept profile `profile`.
+    #[cfg(unix)]
+    struct FakeDebugPort {
+        port: u16,
+        connections: Arc<AtomicUsize>,
+        methods: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[cfg(unix)]
+    impl FakeDebugPort {
+        fn start(profile: PathBuf, on_close: OnClose) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let connections = Arc::default();
+            let methods = Arc::default();
+            let debug_port = FakeDebugPort {
+                port,
+                connections: Arc::clone(&connections),
+                methods: Arc::clone(&methods),
+            };
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    connections.fetch_add(1, Ordering::SeqCst);
+                    let mut ws = tungstenite::accept(stream.unwrap()).unwrap();
+                    let Ok(tungstenite::Message::Text(text)) = ws.read() else {
+                        continue;
+                    };
+                    let request: Value = serde_json::from_str(text.as_str()).unwrap();
+                    methods
+                        .lock()
+                        .unwrap()
+                        .push(request["method"].as_str().unwrap().to_owned());
+                    std::fs::write(profile.join("close-seen"), "").unwrap();
+                    let reply = match on_close {
+                        OnClose::AnswerAndExit | OnClose::AnswerAndStay => {
+                            serde_json::json!({"id": request["id"], "result": {}})
+                        }
+                        OnClose::Refuse => serde_json::json!({
+                            "id": request["id"],
+                            "error": {"code": -32601, "message": "not here"},
+                        }),
+                        OnClose::HangUpAndExit => {
+                            drop(ws);
+                            std::fs::write(profile.join("close-now"), "").unwrap();
+                            continue;
+                        }
+                        OnClose::NeverAnswer => {
+                            while ws.read().is_ok() {}
+                            continue;
+                        }
+                    };
+                    ws.send(tungstenite::Message::text(reply.to_string()))
+                        .unwrap();
+                    if matches!(on_close, OnClose::AnswerAndExit) {
+                        std::fs::write(profile.join("close-now"), "").unwrap();
+                    }
+                    while ws.read().is_ok() {}
+                }
+            });
+            debug_port
+        }
+
+        fn connections(&self) -> usize {
+            self.connections.load(Ordering::SeqCst)
+        }
+
+        fn methods(&self) -> Vec<String> {
+            self.methods.lock().unwrap().clone()
+        }
+    }
+
+    /// A start page that makes the fake Chrome advertise `port`, wait for
+    /// `close-now` in its profile and leave a marker saying how it was stopped.
+    #[cfg(unix)]
+    fn close_url(port: u16) -> String {
+        format!("https://close-port-{port}.example/")
+    }
+
+    #[cfg(unix)]
+    fn closed_over_the_port(profile: &Path) -> bool {
+        profile.join("closed-over-port").exists()
+    }
+
+    #[cfg(unix)]
+    fn stopped_by_signal(profile: &Path) -> bool {
+        profile.join("stopped-by-signal").exists()
+    }
+
+    #[cfg(unix)]
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let bound = Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(Instant::now() < bound, "waited too long for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The default path: Chrome quits when asked, nothing signals it, and the
+    /// kept profile is free for the next sign-in.
+    #[cfg(unix)]
+    #[test]
+    fn chrome_in_a_kept_profile_is_closed_over_its_debug_port() {
+        let root = temp_root("close");
+        let bin = "pk-cli-browser-close";
+        let kept = crate::profile::kept_profile_path(&root, bin, None);
+        let debug = FakeDebugPort::start(kept.clone(), OnClose::AnswerAndExit);
+        let browser = fake_launch(bin, &root)
+            .url(close_url(debug.port))
+            .spawn()
+            .unwrap();
+        assert_eq!(browser.port, debug.port);
+        let pid = browser.child.id();
+
+        drop(browser);
+        assert_eq!(debug.methods(), ["Browser.close"]);
+        assert!(closed_over_the_port(&kept));
+        assert!(!stopped_by_signal(&kept));
+        assert!(!alive(pid), "Chrome is stopped");
+        drop(fake_launch(bin, &root).spawn().unwrap());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Chrome can go before its answer does: the socket closing is not a
+    /// failure while Chrome is on its way out.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_closed_before_the_answer_still_waits_for_the_exit() {
+        let root = temp_root("close-hangup");
+        let bin = "pk-cli-browser-close-hangup";
+        let kept = crate::profile::kept_profile_path(&root, bin, None);
+        let debug = FakeDebugPort::start(kept.clone(), OnClose::HangUpAndExit);
+        let browser = fake_launch(bin, &root)
+            .url(close_url(debug.port))
+            .spawn()
+            .unwrap();
+
+        drop(browser);
+        assert_eq!(debug.methods(), ["Browser.close"]);
+        assert!(closed_over_the_port(&kept));
+        assert!(!stopped_by_signal(&kept));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Nothing on the port: the signals take over at once, without the wait.
+    #[cfg(unix)]
+    #[test]
+    fn a_dead_debug_port_falls_back_to_the_signals_at_once() {
+        let root = temp_root("close-dead");
+        let bin = "pk-cli-browser-close-dead";
+        let kept = crate::profile::kept_profile_path(&root, bin, None);
+        let closed_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let mut browser = fake_launch(bin, &root)
+            .url(close_url(closed_port))
+            .spawn()
+            .unwrap();
+        browser.close_grace = Duration::from_secs(30);
+        let pid = browser.child.id();
+
+        let started = Instant::now();
+        drop(browser);
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert!(stopped_by_signal(&kept));
+        assert!(!closed_over_the_port(&kept));
+        assert!(!alive(pid), "Chrome is stopped");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A port that takes the connection and never speaks costs the bound on
+    /// the handshake, then the signals take over.
+    #[cfg(unix)]
+    #[test]
+    fn a_port_that_never_finishes_the_handshake_falls_back_to_the_signals() {
+        let root = temp_root("close-mute");
+        let bin = "pk-cli-browser-close-mute";
+        let kept = crate::profile::kept_profile_path(&root, bin, None);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut browser = fake_launch(bin, &root)
+            .url(close_url(port))
+            .spawn()
+            .unwrap();
+        browser.close_grace = Duration::from_secs(30);
+
+        let started = Instant::now();
+        drop(browser);
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert!(stopped_by_signal(&kept));
+        drop(listener);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Chrome answers, or nothing does, and it does not exit: the wait ends at
+    /// the bound, and the signals stop it.
+    #[cfg(unix)]
+    #[test]
+    fn a_chrome_that_does_not_quit_falls_back_to_the_signals_at_the_bound() {
+        for (tag, on_close) in [
+            ("stay", OnClose::AnswerAndStay),
+            ("silent", OnClose::NeverAnswer),
+        ] {
+            let root = temp_root(&format!("close-{tag}"));
+            let bin = format!("pk-cli-browser-close-{tag}");
+            let kept = crate::profile::kept_profile_path(&root, &bin, None);
+            let debug = FakeDebugPort::start(kept.clone(), on_close);
+            let mut browser = fake_launch(&bin, &root)
+                .url(close_url(debug.port))
+                .spawn()
+                .unwrap();
+            browser.close_grace = Duration::from_millis(400);
+            let pid = browser.child.id();
+
+            let started = Instant::now();
+            drop(browser);
+            let took = started.elapsed();
+            assert!(took >= Duration::from_millis(400), "{tag}: {took:?}");
+            assert!(took < CLOSE_GRACE + STOP_GRACE, "{tag}: {took:?}");
+            assert_eq!(debug.methods(), ["Browser.close"], "{tag}");
+            assert!(stopped_by_signal(&kept), "{tag}");
+            assert!(!closed_over_the_port(&kept), "{tag}");
+            assert!(!alive(pid), "{tag}: Chrome is stopped");
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    /// A refusal is an answer: there is no point waiting out the bound.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_close_falls_back_to_the_signals_at_once() {
+        let root = temp_root("close-refused");
+        let bin = "pk-cli-browser-close-refused";
+        let kept = crate::profile::kept_profile_path(&root, bin, None);
+        let debug = FakeDebugPort::start(kept.clone(), OnClose::Refuse);
+        let mut browser = fake_launch(bin, &root)
+            .url(close_url(debug.port))
+            .spawn()
+            .unwrap();
+        browser.close_grace = Duration::from_secs(30);
+
+        let started = Instant::now();
+        drop(browser);
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert_eq!(debug.methods(), ["Browser.close"]);
+        assert!(stopped_by_signal(&kept));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A scratch profile's cookies go with it, so nothing connects, and a
+    /// Chrome that has already exited has nothing left to ask.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_running_chrome_in_a_kept_profile_is_asked_to_close() {
+        let root = temp_root("close-not");
+        let bin = "pk-cli-browser-close-not";
+        let kept = crate::profile::kept_profile_path(&root, bin, None);
+        let debug = FakeDebugPort::start(kept.clone(), OnClose::AnswerAndExit);
+
+        let scratch = fake_launch(bin, &root)
+            .url(close_url(debug.port))
+            .fresh_profile(true)
+            .spawn()
+            .unwrap();
+        let pid = scratch.child.id();
+        drop(scratch);
+        assert!(!alive(pid), "Chrome is stopped");
+        assert_eq!(debug.connections(), 0, "scratch");
+
+        let mut gone = fake_launch(bin, &root)
+            .url(close_url(debug.port))
+            .spawn()
+            .unwrap();
+        std::fs::write(kept.join("close-now"), "").unwrap();
+        wait_for("the fake Chrome to exit", || gone.exited());
+        drop(gone);
+        assert_eq!(debug.connections(), 0, "already exited");
+
+        // A launch that ended before the port was read has no port to ask.
+        std::fs::remove_file(kept.join("close-now")).unwrap();
+        let mut unread = fake_launch(bin, &root)
+            .url(close_url(debug.port))
+            .spawn()
+            .unwrap();
+        unread.port = 0;
+        drop(unread);
+        assert_eq!(debug.connections(), 0, "port not read");
+        assert!(stopped_by_signal(&kept));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    const CTRL_C_CHILD_ROOT: &str = "PK_CLI_BROWSER_TEST_CTRL_C_ROOT";
+
+    /// The child half of the Ctrl-C tests, which need a process of their own:
+    /// the handler and the cancel flag are process-wide, and a second Ctrl-C
+    /// exits the process. A CLI waiting on a Chrome that drops its guard on
+    /// the first Ctrl-C and exits 0 once the guard has dropped.
+    #[cfg(unix)]
+    fn ctrl_c_child(root: &Path, on_close: OnClose) -> ! {
+        let bin = "pk-cli-browser-ctrl-c";
+        let kept = crate::profile::kept_profile_path(root, bin, None);
+        let debug = FakeDebugPort::start(kept, on_close);
+        let browser = fake_launch(bin, root)
+            .url(close_url(debug.port))
+            .ctrl_c(true)
+            .spawn()
+            .unwrap();
+        std::fs::write(root.join("chrome-pid"), browser.child.id().to_string()).unwrap();
+        while !interrupt::canceled() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(browser);
+        std::process::exit(0);
+    }
+
+    /// Start this test binary again, running just `test` as the child.
+    #[cfg(unix)]
+    fn start_ctrl_c_child(test: &str, root: &Path) -> (std::process::Child, u32) {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--test-threads=1"])
+            .env(CTRL_C_CHILD_ROOT, root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut chrome = None;
+        wait_for("the child's Chrome", || {
+            chrome = std::fs::read_to_string(root.join("chrome-pid"))
+                .ok()
+                .and_then(|pid| pid.parse().ok());
+            chrome.is_some()
+        });
+        (child, chrome.unwrap())
+    }
+
+    #[cfg(unix)]
+    fn interrupt_process(child: &std::process::Child) {
+        // SAFETY: kill(2) on a child this test spawned and has not reaped.
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+        }
+    }
+
+    #[cfg(unix)]
+    fn exit_code_of(child: &mut std::process::Child) -> Option<i32> {
+        let mut status = None;
+        wait_for("the child to exit", || {
+            status = child.try_wait().unwrap();
+            status.is_some()
+        });
+        status.unwrap().code()
+    }
+
+    /// The close runs after a first Ctrl-C, which is what a canceled wait
+    /// looks like to the guard.
+    #[cfg(unix)]
+    #[test]
+    fn a_first_ctrl_c_still_closes_over_the_debug_port() {
+        if let Ok(root) = std::env::var(CTRL_C_CHILD_ROOT) {
+            ctrl_c_child(Path::new(&root), OnClose::AnswerAndExit);
+        }
+        let root = temp_root("ctrl-c-once");
+        let kept = crate::profile::kept_profile_path(&root, "pk-cli-browser-ctrl-c", None);
+        let (mut child, _chrome) = start_ctrl_c_child(
+            "chrome::tests::a_first_ctrl_c_still_closes_over_the_debug_port",
+            &root,
+        );
+
+        interrupt_process(&child);
+        assert_eq!(exit_code_of(&mut child), Some(0));
+        assert!(closed_over_the_port(&kept));
+        assert!(!stopped_by_signal(&kept));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A second Ctrl-C does not wait for the close: it kills Chrome and exits
+    /// 130, well inside the bound, and the kept profile stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_ctrl_c_during_the_close_exits_at_once() {
+        if let Ok(root) = std::env::var(CTRL_C_CHILD_ROOT) {
+            ctrl_c_child(Path::new(&root), OnClose::NeverAnswer);
+        }
+        let root = temp_root("ctrl-c-twice");
+        let kept = crate::profile::kept_profile_path(&root, "pk-cli-browser-ctrl-c", None);
+        let (mut child, chrome) = start_ctrl_c_child(
+            "chrome::tests::a_second_ctrl_c_during_the_close_exits_at_once",
+            &root,
+        );
+
+        interrupt_process(&child);
+        wait_for("the close to start", || kept.join("close-seen").exists());
+        let started = Instant::now();
+        interrupt_process(&child);
+        assert_eq!(exit_code_of(&mut child), Some(130));
+        assert!(started.elapsed() < CLOSE_GRACE);
+        wait_for("Chrome to be gone", || !alive(chrome));
+        assert!(!stopped_by_signal(&kept), "killed, not signaled to stop");
+        assert!(kept.is_dir());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// A kept profile as earlier runs leave it, with its directory created
     /// the way a launch creates it: the cookie store and preferences, and
     /// every kind of site storage, holding dummy values.
@@ -905,7 +1373,9 @@ mod tests {
 
     /// The whole run: nothing of the site storage is there when Chrome
     /// starts, and what a Chrome writes while it runs, and as it stops, is
-    /// gone once the guard has dropped. The cookies stay throughout.
+    /// gone once the guard has dropped. The cookies stay throughout. Nothing
+    /// listens on this fake's port, so this is the signal path, and
+    /// `what_chrome_writes_as_it_closes_over_the_port_is_removed` is the close.
     #[cfg(unix)]
     #[test]
     fn site_storage_goes_before_chrome_starts_and_again_once_it_stops() {
@@ -931,6 +1401,7 @@ mod tests {
         plant_site_storage(&kept);
         drop(browser);
         assert!(!alive(pid), "Chrome is stopped");
+        assert!(stopped_by_signal(&kept));
         assert!(
             kept.join("flushed-on-stop").exists(),
             "Chrome wrote to its storage as it stopped"
@@ -947,6 +1418,75 @@ mod tests {
                 .unwrap(),
         );
         assert_cookies_kept(&kept);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The close waits for Chrome's exit before the storage goes, so the removal
+    /// takes what that exit wrote.
+    #[cfg(unix)]
+    #[test]
+    fn what_chrome_writes_as_it_closes_over_the_port_is_removed() {
+        let root = temp_root("storage-close");
+        let bin = "pk-cli-browser-storage-close";
+        let kept = kept_profile_with_storage(&root, bin);
+        let debug = FakeDebugPort::start(kept.clone(), OnClose::AnswerAndExit);
+
+        let browser = fake_launch(bin, &root)
+            .url(close_url(debug.port))
+            .url("https://flush-on-stop.example/")
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap();
+        let found = default_at_launch(&kept);
+        for name in SITE_STORAGE {
+            assert!(!found.iter().any(|f| f == name), "{name} in {found:?}");
+        }
+
+        plant_site_storage(&kept);
+        drop(browser);
+        assert_eq!(debug.methods(), ["Browser.close"]);
+        assert!(closed_over_the_port(&kept));
+        assert!(!stopped_by_signal(&kept));
+        assert!(
+            kept.join("flushed-on-stop").exists(),
+            "Chrome wrote to its storage as it closed"
+        );
+        assert_eq!(storage_left(&kept), [] as [&str; 0]);
+        assert_cookies_kept(&kept);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The check for a running Chrome comes after the close, not before it: the
+    /// process asked to quit exits, the browser holding the profile does not
+    /// (a relaunch to update), and its storage is not removed under it.
+    #[cfg(unix)]
+    #[test]
+    fn a_chrome_left_running_after_the_close_keeps_its_storage() {
+        let root = temp_root("storage-close-holder");
+        let bin = "pk-cli-browser-storage-close-holder";
+        let kept = kept_profile_with_storage(&root, bin);
+        let debug = FakeDebugPort::start(kept.clone(), OnClose::AnswerAndExit);
+        let mut holder = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+
+        let browser = fake_launch(bin, &root)
+            .url(close_url(debug.port))
+            .url(format!("https://leave-holder-{}.example/", holder.id()))
+            .clear_site_storage(true)
+            .spawn()
+            .unwrap();
+        plant_site_storage(&kept);
+        drop(browser);
+        assert_eq!(debug.methods(), ["Browser.close"]);
+        assert!(closed_over_the_port(&kept));
+        assert!(alive(holder.id()));
+        assert_eq!(storage_left(&kept), SITE_STORAGE, "not removed under it");
+        assert_cookies_kept(&kept);
+
+        holder.kill().unwrap();
+        holder.wait().unwrap();
         std::fs::remove_dir_all(&root).unwrap();
     }
 

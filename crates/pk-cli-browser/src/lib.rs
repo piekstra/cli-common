@@ -10,7 +10,8 @@
 //! (password and MFA happen on the provider's page, never through the CLI),
 //! reads the session the web app keeps (a `localStorage` entry, a cookie,
 //! `HttpOnly` cookies included, or a domain's whole cookie jar) over the
-//! Chrome DevTools Protocol, closes the tab at once and kills Chrome. The
+//! Chrome DevTools Protocol, closes the tab at once and stops Chrome (on a
+//! kept profile by asking it to quit, so a fresh cookie is written). The
 //! profile is kept for the next sign-in ([below](#the-kept-profile)).
 //!
 //! ```no_run
@@ -121,6 +122,12 @@
 //!   for a CLI's `auth status`. They take no lock and create nothing, and
 //!   they refuse what [`forget_profile`] refuses. A `true` says a profile is
 //!   kept, not that anything is signed in there.
+//!
+//! Chrome holds a cookie it just received in memory until it writes it, so
+//! dropping the [`Browser`] asks Chrome to quit over its debug port and waits
+//! for it to exit, which writes the cookie for the next sign-in. If the port is
+//! dead or Chrome has not exited within 5 seconds, it gets SIGTERM, then SIGKILL
+//! after 3 more, and SIGTERM can lose that cookie.
 //!
 //! A CLI that signs in more than one account at a provider keeps one
 //! profile per account ([`Launch::profile_name`],

@@ -33,6 +33,15 @@
 - `pk-cli-browser`: dropping a kept profile unlocks its run lock explicitly. On
   a close alone, the lock lasted as long as a copy of the descriptor in a process
   another thread was spawning, which refused the next sign-in as `ProfileInUse`.
+- `pk-cli-browser`: dropping the `Browser` guard on a kept profile asks Chrome to
+  quit over its debug port (`Browser.close`) and waits up to 5 s for it to exit,
+  so a persistent cookie the provider set just before the close is on disk for
+  the next launch. SIGTERM lost it in most runs. A dead connection or a refusal
+  goes straight to SIGTERM, and a Chrome still running at 5 s gets it then, so a
+  stuck Chrome holds a CLI for up to 11 s, up from 6 s. A normal drop takes about
+  80 ms, up from about 55 ms. A second Ctrl-C stays immediate, and a scratch
+  profile is stopped as before. Measured in headless Chrome 156 only: a visible
+  window is unverified (DESIGN.md §2.2).
 - `pk-cli-auth`: `AuthStatus` gains an optional `browser_profile`, left off the
   wire when unset, within `auth-status/v1`. `AuthStatus` is `#[non_exhaustive]`,
   so it must be built with `AuthStatus::new` or `not_required`: a struct literal,
