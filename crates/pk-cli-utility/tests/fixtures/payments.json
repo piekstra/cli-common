@@ -1,0 +1,4 @@
+[
+  { "date": "2026-06-20", "amount": { "amount": "23.45", "currency": "USD" }, "method": "EFT", "status": "posted", "confirmation": "CONF0001" },
+  { "date": "2026-05-20", "amount": { "amount": "34.56", "currency": "USD" }, "method": "CARD", "confirmation": "CONF0002" }
+]

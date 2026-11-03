@@ -18,10 +18,16 @@
 //!
 //! A CLI advertises the profile via `info`:
 //! `CliInfo::new(...).with_profiles(&[pk_cli_utility::PROFILE])`.
+//!
+//! Feature `mcp` adds the profile's MCP tools, written once for every CLI
+//! here: see [`mcp`].
 
 use pk_cli_core::{output, Money};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+#[cfg(feature = "mcp")]
+pub mod mcp;
 
 /// The list envelope ([`Paged`]) and range flags ([`RangeArgs`]) every profile
 /// `list` command uses now live in `pk-cli-core` — they are profile-agnostic.

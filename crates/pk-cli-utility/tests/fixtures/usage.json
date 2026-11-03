@@ -1,0 +1,6 @@
+[
+  { "period": "2026-06", "quantity": 111.5, "unit": "kWh", "cost": { "amount": "12.34", "currency": "USD" } },
+  { "period": "2026-05-28", "quantity": 222.0, "unit": "kWh" },
+  { "period": "2026-04", "quantity": 333.0, "unit": "kWh" },
+  { "period": "Spring cycle", "quantity": 44.0, "unit": "kWh" }
+]

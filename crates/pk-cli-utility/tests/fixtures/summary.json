@@ -1,0 +1,7 @@
+{
+  "schema": "utility-summary/v1",
+  "balance": { "amount": "12.34", "currency": "USD" },
+  "due_date": "2026-08-01",
+  "account": "1234567890",
+  "autopay": true
+}
