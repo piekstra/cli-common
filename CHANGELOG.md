@@ -22,6 +22,74 @@
   note and what its `SECURITY.md` must say about the token, the Worker's copy,
   what crosses Cloudflare, and revoking.
 - `DESIGN.md`: the `--no-color` row says how `NO_COLOR` is read.
+
+## Unreleased
+
+Behaviour change in `pk-cli-browser`: a sign-in now runs in a profile each
+CLI keeps, where it used to run in a scratch profile deleted after every
+sign-in. Additive API; no shape or exit code changes.
+
+- **`pk-cli-browser`: a kept, owner-only Chrome profile per CLI**
+  (DESIGN.md §1.7, §2.2). `Launch::spawn` runs Chrome in
+  `<data dir>/piekstra.<bin>/browser-profile`
+  (`~/Library/Application Support/piekstra.<bin>/browser-profile` on macOS,
+  `$XDG_DATA_HOME` or `~/.local/share` elsewhere) and leaves it in place
+  when the window closes; Chrome is still stopped on drop. The provider's
+  own cookies (its remembered device, its single-sign-on session, a bot
+  check's clearance) carry over, so a CLI's second and later
+  `auth login --browser` often finish with no password, code or bot check:
+  the window opens, the app loads signed in, the capture is read and the
+  window closes. The trade, stated in the docs: a profile kept on disk for
+  far fewer sign-ins. Chrome encrypts its cookies at rest (on macOS with
+  the "Chrome Safe Storage" keychain key) but not a site's `localStorage`.
+  - **macOS and Linux.** Elsewhere every sign-in uses a scratch profile,
+    with a one-line note on stderr.
+  - **Owner-only.** Created `0700` with any missing parents; a launch is
+    refused when the profile is a symlink, is not the current user's or is
+    not `0700`.
+  - **One sign-in at a time.** A sign-in holds an advisory lock on
+    `pk-cli-browser.lock` in the profile (released by the kernel if the
+    process dies), so a second is refused before anything launches; a
+    Chrome still running in the profile (its `SingletonLock` naming a live
+    pid whose program is a Chrome) refuses the launch too, and the message
+    names the lock to remove by hand if no Chrome is open there. A program
+    is a Chrome when the profile's record names it or its name is in the
+    Chromium family: each sign-in records in `pk-cli-browser.lock` the
+    program it spawns and, once Chrome is up, the program Chrome runs as,
+    so a browser picked with `Launch::chrome` or `<PREFIX>_CHROME` (or
+    started by a wrapper script) is known to a later launch or logout. A lock
+    whose pid is gone, or now runs another program (a pid reused after a
+    reboot), is stale: it, the other singleton links and the old
+    `DevToolsActivePort` are removed before Chrome starts.
+  - **`Launch::fresh_profile(bool)`** opts back into the scratch profile
+    for one run (created `0700` in the temp dir, removed on drop), leaving
+    the kept one alone. **`BrowserArgs` gains `--fresh-profile`**
+    (`fresh_profile`), which requires `--browser`.
+  - **`forget_profile(bin) -> Result<bool, BrowserError>`** removes the
+    kept profile (`true` when there was one), for `auth logout`. It removes
+    the profile directory only and refuses while a sign-in or a Chrome is
+    using it, or when the path is a symlink or another user's.
+  - **Several accounts:** `Launch::profile_name(name)` keeps a separate
+    `browser-profile-<name>` per account at the provider, and
+    `forget_named_profile(bin, name)` removes it, so one account's sign-in
+    never opens signed in as another. Names are 1 to 64 ASCII letters,
+    digits, `-` or `_`, checked and never rewritten; uppercase is written as
+    `+` and its lowercase in the directory name, so names that differ only
+    in case keep their own profiles on a case-folding filesystem.
+  - **`BrowserError::Profile`** (exit 1): the kept profile needs repair (not
+    a private directory of the user's, or it cannot be located, created or
+    removed). **`BrowserError::ProfileInUse`** (exit 1): another sign-in or
+    a running Chrome has it. The enum is `#[non_exhaustive]`, so both are
+    additive.
+  - **`test-util`** gains `Launch::profile_root(root)`,
+    `forget_profile_in(root, bin)` and `forget_named_profile_in(root, bin,
+    name)`, so a CLI's logout tests run against a temp dir and never remove
+    the owner's real profile.
+  - A second Ctrl-C still kills Chrome and exits 130; it removes a scratch
+    profile, never the kept one.
+- `example-cli`: `auth login --browser --fresh-profile` is passed to
+  `Launch::fresh_profile`, and `auth logout` calls `forget_profile` through
+  a seam its test fills with `forget_profile_in`.
 - `connector/` 0.2.0: every module is optional. A module is on when any of
   its secrets is set (not empty, not `none`); the Deploy form offers each
   module's secrets pre-filled with `none`, and a deployer who fills in only

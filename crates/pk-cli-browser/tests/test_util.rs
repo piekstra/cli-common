@@ -372,3 +372,35 @@ fn a_log_entry_with_a_relative_path_is_refused() {
 fn a_capture_off_a_host_name_is_refused() {
     let _ = Captured::for_test("Example", "example.com/app");
 }
+
+/// The kept profile under a test's own root, as a CLI's tests use it: a
+/// launch (here of the crate's stand-in Chrome) keeps its profile there,
+/// and the CLI's logout removes it there, never the owner's real one.
+#[cfg(unix)]
+#[test]
+fn a_cli_s_tests_keep_the_profile_under_their_own_root() {
+    use pk_cli_browser::{forget_named_profile_in, forget_profile_in, Launch};
+
+    let fake_chrome = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/fake-chrome.sh");
+    let root = std::env::temp_dir().join(format!("pk-cli-browser-cli-root-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let launch = || {
+        Launch::new("example-cli")
+            .url("https://app.example.com/login")
+            .chrome(fake_chrome)
+            .ctrl_c(false)
+            .quiet(true)
+            .profile_root(&root)
+    };
+    drop(launch().spawn().unwrap());
+    drop(launch().profile_name("Spouse").spawn().unwrap());
+    let dir = root.join("piekstra.example-cli");
+    assert!(dir.join("browser-profile").join("args").exists());
+    assert!(dir.join("browser-profile-+spouse").join("args").exists());
+
+    assert!(forget_profile_in(&root, "example-cli").unwrap());
+    assert!(!forget_profile_in(&root, "example-cli").unwrap());
+    assert!(forget_named_profile_in(&root, "example-cli", "Spouse").unwrap());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    std::fs::remove_dir_all(&root).unwrap();
+}

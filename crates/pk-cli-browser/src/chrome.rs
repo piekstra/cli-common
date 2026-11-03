@@ -1,8 +1,6 @@
 //! Finding and launching Chrome, and tearing it down.
 
-use std::collections::hash_map::RandomState;
 use std::ffi::OsString;
-use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -10,6 +8,10 @@ use std::time::{Duration, Instant};
 use crate::error::BrowserError;
 use crate::host::parse_url;
 use crate::interrupt;
+use crate::profile::{
+    default_root, invalid_name, profile_choice, profile_name_ok, ProfileChoice, ProfileDir,
+    KEPT_SUPPORTED, UNSUPPORTED_NOTE,
+};
 
 /// How long Chrome gets to write `DevToolsActivePort` after launch.
 const PORT_DEADLINE: Duration = Duration::from_secs(20);
@@ -87,145 +89,6 @@ fn choose_chrome(
         })
 }
 
-/// The owner-only scratch profile Chrome runs in, removed when dropped.
-///
-/// It holds the live session while the window is open, and Chrome writes
-/// the debug port into it, so it is created `0700`, exclusively (an
-/// existing path, planted or stale, is refused rather than adopted), under
-/// an unpredictable name, and checked to be a real directory with that mode
-/// before Chrome is pointed at it.
-#[derive(Debug)]
-pub(crate) struct ProfileDir {
-    path: PathBuf,
-}
-
-impl ProfileDir {
-    pub fn create(prefix: &str) -> Result<Self, BrowserError> {
-        Self::create_in(&std::env::temp_dir(), prefix)
-    }
-
-    pub fn create_in(parent: &Path, prefix: &str) -> Result<Self, BrowserError> {
-        let path = parent.join(format!(
-            "{}-browser-login-{}-{:016x}",
-            fs_safe(prefix),
-            std::process::id(),
-            unpredictable()
-        ));
-        create_private_dir(&path)?;
-        Ok(ProfileDir { path })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ProfileDir {
-    /// A profile left behind may hold the signed-in session, so a failure
-    /// to remove it is reported even under `-q`: it is the one outcome the
-    /// owner has to act on.
-    fn drop(&mut self) {
-        if let Err(e) = remove_dir_patiently(&self.path, 10, Duration::from_millis(100)) {
-            eprintln!("{}", removal_warning(&self.path, &e));
-        }
-    }
-}
-
-/// Remove `path`, retrying `attempts` times `pause` apart: Chrome's helper
-/// processes can still be writing into the profile for a moment after the
-/// browser process exits, which fails a single `remove_dir_all` with
-/// "directory not empty". A path already gone counts as removed; the last
-/// error is returned once the attempts run out.
-fn remove_dir_patiently(path: &Path, attempts: u32, pause: Duration) -> std::io::Result<()> {
-    let mut last = None;
-    for attempt in 0..attempts.max(1) {
-        if attempt > 0 {
-            std::thread::sleep(pause);
-        }
-        match std::fs::remove_dir_all(path) {
-            Ok(()) => return Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => last = Some(e),
-        }
-    }
-    Err(last.unwrap_or_else(|| std::io::Error::other("not removed")))
-}
-
-fn removal_warning(path: &Path, e: &std::io::Error) -> String {
-    format!(
-        "warning: could not remove the browser profile {} ({e}); it may hold the signed-in \
-         session, so delete it",
-        path.display()
-    )
-}
-
-/// 64 bits from the standard library's randomly keyed hasher (seeded from
-/// the OS), so the profile path cannot be guessed and pre-created.
-fn unpredictable() -> u64 {
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u128(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    );
-    hasher.finish()
-}
-
-fn fs_safe(prefix: &str) -> String {
-    let safe: String = prefix
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if safe.is_empty() {
-        "pk-cli".into()
-    } else {
-        safe
-    }
-}
-
-fn create_private_dir(path: &Path) -> Result<(), BrowserError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .recursive(false)
-            .create(path)
-            .map_err(|e| {
-                BrowserError::Launch(format!(
-                    "creating the browser profile dir {} (it must not already exist): {e}",
-                    path.display()
-                ))
-            })?;
-        let meta = std::fs::symlink_metadata(path)
-            .map_err(|e| BrowserError::Launch(format!("checking the browser profile dir: {e}")))?;
-        if !meta.is_dir() || meta.permissions().mode() & 0o777 != 0o700 {
-            let _ = std::fs::remove_dir_all(path);
-            return Err(BrowserError::Launch(
-                "the browser profile dir is not a private (0700) directory; refusing to launch"
-                    .into(),
-            ));
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::create_dir(path).map_err(|e| {
-            BrowserError::Launch(format!(
-                "creating the browser profile dir {} (it must not already exist): {e}",
-                path.display()
-            ))
-        })
-    }
-}
-
 /// Chrome writes `<profile>/DevToolsActivePort` once its debug server
 /// listens: the port on line 1, the browser target's websocket path on
 /// line 2. `None` until both are there and well-formed (the file can be
@@ -252,8 +115,8 @@ pub(crate) fn start_url_ok(url: &str) -> bool {
 }
 
 /// The arguments Chrome is launched with: a debug port Chrome picks itself
-/// (no fixed port to collide with or to guess), the scratch profile, and
-/// first-run suppression, then the start pages. Nothing else on purpose: a
+/// (no fixed port to collide with or to guess), the profile, and first-run
+/// suppression, then the start pages. Nothing else on purpose: a
 /// launch trimmed further (background networking or services disabled)
 /// reads as automation to bot checks such as Cloudflare Turnstile, and none
 /// of the flags a WebDriver launch adds are here, so the page sees
@@ -273,6 +136,15 @@ pub(crate) fn chrome_args(profile: &Path, urls: &[String]) -> Vec<OsString> {
 
 /// How to launch the sign-in window. Build with [`Launch::new`], add the
 /// start page(s), then [`Launch::spawn`].
+///
+/// Chrome runs in the CLI's kept profile,
+/// `<data dir>/piekstra.<bin>/browser-profile` (on macOS
+/// `~/Library/Application Support/piekstra.<bin>/browser-profile`, elsewhere
+/// under `$XDG_DATA_HOME` or `~/.local/share`), so the provider's cookies
+/// (its remembered device, its single-sign-on session, a bot check's
+/// clearance) carry over to the next sign-in, which often finishes with no
+/// password or code. [`Launch::fresh_profile`] opts out for one run;
+/// [`forget_profile`](crate::forget_profile) removes the kept profile.
 #[derive(Debug, Clone)]
 pub struct Launch {
     pub(crate) bin: String,
@@ -281,11 +153,15 @@ pub struct Launch {
     pub(crate) quiet: bool,
     ctrl_c: bool,
     pub(crate) login_hint: Option<String>,
+    fresh_profile: bool,
+    profile_name: Option<String>,
+    // The data dir the kept profile lives under; `None` is the real one.
+    profile_root: Option<PathBuf>,
 }
 
 impl Launch {
     /// A launch for the CLI `bin` (its binary name: the `<PREFIX>_CHROME`
-    /// override, the profile name and the messages use it).
+    /// override, the profile's directory and the messages use it).
     pub fn new(bin: impl Into<String>) -> Self {
         Launch {
             bin: bin.into(),
@@ -294,6 +170,9 @@ impl Launch {
             quiet: false,
             ctrl_c: true,
             login_hint: None,
+            fresh_profile: false,
+            profile_name: None,
+            profile_root: None,
         }
     }
 
@@ -331,9 +210,60 @@ impl Launch {
         self
     }
 
+    /// Run Chrome in a fresh scratch profile instead of the kept one: an
+    /// owner-only directory in the temp dir, removed when the window
+    /// closes, so the provider sees an unknown device and nothing of this
+    /// sign-in stays on disk. The kept profile is neither read nor changed.
+    /// The CLI's `--fresh-profile` ([`BrowserArgs`](crate::BrowserArgs)).
+    /// Default off.
+    pub fn fresh_profile(mut self, fresh: bool) -> Self {
+        self.fresh_profile = fresh;
+        self
+    }
+
+    /// Keep a separate profile under `name` beside the CLI's default one,
+    /// for a CLI that signs in more than one account at the provider
+    /// (`rhd --profile <NAME>`): each account gets its own remembered
+    /// device and session, and one account's sign-in never opens already
+    /// signed in as another. The profile is
+    /// `<data dir>/piekstra.<bin>/browser-profile-<name>`, with each
+    /// uppercase letter of `name` written as `+` and its lowercase
+    /// (`Alice` is `browser-profile-+alice`, `alice` is
+    /// `browser-profile-alice`), so names that differ only in case keep
+    /// their own profiles where the filesystem folds case (APFS). It is
+    /// removed by [`forget_named_profile`](crate::forget_named_profile).
+    /// `name` is 1 to 64 ASCII letters, digits, `-` or `_`; the account name
+    /// is checked, never rewritten into another name, and anything else
+    /// fails [`spawn`](Launch::spawn) as [`BrowserError::Invalid`]. No
+    /// effect with [`fresh_profile(true)`](Launch::fresh_profile).
+    pub fn profile_name(mut self, name: impl Into<String>) -> Self {
+        self.profile_name = Some(name.into());
+        self
+    }
+
+    /// Keep the profile under `root` instead of the per-user data dir
+    /// (`<root>/piekstra.<bin>/browser-profile`). For a CLI's tests only
+    /// (the `test-util` feature), so a test that launches never reads or
+    /// changes the owner's real profile; `forget_profile_in` removes it.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn profile_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.profile_root = Some(root.into());
+        self
+    }
+
     /// Launch Chrome and wait (up to 20 s) for its debug port. The returned
-    /// [`Browser`] kills Chrome and removes the profile when dropped, on
-    /// every path including errors after this point.
+    /// [`Browser`] kills Chrome when dropped, on every path including errors
+    /// after this point, and removes a scratch profile; the kept profile
+    /// stays for the next sign-in.
+    ///
+    /// Before Chrome starts, the kept profile is created `0700` if missing,
+    /// and refused as [`BrowserError::Profile`] when it is a symlink, is not
+    /// the current user's or is not `0700`, and as
+    /// [`BrowserError::ProfileInUse`] when another sign-in is using it or a
+    /// Chrome is still running in it. What a Chrome that is no longer
+    /// running left in it (its lock, the old debug port) is removed. Off
+    /// unix there is no kept profile: the sign-in uses a scratch one and
+    /// says so in a note on stderr (unless quiet).
     pub fn spawn(self) -> Result<Browser, BrowserError> {
         if self.urls.is_empty() {
             return Err(BrowserError::Invalid(
@@ -344,6 +274,9 @@ impl Launch {
             return Err(BrowserError::Invalid(format!(
                 "start URL `{bad}` is not an https URL"
             )));
+        }
+        if let Some(name) = self.profile_name.as_deref().filter(|n| !profile_name_ok(n)) {
+            return Err(invalid_name(name));
         }
         let chrome = match &self.chrome {
             Some(path) => path.clone(),
@@ -360,7 +293,26 @@ impl Launch {
             }
         }
 
-        let profile = ProfileDir::create(&self.bin)?;
+        let profile = match profile_choice(self.fresh_profile, KEPT_SUPPORTED) {
+            ProfileChoice::Scratch => ProfileDir::create(&self.bin)?,
+            ProfileChoice::ScratchUnsupported => {
+                if !self.quiet {
+                    eprintln!("{UNSUPPORTED_NOTE}");
+                }
+                ProfileDir::create(&self.bin)?
+            }
+            ProfileChoice::Kept => {
+                let root = match &self.profile_root {
+                    Some(root) => root.clone(),
+                    None => default_root().map_err(|e| {
+                        BrowserError::Profile(format!(
+                            "{e}; pass --fresh-profile to sign in without it"
+                        ))
+                    })?,
+                };
+                ProfileDir::open_kept(&root, &self.bin, self.profile_name.as_deref(), &chrome)?
+            }
+        };
         let child = Command::new(&chrome)
             .args(chrome_args(profile.path(), &self.urls))
             .stdin(Stdio::null())
@@ -368,7 +320,7 @@ impl Launch {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| BrowserError::Launch(format!("launching {}: {e}", chrome.display())))?;
-        let live = interrupt::register(child.id(), profile.path().to_path_buf());
+        let live = interrupt::register(child.id(), profile.scratch_path());
         let mut browser = Browser {
             child,
             live,
@@ -380,19 +332,22 @@ impl Launch {
         let (port, path) = browser.read_active_port()?;
         browser.port = port;
         browser.ws_path = path;
+        browser.profile.note_running_chrome();
         Ok(browser)
     }
 }
 
-/// A running scratch-profile Chrome. Dropping it stops Chrome (SIGTERM,
-/// then SIGKILL after a grace period) and removes its profile.
+/// A running sign-in Chrome. Dropping it stops Chrome (SIGTERM, then
+/// SIGKILL after a grace period), then removes a scratch profile or, for
+/// the kept profile, releases it for the next sign-in.
 pub struct Browser {
     child: Child,
     live: u64,
     pub(crate) port: u16,
     pub(crate) ws_path: String,
     pub(crate) launch: Launch,
-    // Last: removed after the child has been stopped by `Drop::drop`.
+    // Last: removed or released after the child has been stopped by
+    // `Drop::drop`.
     profile: ProfileDir,
 }
 
@@ -478,13 +433,15 @@ impl Drop for Browser {
     fn drop(&mut self) {
         self.stop();
         interrupt::unregister(self.live);
-        // `profile` drops after this, removing the directory.
+        // `profile` drops after this: a scratch directory is removed, the
+        // kept one's lock released.
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::unpredictable;
 
     #[test]
     fn the_override_variable_follows_the_family_prefix() {
@@ -619,72 +576,18 @@ mod tests {
             .spawn()
             .unwrap_err();
         assert!(err.to_string().contains("not an https URL"), "{err}");
-    }
-
-    /// The give-up path: a profile that cannot be removed (here: its parent
-    /// made read-only) ends the retries with the error, never a hang, and
-    /// the warning names the path. Skipped where permissions do not bind
-    /// (running as root).
-    #[cfg(unix)]
-    #[test]
-    fn a_profile_that_cannot_be_removed_is_reported_not_hung_on() {
-        use std::os::unix::fs::PermissionsExt;
-        let parent = std::env::temp_dir().join(format!("pk-cli-browser-stuck-{}", unpredictable()));
-        std::fs::create_dir(&parent).unwrap();
-        let profile = ProfileDir::create_in(&parent, "t").unwrap();
-        let path = profile.path().to_path_buf();
-        let mode = |m| std::fs::Permissions::from_mode(m);
-        std::fs::set_permissions(&parent, mode(0o500)).unwrap();
-        let started = Instant::now();
-        let result = remove_dir_patiently(&path, 3, Duration::from_millis(1));
-        std::fs::set_permissions(&parent, mode(0o700)).unwrap();
-        assert!(started.elapsed() < Duration::from_secs(2));
-        if let Err(e) = result {
-            assert!(path.exists());
-            let warning = removal_warning(&path, &e);
-            assert!(warning.starts_with("warning: could not remove the browser profile "));
-            assert!(warning.contains(&path.display().to_string()), "{warning}");
-            assert!(
-                warning.contains("may hold the signed-in session"),
-                "{warning}"
-            );
+        // A profile name that would need rewriting is refused, not mapped.
+        for bad in ["", "a b", "../x", "a.b", &"x".repeat(65)] {
+            let err = Launch::new("t")
+                .url("https://app.example.com/")
+                .chrome("/nonexistent/chrome")
+                .ctrl_c(false)
+                .profile_name(bad)
+                .spawn()
+                .unwrap_err();
+            assert!(matches!(err, BrowserError::Invalid(_)), "{bad:?}: {err:?}");
+            assert!(err.to_string().contains("browser profile name"), "{err}");
         }
-        drop(profile);
-        assert!(!path.exists(), "removed once it can be");
-        // A path already gone is not an error.
-        assert!(remove_dir_patiently(&path, 1, Duration::ZERO).is_ok());
-        std::fs::remove_dir(&parent).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_profile_is_private_exclusive_and_removed_on_drop() {
-        use std::os::unix::fs::PermissionsExt;
-        let parent = std::env::temp_dir().join(format!("pk-cli-browser-prof-{}", unpredictable()));
-        std::fs::create_dir(&parent).unwrap();
-
-        let profile = ProfileDir::create_in(&parent, "my cli/../x").unwrap();
-        let path = profile.path().to_path_buf();
-        assert_eq!(path.parent(), Some(parent.as_path()), "no traversal");
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with("my_cli____x-browser-login-"), "{name}");
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700);
-        // Two profiles never share a name.
-        let other = ProfileDir::create_in(&parent, "my cli/../x").unwrap();
-        assert_ne!(other.path(), path);
-
-        // An existing path is refused, never adopted.
-        let err = create_private_dir(&path).unwrap_err();
-        assert!(err.to_string().contains("must not already exist"), "{err}");
-
-        // Dropping removes the directory and whatever Chrome wrote into it.
-        std::fs::create_dir(path.join("Default")).unwrap();
-        std::fs::write(path.join("Default").join("Cookies"), "x").unwrap();
-        drop(profile);
-        assert!(!path.exists());
-        drop(other);
-        std::fs::remove_dir(&parent).unwrap();
     }
 
     /// A stand-in for Chrome (tests/fixtures/fake-chrome.sh) that writes
@@ -700,22 +603,50 @@ mod tests {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
     }
 
+    /// A data dir of the test's own, standing in for the per-user one.
     #[cfg(unix)]
-    #[test]
-    fn a_launched_browser_is_stopped_and_its_profile_removed_on_drop() {
-        let mut browser = Launch::new("pk-cli-browser-test")
+    fn temp_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("pk-cli-browser-{tag}-{}", unpredictable()));
+        std::fs::create_dir(&root).unwrap();
+        root
+    }
+
+    #[cfg(unix)]
+    fn fake_launch(bin: &str, root: &Path) -> Launch {
+        Launch::new(bin)
             .url("https://app.example.com/login")
             .chrome(FAKE_CHROME)
             .ctrl_c(false)
             .quiet(true)
+            .profile_root(root)
+    }
+
+    #[cfg(unix)]
+    fn launch_args(profile: &Path) -> Vec<String> {
+        std::fs::read_to_string(profile.join("args"))
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launched_browser_is_stopped_and_its_profile_removed_on_drop() {
+        let root = temp_root("fresh");
+        let mut browser = fake_launch("pk-cli-browser-test", &root)
+            .fresh_profile(true)
             .spawn()
             .unwrap();
         assert_eq!(browser.port, 9222);
         assert_eq!(browser.ws_path, "/devtools/browser/fake-browser-id");
         let profile = browser.profile.path().to_path_buf();
-        let args = std::fs::read_to_string(profile.join("args")).unwrap();
+        assert!(
+            profile.starts_with(std::env::temp_dir()),
+            "a scratch profile"
+        );
         assert_eq!(
-            args.lines().collect::<Vec<_>>(),
+            launch_args(&profile),
             [
                 "--remote-debugging-port=0",
                 &format!("--user-data-dir={}", profile.display()),
@@ -730,29 +661,127 @@ mod tests {
         drop(browser);
         assert!(!alive(pid), "Chrome is stopped");
         assert!(!profile.exists(), "the profile is removed");
+        // A fresh profile never touches the kept one.
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        std::fs::remove_dir(&root).unwrap();
+    }
+
+    /// The default: Chrome runs in the kept profile, which outlives it, one
+    /// sign-in at a time, and the previous run's debug port is never read.
+    #[cfg(unix)]
+    #[test]
+    fn the_kept_profile_outlives_the_browser_one_sign_in_at_a_time() {
+        let root = temp_root("kept");
+        let kept = crate::profile::kept_profile_path(&root, "pk-cli-browser-kept", None);
+        assert!(!kept.exists());
+
+        let mut browser = fake_launch("pk-cli-browser-kept", &root).spawn().unwrap();
+        let pid = browser.child.id();
+        assert_eq!(browser.profile.path(), kept);
+        assert_eq!(
+            launch_args(&kept)[1],
+            format!("--user-data-dir={}", kept.display())
+        );
+        assert!(!browser.exited());
+        // What Chrome keeps (its cookie store) is written while it runs.
+        std::fs::create_dir(kept.join("Default")).unwrap();
+        std::fs::write(kept.join("Default").join("Cookies"), "x").unwrap();
+
+        // A second sign-in is refused while this one holds the profile, and
+        // launches nothing.
+        let err = fake_launch("pk-cli-browser-kept", &root)
+            .spawn()
+            .unwrap_err();
+        assert!(matches!(err, BrowserError::ProfileInUse(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("another pk-cli-browser-kept browser sign-in"),
+            "{msg}"
+        );
+        assert!(msg.contains("--fresh-profile"), "{msg}");
+        assert!(!browser.exited(), "the first window is untouched");
+
+        drop(browser);
+        assert!(!alive(pid), "Chrome is stopped");
+        assert!(
+            kept.join("Default").join("Cookies").exists(),
+            "the profile stays"
+        );
+
+        // The next sign-in reuses it. A debug-port file left by the last
+        // Chrome is removed before launch, so the new port is the one read.
+        std::fs::write(
+            kept.join("DevToolsActivePort"),
+            "1111\n/devtools/browser/stale\n",
+        )
+        .unwrap();
+        let browser = fake_launch("pk-cli-browser-kept", &root).spawn().unwrap();
+        assert_eq!(browser.port, 9222);
+        assert_eq!(browser.ws_path, "/devtools/browser/fake-browser-id");
+        assert!(kept.join("Default").join("Cookies").exists());
+        drop(browser);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_profiles_are_kept_apart() {
+        let root = temp_root("named");
+        let a = fake_launch("pk-cli-browser-named", &root)
+            .profile_name("member-a")
+            .spawn()
+            .unwrap();
+        // Another account's sign-in runs alongside, in its own profile.
+        let b = fake_launch("pk-cli-browser-named", &root)
+            .profile_name("member_b")
+            .spawn()
+            .unwrap();
+        // Names that differ only in case are two accounts, even where the
+        // filesystem folds case (APFS): both sign-ins run side by side.
+        let upper = fake_launch("pk-cli-browser-named", &root)
+            .profile_name("Member-A")
+            .spawn()
+            .unwrap();
+        let dir = root.join("piekstra.pk-cli-browser-named");
+        assert_eq!(a.profile.path(), dir.join("browser-profile-member-a"));
+        assert_eq!(b.profile.path(), dir.join("browser-profile-member_b"));
+        assert_eq!(upper.profile.path(), dir.join("browser-profile-+member-+a"));
+        drop((a, b, upper));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
     fn a_browser_that_dies_on_launch_is_reported_and_cleaned_up() {
+        let root = temp_root("early");
         let before = profiles_named("pk-cli-browser-early");
-        let err = Launch::new("pk-cli-browser-early")
+        let err = fake_launch("pk-cli-browser-early", &root)
             .url("https://exit-early.example/")
-            .chrome(FAKE_CHROME)
-            .ctrl_c(false)
+            .fresh_profile(true)
             .spawn()
             .unwrap_err();
         assert!(err.to_string().contains("exited before"), "{err}");
         assert_eq!(profiles_named("pk-cli-browser-early"), before);
 
-        let err = Launch::new("pk-cli-browser-early")
-            .url("https://app.example.com/")
+        let err = fake_launch("pk-cli-browser-early", &root)
             .chrome("/nonexistent/chrome")
-            .ctrl_c(false)
+            .fresh_profile(true)
             .spawn()
             .unwrap_err();
         assert!(err.to_string().contains("launching"), "{err}");
         assert_eq!(profiles_named("pk-cli-browser-early"), before);
+
+        // In the kept profile the failure leaves the profile and frees it
+        // for the next sign-in.
+        let err = fake_launch("pk-cli-browser-early", &root)
+            .url("https://exit-early.example/")
+            .spawn()
+            .unwrap_err();
+        assert!(err.to_string().contains("exited before"), "{err}");
+        let kept = crate::profile::kept_profile_path(&root, "pk-cli-browser-early", None);
+        assert!(kept.is_dir());
+        drop(fake_launch("pk-cli-browser-early", &root).spawn().unwrap());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(unix)]
