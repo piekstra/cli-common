@@ -25,7 +25,7 @@
 //!   callable, unless `--allow-writes`.
 //! - **Stateless:** no MCP sessions; each `POST /mcp` is answered on its own,
 //!   as JSON.
-//! - **Bounded calls:** a call still running after [`CALL_TIMEOUT`] is
+//! - **Bounded calls:** a call still running after [`CALL_LIMIT`] is
 //!   answered with an error, inside Claude's own limit for a tool call: a
 //!   read may be retried, a write's outcome is reported as unknown.
 //! - **Quiet:** stderr gets a start line and one line per refused request
@@ -51,6 +51,7 @@ use serde_json::Value;
 
 use crate::adapter::Adapter;
 use crate::command::McpArgs;
+use crate::deadline::CALL_LIMIT;
 use crate::error::ToolError;
 use crate::result::ToolOutput;
 use crate::tool::ToolDef;
@@ -64,10 +65,6 @@ pub const HTTP_TOKEN_ACCOUNT: &str = "mcp-http-token";
 /// The shortest token the server accepts. `--new-token` makes 64 hex
 /// characters (256 bits).
 const MIN_TOKEN_LEN: usize = 32;
-
-/// How long a call may run before the Worker is answered with an error.
-/// Claude gives a remote tool call 240 s in all.
-const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The largest request body accepted: a `tools/call` is a few hundred bytes.
 const MAX_BODY: usize = 256 * 1024;
@@ -321,7 +318,7 @@ fn serve<T: Toolset + Send + Sync + 'static>(
     let server = toolset.server();
     let tools = toolset.tools();
     let writes = tools.iter().filter(|t| !t.annotations.read_only).count();
-    let adapter = Adapter::new(toolset, Some(CALL_TIMEOUT))?;
+    let adapter = Adapter::new(toolset, Some(CALL_LIMIT))?;
     // One thread for the connections; each call runs on Tokio's blocking
     // pool (the adapter's), so calls still run side by side.
     let runtime = tokio::runtime::Builder::new_current_thread()

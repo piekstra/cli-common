@@ -26,8 +26,12 @@
 //! [`SIZE_BUDGET`], and matching the tool's output schema with no
 //! undeclared field.
 
+use std::cell::Cell;
+use std::time::Duration;
+
 use serde_json::Value;
 
+use crate::deadline::Clock;
 use crate::result::CallToolResult;
 use crate::shape::SIZE_BUDGET;
 use crate::tool::NAME_MAX;
@@ -39,6 +43,56 @@ use pk_cli_core::block_on;
 pub const MAX_DEFINITIONS_SIZE: usize = 8_000;
 /// The shortest description a tool may have, in sentences.
 pub const MIN_SENTENCES: usize = 3;
+
+/// A [`Clock`] a test moves by hand, so a write's deadline is tested without a real sleep. A fake
+/// provider moves it where the real one would wait: on a prompt, a lock, a slow request.
+#[derive(Debug)]
+pub struct ManualClock {
+    monotonic: Cell<Duration>,
+    wall: Cell<Duration>,
+}
+
+impl ManualClock {
+    /// The wall clock starts a day past its epoch, so it has room to be set back.
+    pub fn new() -> Self {
+        Self {
+            monotonic: Cell::new(Duration::ZERO),
+            wall: Cell::new(Duration::from_secs(24 * 60 * 60)),
+        }
+    }
+
+    /// Time passes with the machine awake: both clocks move.
+    pub fn advance(&self, by: Duration) {
+        self.monotonic.set(self.monotonic.get() + by);
+        self.wall.set(self.wall.get() + by);
+    }
+
+    /// The machine sleeps: only the wall clock moves.
+    pub fn sleep(&self, by: Duration) {
+        self.wall.set(self.wall.get() + by);
+    }
+
+    /// Someone sets the wall clock back, or daylight saving ends.
+    pub fn set_wall_back(&self, by: Duration) {
+        self.wall.set(self.wall.get().saturating_sub(by));
+    }
+}
+
+impl Default for ManualClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clock for ManualClock {
+    fn monotonic(&self) -> Duration {
+        self.monotonic.get()
+    }
+
+    fn wall(&self) -> Duration {
+        self.wall.get()
+    }
+}
 
 /// Panic with every conformance violation of `toolset`'s definitions.
 pub fn assert_conforms<T: Toolset + ?Sized>(toolset: &T) {

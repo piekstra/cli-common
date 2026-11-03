@@ -3,8 +3,11 @@
 //! its commands already use, one read tool per question a person asks, one
 //! tool per write, and the same provider calls and DTOs its commands use.
 
+use std::time::Duration;
+
 use pk_cli_mcp::{
-    parse_args, ListArgs, Page, PageRequest, Server, ToolDef, ToolError, ToolOutput, Toolset,
+    parse_args, ListArgs, Page, PageRequest, SendDeadline, Server, SystemClock, ToolDef, ToolError,
+    ToolOutput, Toolset,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -16,6 +19,11 @@ pub struct ExampleTools;
 
 const DEVICES: &str = "example_devices";
 const RENAME: &str = "example_device_rename";
+
+/// No write is sent this long after its call began. What comes before it can wait on a keychain
+/// prompt for as long as nobody answers, and `--http` answers its caller at 120 s without
+/// cancelling the call. A real CLI sets this to leave room for its read-back inside that.
+const SEND_DEADLINE: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DevicesArgs {
@@ -128,12 +136,14 @@ fn devices(args: DevicesArgs) -> Result<ToolOutput, ToolError> {
 }
 
 fn rename(args: RenameArgs) -> Result<ToolOutput, ToolError> {
+    let deadline = SendDeadline::start(&SystemClock, SEND_DEADLINE);
     if args.name.trim().is_empty() {
         return Err(ToolError::usage("name is empty"));
     }
     let all = demo_devices();
     let device = find_device(&all, &args.device)
         .map_err(|e| ToolError::from(e).with_fix("Call example_devices for the exact names"))?;
+    deadline.check()?;
     // A real CLI sends the write, then reads the device back and returns
     // what it read. The client asked the user before this call
     // (requiresUserInteraction), so there is no confirm prompt here: the

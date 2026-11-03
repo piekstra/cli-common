@@ -124,7 +124,9 @@ README.md, "Self-view for family desktop apps". Its macOS effects live in
 - **`pk-cli-mcp`'s default features stay WebAssembly-clean**: no Tokio,
   keyring, processes or blocking I/O outside its `stdio`, `http` and
   `test-util` features, so a CLI's toolset can run in a deploy-your-own Worker
-  (DESIGN.md §1.9, §2.3). Its `wasm` feature has no dependencies at all:
+  (DESIGN.md §1.9, §2.3). `Instant::now` and `SystemTime::now` compile there and
+  panic at run time, so the core reads a clock only behind `deadline::Clock`, and
+  `SystemClock` is gated off that target. Its `wasm` feature has no dependencies at all:
   a module's only imports are the five `pk_host` functions, so nothing
   that pulls in `wasm-bindgen` may join it.
 - **`mcp --http` never listens beyond loopback and never starts open.**

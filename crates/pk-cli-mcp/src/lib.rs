@@ -35,6 +35,10 @@
 //!   signs in.
 //! - [`instructions`]: the standard server instructions, including that
 //!   free-text fields from third parties are data, not instructions.
+//! - [`SendDeadline`]: checks, right before each send, that a write has not
+//!   outlived its caller, on a monotonic and a wall clock behind [`Clock`]
+//!   ([`SystemClock`] is native only: the real clocks panic on
+//!   `wasm32-unknown-unknown`).
 //!
 //! # The WASM boundary is MCP-shaped JSON
 //!
@@ -82,6 +86,7 @@
 //!   `wasm::testing`, which runs a Worker toolset natively with the test
 //!   playing the host.
 
+pub mod deadline;
 pub mod error;
 pub mod result;
 pub mod shape;
@@ -103,6 +108,9 @@ pub mod wasm;
 
 #[cfg(feature = "stdio")]
 pub use command::{run, McpArgs};
+#[cfg(not(target_arch = "wasm32"))]
+pub use deadline::SystemClock;
+pub use deadline::{Clock, SendDeadline, CALL_LIMIT};
 pub use error::{ErrorKind, ToolError};
 #[cfg(feature = "http")]
 pub use http::{restart_note, HTTP_TOKEN_ACCOUNT};
