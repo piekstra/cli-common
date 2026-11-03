@@ -211,7 +211,8 @@ impl From<CliError> for ToolError {
             CliError::NotFound(m) => Self::not_found(m),
             CliError::Upstream(m) => Self::upstream(m),
             CliError::ConfirmationRequired(m) => Self::new(ErrorKind::ConfirmationRequired, m),
-            CliError::Keychain(m) => Self::other(format!("the OS keychain could not be read: {m}")),
+            // Not "read": a tool that renews a session writes the keychain too.
+            CliError::Keychain(m) => Self::other(format!("the OS keychain could not be used: {m}")),
             CliError::Other(m) => Self::other(m),
         }
     }
@@ -232,6 +233,14 @@ fn auth_reason(message: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tool that renews a session writes the keychain too, so "read" would be wrong.
+    #[test]
+    fn a_keychain_failure_says_it_could_not_be_used() {
+        let e = ToolError::from(CliError::Keychain("denied".into()));
+        assert_eq!(e.kind(), ErrorKind::Other);
+        assert_eq!(e.message(), "the OS keychain could not be used: denied");
+    }
 
     #[test]
     fn a_cli_auth_message_loses_its_own_remedy_whichever_way_it_is_worded() {

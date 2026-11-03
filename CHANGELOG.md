@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.22.0 — 2026-11-03
+
+- `pk-cli-mcp`: feature `http` exports `HTTP_TOKEN_ACCOUNT`, the keychain item
+  `--new-token` writes, so a CLI's `auth logout --forget` can remove it by the writer's
+  own name.
+- `pk-cli-mcp`: a `CliError::Keychain` reads "the OS keychain could not be used". It said
+  "could not be read", which was wrong for a tool that failed writing a renewed session.
+
 ## v0.21.0 — 2026-11-03
 
 - `pk-cli-utility`: feature `mcp`, the `utility/v1` MCP tools written once.

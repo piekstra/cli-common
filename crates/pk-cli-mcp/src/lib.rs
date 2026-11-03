@@ -105,7 +105,7 @@ pub mod wasm;
 pub use command::{run, McpArgs};
 pub use error::{ErrorKind, ToolError};
 #[cfg(feature = "http")]
-pub use http::restart_note;
+pub use http::{restart_note, HTTP_TOKEN_ACCOUNT};
 /// `pk_cli_core::block_on`, re-exported for a CLI's tests.
 #[cfg(feature = "test-util")]
 pub use pk_cli_core::block_on;
