@@ -342,6 +342,68 @@ fn bills_filter_by_date_and_keep_a_row_with_no_date() {
     assert_eq!(page["items"][1]["amount"], "45.67");
 }
 
+fn payment(date: &str, confirmation: Option<&str>) -> Payment {
+    Payment {
+        date: date.into(),
+        amount: Money {
+            amount: "10.00".into(),
+            currency: "USD".into(),
+        },
+        method: None,
+        status: None,
+        confirmation: confirmation.map(String::from),
+    }
+}
+
+/// A payment posting between pages must not show one twice, which would double a total.
+#[test]
+fn a_payment_that_arrives_between_pages_repeats_nothing() {
+    let mut source = Fixtures::new();
+    source.payments = vec![
+        payment("2026-03-02", Some("B")),
+        payment("2026-03-01", Some("A")),
+    ];
+    let (t, _) = over(source);
+    let first = ok(&t, "util_payments", json!({"limit": 1}));
+    assert_eq!(dates(&first, "date"), ["2026-03-02"]);
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+
+    let mut source = Fixtures::new();
+    source.payments = vec![
+        payment("2026-03-03", Some("C")),
+        payment("2026-03-02", Some("B")),
+        payment("2026-03-01", Some("A")),
+    ];
+    let (t, _) = over(source);
+    let second = ok(&t, "util_payments", json!({"limit": 1, "cursor": cursor}));
+    assert_eq!(dates(&second, "date"), ["2026-03-01"]);
+    assert!(second.get("next_cursor").is_none());
+}
+
+/// A confirmation number is not always there: the amount tells that day's payments apart,
+/// and two the same are counted, so neither is lost at a page boundary.
+#[test]
+fn payments_with_nothing_to_tell_them_apart_are_all_seen() {
+    let mut source = Fixtures::new();
+    source.payments = vec![
+        payment("2026-03-01", None),
+        payment("2026-03-01", None),
+        payment("2026-02-01", None),
+    ];
+    let (t, _) = over(source);
+    let mut seen = Vec::new();
+    let mut args = json!({"limit": 1});
+    loop {
+        let page = ok(&t, "util_payments", args.clone());
+        seen.extend(dates(&page, "date"));
+        match page.get("next_cursor") {
+            Some(cursor) => args["cursor"] = cursor.clone(),
+            None => break,
+        }
+    }
+    assert_eq!(seen, ["2026-03-01", "2026-03-01", "2026-02-01"]);
+}
+
 #[test]
 fn a_cursor_walks_the_list_and_refuses_other_filters() {
     let (t, _) = tools();
