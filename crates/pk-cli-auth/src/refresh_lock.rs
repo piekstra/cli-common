@@ -195,12 +195,13 @@ impl RefreshLock {
     /// be what keeps a credential on the machine:
     ///
     /// - Lock free: `delete`'s result.
-    /// - Another process holds it: `delete` runs at once, so nothing that interrupts
-    ///   the wait leaves the credential behind, and again once the lock is free, to
-    ///   remove whatever a renewal in flight stored. `delete` must tolerate finding
-    ///   nothing. Past the wait the result is [`CliError::Upstream`] (exit 5) saying
-    ///   so, because a renewal can still store the session; running the logout again
-    ///   settles it.
+    /// - Another process holds it: `delete` runs at once, which removes what is
+    ///   stored now, and again once the lock is free, to remove whatever a renewal in
+    ///   flight stored. Only a logout that gets that far is settled: one interrupted
+    ///   during the wait can have the session stored again behind it, as stderr says.
+    ///   `delete` must tolerate finding nothing, and the result is the first call's,
+    ///   what the logout found when it started. Past the wait the result is
+    ///   [`CliError::Upstream`] (exit 5); running the logout again settles it.
     /// - Lock unusable: `delete`'s result, with a warning on stderr. A process
     ///   resolving the same path cannot be holding it either.
     /// - No home directory: `delete` runs, and the result is [`CliError::Upstream`],
@@ -225,20 +226,24 @@ impl RefreshLock {
             Err(Refused::Broken(why)) => return forget_unlocked(&why, delete),
             Err(Refused::Held(_)) => {}
         }
-        delete()?;
+        let found = delete()?;
         eprintln!(
-            "the stored session is deleted; waiting up to {:?} for another process to release \
-             {}, in case it is renewing",
+            "the stored session is deleted, but a renewal in another process may store it \
+             again: waiting up to {:?} for {} to delete it once more. If you interrupt this, run \
+             the logout again",
             self.wait,
             self.path.display()
         );
         match self.acquire() {
-            Ok(_held) => delete(),
+            Ok(_held) => {
+                delete()?;
+                Ok(found)
+            }
             Err(Refused::Held(why)) => Err(CliError::Upstream(format!(
                 "the stored session is deleted, but {why}, and a renewal in flight can store it \
                  again: run this logout again in a minute"
             ))),
-            Err(Refused::Broken(why)) => forget_unlocked(&why, delete),
+            Err(Refused::Broken(why)) => forget_unlocked(&why, delete).map(|_| found),
         }
     }
 
@@ -831,8 +836,9 @@ mod tests {
                         // The first delete happens with the lock still held.
                         seen.send(()).unwrap();
                     }
-                    Ok(())
+                    Ok(this_one == 0)
                 })
+                .map(|found| assert!(found, "the first delete's result, not the second's"))
                 .unwrap();
         });
         assert_eq!(deletes.load(std::sync::atomic::Ordering::SeqCst), 2);
