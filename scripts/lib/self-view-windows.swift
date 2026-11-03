@@ -7,11 +7,13 @@
 // launched. CGWindowList is used because AX/AppleScript often cannot see a
 // webview window (Tauri, Electron) at all. Exit 5, with a message on stderr,
 // when the window server returns no list, so the caller reports that rather
-// than "no window".
+// than "no window". With --all it lists the windows on every desktop, minimized
+// ones included, so a refusal can say the window exists somewhere else.
 import CoreGraphics
 import Foundation
 
-let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+let everyDesktop = CommandLine.arguments.contains("--all")
+let opts: CGWindowListOption = [everyDesktop ? .optionAll : .optionOnScreenOnly, .excludeDesktopElements]
 guard let ws = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else {
   FileHandle.standardError.write("CGWindowListCopyWindowInfo returned nil\n".data(using: .utf8)!)
   exit(5)

@@ -50,7 +50,8 @@
 #
 # Test seams. Each replaces one platform effect with a command, run by bash;
 # selection and every safety check still apply to what it returns:
-#   SELF_VIEW_WINDOW_LIST  prints lines in lib/self-view-windows.swift's format
+#   SELF_VIEW_WINDOW_LIST  prints lines in lib/self-view-windows.swift's format;
+#                          given --all, the windows on every desktop
 #   SELF_VIEW_LOCK_STATE   prints "locked" or "open" (lib/self-view-locked.swift)
 #   SELF_VIEW_RAISE        gets the owner PID (lib/self-view-raise.swift)
 #   SELF_VIEW_POST_EVENT   gets "move|click X Y" (lib/self-view-post.swift)
@@ -146,6 +147,21 @@ read_windows() {
   fi
 }
 
+# Print "<width>x<height>" for the largest normal window the PIDs in $1 own on
+# any desktop, or nothing. Only words a refusal, so a failed listing prints
+# nothing and the refusal says what it knows.
+window_elsewhere() {
+  local all
+  all="$(helper "${SELF_VIEW_WINDOW_LIST:-}" self-view-windows.swift --all 2>/dev/null)" || return 0
+  awk -v pids="$1" '
+    BEGIN { n = split(pids, a, " "); for (i = 1; i <= n; i++) ours[a[i]] = 1 }
+    ($1 in ours) && $3 == 0 {
+      area = $6 * $7
+      if (area > best) { best = area; out = $6 "x" $7 }
+    }
+    END { if (best > 0) print out }' <<<"$all"
+}
+
 # Set WIN_PID/WIN_ID/WIN_X/WIN_Y/WIN_W/WIN_H to the largest normal (layer 0)
 # window owned by the launched tree, polling up to $1 seconds while the app
 # starts. Runs in the caller's shell, not a command substitution, so a
@@ -153,7 +169,7 @@ read_windows() {
 WINDOWS=""
 WIN_PID="" WIN_ID="" WIN_X="" WIN_Y="" WIN_W="" WIN_H=""
 find_window() {
-  local wait="$1" deadline pids win
+  local wait="$1" deadline pids win elsewhere
   deadline=$(( $(date +%s) + wait ))
   while :; do
     pids="$(tree_pids "$ROOT" | tr '\n' ' ')"
@@ -173,6 +189,10 @@ find_window() {
     [ "$(date +%s)" -lt "$deadline" ] || break
     sleep 1
   done
+  elsewhere="$(window_elsewhere "$pids")"
+  if [ -n "$elsewhere" ]; then
+    missing "the launched process $ROOT owns a $elsewhere window that is not on the current desktop: it is on another desktop or minimized, so nothing can be captured or driven. Bring it to this desktop and run this again."
+  fi
   missing "no on-screen window is owned by the launched process $ROOT or its $(( $(wc -w <<<"$pids") - 1 )) descendants after ${wait}s. Refusing to fall back to any other window. Check that the app finished starting and is not minimized, or raise --wait."
 }
 
