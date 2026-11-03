@@ -489,7 +489,7 @@ WebCrypto) in B, behind a provider seam the toolset awaits (§2.3).
 
 #### Tools
 
-- **A few, workflow-shaped.** Two to four tools per CLI, each answering a
+- **A few, workflow-shaped.** Two to five tools per CLI, each answering a
   question a person asks ("what are my balances", "what happened in this
   account in March"), not one tool per endpoint. Names are
   `<service>_<what>` (`coinbase_accounts`): at most 64 characters of
@@ -523,6 +523,13 @@ WebCrypto) in B, behind a provider seam the toolset awaits (§2.3).
   user before every call; that approval takes the place of §1.3's `--force`
   prompt (the server has no terminal to prompt on). §1.3's read-back rule
   still applies to what the write returns.
+- **A late write sends nothing.** A write that reaches a device or an account
+  checks the time right before each send, on the monotonic and the wall clock,
+  and past a deadline that leaves room for its read-back inside 120 s it sends
+  nothing and says so. `--http` answers at 120 s and does not cancel the call,
+  so a command waiting on a keychain prompt or a lock would otherwise go out
+  when someone answers it, with nobody told. `Instant` alone misses a Mac that
+  slept through the wait.
 - **Stable.** `tools/list` returns the same tools in the same order every
   time (clients cache it and it is part of the prompt), and listing touches
   no credential, file or network: a client lists tools before anyone has
