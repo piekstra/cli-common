@@ -78,14 +78,22 @@ impl std::error::Error for CliError {}
 #[cfg(feature = "reqwest")]
 impl From<reqwest::Error> for CliError {
     /// reqwest's own message quotes the whole URL, and a path or query can carry
-    /// an account id or a token, so this keeps only the origin.
+    /// an account id or a token, so this keeps only the origin. A redirect policy's
+    /// reason is only in the error's source, and it holds no URL.
     fn from(e: reqwest::Error) -> Self {
         let origin = e.url().map(|url| url.origin().ascii_serialization());
-        let message = e.without_url().to_string();
-        CliError::Upstream(match origin {
-            Some(origin) => format!("{message} ({origin})"),
-            None => message,
-        })
+        let reason = e
+            .is_redirect()
+            .then(|| std::error::Error::source(&e).map(ToString::to_string))
+            .flatten();
+        let mut message = e.without_url().to_string();
+        if let Some(origin) = origin {
+            message = format!("{message} ({origin})");
+        }
+        if let Some(reason) = reason {
+            message = format!("{message}: {reason}");
+        }
+        CliError::Upstream(message)
     }
 }
 

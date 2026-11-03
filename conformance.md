@@ -14,7 +14,8 @@ status here.
 - [ ] `completions <shell>`
 - [ ] `info` emitting cli-info/v1
 - [ ] Secrets only via keychain (`piekstra.<bin>`), stdin, env, or 1Password through `op` (`--op <REF>`) — never argv
-- [ ] A URL or host from outside the binary (an `api` passthrough, a host override, a URL in a response) goes through `pk_cli_core::transport::require_secure_url` before a credential travels with it, and a client that sends a provider's own auth header sets `secure_redirects`
+- [ ] A URL or host from outside the binary goes through `pk_cli_core::transport::require_secure_url` before a credential travels with it; an `api` passthrough resolves its path with `pk_cli_http::ApiArgs::secure_url`. A passthrough or a host override may name any `https` host, since the user chose it. A URL from a provider's response gets no credential unless its parsed host is the provider's
+- [ ] A client that attaches a credential sets a redirect policy: `transport::secure_redirects`, or `transport::same_host_redirects` if it sends a provider's own auth header, which reqwest keeps on every hop
 - [ ] One keychain item per credential set (a JSON blob via `get_json`/`set_json`; a legacy per-field layout is migrated on first read, then deleted)
 - [ ] ISO `YYYY-MM-DD` accepted on all date flags; `--limit N` on lists
 - [ ] Mutations prompt unless `--force`; exit 6 when non-interactive — decided **before** any keychain or network work (`pk_cli_core::confirm`)
