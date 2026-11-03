@@ -1,13 +1,14 @@
 //! Ctrl-C while a Chrome window is open.
 //!
 //! Without a handler, Ctrl-C ends the process with every `Drop` un-run, so
-//! the window stays open and the scratch profile (which holds the session)
+//! the window stays open and a scratch profile (which holds the session)
 //! stays on disk. The handler installed by [`install`] turns the first
 //! Ctrl-C into a cancel that the waiting code notices within a fraction of
 //! a second, so the [`Browser`](crate::Browser) unwinds normally; a second
 //! Ctrl-C, for when the unwinding is stuck, kills every live Chrome, removes
-//! its profile and exits 130. With no Chrome live, Ctrl-C exits 130 at
-//! once, as it would with no handler.
+//! its profile if it is a scratch one (the kept profile stays) and exits
+//! 130. With no Chrome live, Ctrl-C exits 130 at once, as it would with no
+//! handler.
 //!
 //! The handler is process-wide and installed once. A CLI that runs its own
 //! Ctrl-C handler opts out with [`Launch::ctrl_c(false)`](crate::Launch::ctrl_c)
@@ -34,7 +35,9 @@ struct Entry {
     /// `None` once the process has been reaped, so its pid (free for reuse)
     /// is never signalled.
     pid: Option<u32>,
-    profile: PathBuf,
+    /// The scratch profile to remove on a forced exit; `None` for the kept
+    /// profile, which stays.
+    scratch: Option<PathBuf>,
 }
 
 /// Cancel every wait on a live Chrome window: each returns
@@ -71,7 +74,9 @@ fn on_interrupt() {
             if let Some(pid) = entry.pid {
                 force_kill(pid);
             }
-            let _ = std::fs::remove_dir_all(&entry.profile);
+            if let Some(scratch) = &entry.scratch {
+                let _ = std::fs::remove_dir_all(scratch);
+            }
         }
         std::process::exit(130);
     }
@@ -91,9 +96,10 @@ fn force_kill(pid: u32) {
 #[cfg(not(unix))]
 fn force_kill(_pid: u32) {}
 
-/// Track a launched Chrome. The first registration after none were live
-/// starts with a clear cancel flag.
-pub(crate) fn register(pid: u32, profile: PathBuf) -> u64 {
+/// Track a launched Chrome, and the scratch profile to remove if the
+/// process has to exit at once. The first registration after none were
+/// live starts with a clear cancel flag.
+pub(crate) fn register(pid: u32, scratch: Option<PathBuf>) -> u64 {
     let mut registry = registry();
     if registry.entries.is_empty() {
         CANCELED.store(false, Ordering::SeqCst);
@@ -103,7 +109,7 @@ pub(crate) fn register(pid: u32, profile: PathBuf) -> u64 {
     registry.entries.push(Entry {
         id,
         pid: Some(pid),
-        profile,
+        scratch,
     });
     id
 }
@@ -139,7 +145,7 @@ mod tests {
     /// test sets it: a parallel test's launch would see it.
     #[test]
     fn a_reaped_process_loses_its_pid_and_unregisters() {
-        let id = register(u32::MAX, PathBuf::from("/nonexistent/profile"));
+        let id = register(u32::MAX, Some(PathBuf::from("/nonexistent/profile")));
         let pid = |id| {
             registry()
                 .entries
