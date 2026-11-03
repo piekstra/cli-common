@@ -219,8 +219,8 @@ mod tests {
         assert!(v.get("browser_profile").is_none());
     }
 
-    /// An optional field added within `auth-status/v1`: left off the wire by
-    /// a CLI that does not set it, and missing from an older payload.
+    /// `verified` is on both values of an `auth-login/v1` result, because a driver
+    /// tests for it.
     #[test]
     fn a_login_result_says_verified_on_both_values() {
         for verified in [true, false] {
@@ -239,6 +239,8 @@ mod tests {
         assert_eq!(s.to_json()["verified"], false);
     }
 
+    /// An optional field added within `auth-status/v1`: left off the wire by
+    /// a CLI that does not set it, and missing from an older payload.
     #[test]
     fn the_browser_profile_is_reported_only_when_set() {
         let mut s = AuthStatus::new(true, true, AuthMethod::BrowserSession);
