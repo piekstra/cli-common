@@ -35,9 +35,9 @@ Shared surface spec + library crates for the piekstra CLI family. Read
 
 ## Code signing (macOS)
 
-`scripts/setup-dev-signing.sh` (one-time) + `scripts/dev-sign.sh <bin>` keep
-keychain ACL grants stable by signing with the `pk-cli-codesign` identity. The
-identity lives only in the owner's login keychain — never commit or distribute
+`scripts/setup-dev-signing.sh` (one-time) + `scripts/dev-sign.sh <bin>` keep the
+designated requirement stable by signing with the `pk-cli-codesign` identity,
+which satisfies a keychain item's access list. The identity lives only in the owner's login keychain — never commit or distribute
 it.
 
 The targets below belong in each **family CLI's** Makefile, the repos that
@@ -90,9 +90,8 @@ endef
 ```
 
 Verify with `codesign -dv $(which <bin>)`: you want the stable
-`pk-cli-codesign` signature, not `Signature=adhoc`. Changing the identity
-invalidates the previous grant, so expect exactly one more prompt after
-adopting this.
+`pk-cli-codesign` signature, not `Signature=adhoc`. Every new binary prompts
+once per keychain item it reads, as the signing section above explains.
 
 `install` passes `--locked`. Without it `cargo install` ignores Cargo.lock and
 resolves dependencies afresh, so the installed binary is built from newer
