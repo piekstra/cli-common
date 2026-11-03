@@ -39,7 +39,8 @@
 //! - [`SendDeadline`]: checks, right before each send, that a write has not
 //!   outlived its caller, on a monotonic and a wall clock behind [`Clock`]
 //!   ([`SystemClock`] is native only: the real clocks panic on
-//!   `wasm32-unknown-unknown`).
+//!   `wasm32-unknown-unknown`). [`hold_within`], native too, is a server's turn lock with a
+//!   bound on the wait.
 //!
 //! # The WASM boundary is MCP-shaped JSON
 //!
@@ -110,11 +111,11 @@ pub mod wasm;
 #[cfg(feature = "stdio")]
 pub use command::{run, McpArgs};
 #[cfg(not(target_arch = "wasm32"))]
-pub use deadline::SystemClock;
+pub use deadline::{hold_within, SystemClock};
 pub use deadline::{Clock, SendDeadline, CALL_LIMIT};
 pub use error::{ErrorKind, ToolError};
 #[cfg(feature = "http")]
-pub use http::{restart_note, HTTP_TOKEN_ACCOUNT};
+pub use http::{restart_note, stop_note, HTTP_TOKEN_ACCOUNT};
 /// `pk_cli_core::block_on`, re-exported for a CLI's tests.
 #[cfg(feature = "test-util")]
 pub use pk_cli_core::block_on;

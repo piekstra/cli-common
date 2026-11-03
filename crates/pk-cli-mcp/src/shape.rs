@@ -385,8 +385,10 @@ impl PositionRequest {
 /// **A key must resume immediately after its row.** A row's own id does, for a provider that reads
 /// on with `before=<id>`. A provider's cursor marking the end of a whole page of its rows does
 /// not, since a page cut by its limit or the size budget would skip the rest of that page. So
-/// for that provider a key holds the cursor that fetched the row's page and how far into that
-/// page the row is.
+/// for that provider a key holds the cursor that fetched the row's page and what the row is, and
+/// the tool re-reads that page and resumes just after the row. A count into the page would not
+/// do, since a row arriving or leaving there moves the rest. If the row itself has gone, the
+/// place is lost: the tool says so and the caller starts over, rather than guess.
 ///
 /// A key travels in the cursor encoded and not encrypted, through the client and into the model's
 /// transcript, so it is something the client may already see. It also comes back from the client,
@@ -770,55 +772,74 @@ mod tests {
         assert_eq!(next.unwrap().resume(), Some("k1"));
     }
 
-    /// A provider's cursor marks the end of a whole page of its rows, so each row's key holds the
-    /// cursor that fetched its page and how far into that page it is.
+    /// Two provider pages reached by the cursor before each. A row's key is the cursor that
+    /// fetched its page and the row itself, so the next call resumes just after that row.
+    fn read_by_page_cursor(
+        pages: &[Vec<u32>],
+        cursor: Option<&str>,
+    ) -> Result<Page<u32>, ToolError> {
+        let r = ResumeRequest::new(&args(Some(3), cursor), &())?;
+        let (mut at, after) = match r.resume().map(|k| k.split_once('|').unwrap()) {
+            Some((page, row)) => (page.parse::<usize>().unwrap(), row.parse::<u32>().ok()),
+            None => (0, None),
+        };
+        let mut keyed = Vec::new();
+        let mut after = after;
+        while keyed.len() <= r.limit() && at < pages.len() {
+            let rows = &pages[at];
+            let start = match after.take() {
+                None => 0,
+                Some(row) => {
+                    rows.iter().position(|r| *r == row).ok_or_else(|| {
+                        ToolError::usage("the list changed where this read had reached")
+                    })? + 1
+                }
+            };
+            for row in &rows[start..] {
+                keyed.push((format!("{at}|{row}"), *row));
+            }
+            at += 1;
+        }
+        let rest = (at < pages.len()).then(|| format!("{at}|"));
+        r.page(keyed, rest, "since")
+    }
+
     #[test]
     fn a_page_level_cursor_loses_no_rows_to_a_cut_page() {
-        // Three provider pages of four rows, each reached by the cursor before it.
-        let provider = |cursor: Option<&str>| -> (Vec<u32>, Option<String>) {
-            match cursor {
-                None => ((0..4).collect(), Some("p1".into())),
-                Some("p1") => ((4..8).collect(), Some("p2".into())),
-                Some("p2") => ((8..12).collect(), None),
-                other => panic!("{other:?}"),
-            }
-        };
+        let pages = [(0..4).collect::<Vec<u32>>(), (4..8).collect()];
         let mut seen = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let r = ResumeRequest::new(&args(Some(3), cursor.as_deref()), &()).unwrap();
-            let (mut at, skip) = match r.resume().map(|k| k.split_once('|').unwrap()) {
-                Some((skip, "")) => (None, skip.parse::<usize>().unwrap()),
-                Some((skip, c)) => (Some(c.to_string()), skip.parse::<usize>().unwrap()),
-                None => (None, 0),
-            };
-            let mut keyed = Vec::new();
-            let mut skip = skip;
-            let mut rest = None;
-            while keyed.len() <= r.limit() {
-                let (rows, next) = provider(at.as_deref());
-                let here = at.clone().unwrap_or_default();
-                for (i, row) in rows.into_iter().enumerate().skip(skip) {
-                    keyed.push((format!("{}|{here}", i + 1), row));
-                }
-                skip = 0;
-                match next {
-                    Some(n) => at = Some(n),
-                    None => {
-                        rest = None;
-                        break;
-                    }
-                }
-                rest = at.as_ref().map(|n| format!("0|{n}"));
-            }
-            let page = r.page(keyed, rest, "since").unwrap();
+            let page = read_by_page_cursor(&pages, cursor.as_deref()).unwrap();
             seen.extend(page.items);
             match page.info.next_cursor {
                 Some(c) => cursor = Some(c),
                 None => break,
             }
         }
-        assert_eq!(seen, (0..12).collect::<Vec<u32>>());
+        assert_eq!(seen, (0..8).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn a_page_level_cursor_survives_a_row_moving_in_the_page_it_re_reads() {
+        let pages = [vec![0, 1, 2, 3, 4, 5], vec![6, 7]];
+        let first = read_by_page_cursor(&pages, None).unwrap();
+        assert_eq!(first.items, [0, 1, 2]);
+        let cursor = first.info.next_cursor;
+
+        // A row arrives at the top, and one already returned leaves.
+        let moved = [vec![99, 0, 2, 3, 4, 5], vec![6, 7]];
+        let next = read_by_page_cursor(&moved, cursor.as_deref()).unwrap();
+        assert_eq!(next.items, [3, 4, 5]);
+    }
+
+    #[test]
+    fn a_page_level_cursor_says_when_its_own_row_has_gone() {
+        let pages = [vec![0, 1, 2, 3, 4, 5], vec![6, 7]];
+        let first = read_by_page_cursor(&pages, None).unwrap();
+        let moved = [vec![0, 1, 3, 4, 5], vec![6, 7]];
+        let e = read_by_page_cursor(&moved, first.info.next_cursor.as_deref()).unwrap_err();
+        assert!(e.message().contains("changed"), "{e}");
     }
 
     #[test]
