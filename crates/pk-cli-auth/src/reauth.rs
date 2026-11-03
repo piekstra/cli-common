@@ -66,7 +66,7 @@ pub fn with_reauth<T>(
     reauth: impl FnOnce() -> Result<(), CliError>,
 ) -> Result<T, CliError> {
     match op() {
-        Err(CliError::Auth(_)) => {
+        Err(e) if e.is_auth() => {
             // The login error, when there is one, is the actionable message.
             reauth()?;
             op()
@@ -93,6 +93,27 @@ mod tests {
         .unwrap();
         assert_eq!(out, "data");
         assert!(!reauthed.get(), "must not log in when nothing was wrong");
+    }
+
+    /// A producer that types its cause must not lose the retry its exit code earns.
+    #[test]
+    fn an_auth_failure_with_a_typed_reason_reauthenticates_too() {
+        let attempts = Cell::new(0);
+        let out = with_reauth(
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err(CliError::Auth("session expired".into())
+                        .because(pk_cli_core::Reason::CredentialRefused))
+                } else {
+                    Ok("fresh data")
+                }
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(out, "fresh data");
+        assert_eq!(attempts.get(), 2);
     }
 
     #[test]
@@ -155,7 +176,7 @@ mod tests {
             let err = with_reauth(
                 || {
                     attempts.set(attempts.get() + 1);
-                    Err::<(), _>(clone_err(&original))
+                    Err::<(), _>(original.clone())
                 },
                 || {
                     reauthed.set(true);
@@ -204,17 +225,5 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.exit_code(), 3);
-    }
-
-    fn clone_err(e: &CliError) -> CliError {
-        match e {
-            CliError::Usage(m) => CliError::Usage(m.clone()),
-            CliError::Auth(m) => CliError::Auth(m.clone()),
-            CliError::NotFound(m) => CliError::NotFound(m.clone()),
-            CliError::Upstream(m) => CliError::Upstream(m.clone()),
-            CliError::ConfirmationRequired(m) => CliError::ConfirmationRequired(m.clone()),
-            CliError::Keychain(m) => CliError::Keychain(m.clone()),
-            CliError::Other(m) => CliError::Other(m.clone()),
-        }
     }
 }

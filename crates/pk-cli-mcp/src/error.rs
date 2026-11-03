@@ -6,7 +6,8 @@
 //! [`ToolError::render`] turns it into the text of an `isError` result that
 //! says what to do about it. The remedy depends only on the kind, so every
 //! family server words an expired login, a bad argument or a provider outage
-//! the same way.
+//! the same way. A remedy the error kept apart for a terminal
+//! ([`CliError::with_remedy`]) stays out of the tool's text.
 //!
 //! **A tool never signs in.** An MCP server has no terminal: its stdin and
 //! stdout carry the protocol, and a prompt for a password or a keychain-item
@@ -207,22 +208,30 @@ impl From<CliError> for ToolError {
         // "network/upstream error:" for a terminal; the slug says that here.
         match e {
             CliError::Usage(m) => Self::usage(m),
-            CliError::Auth(m) => Self::auth(auth_reason(&m)),
+            CliError::Auth(m) => Self::auth(remedy_cut_from_text(&m)),
             CliError::NotFound(m) => Self::not_found(m),
             CliError::Upstream(m) => Self::upstream(m),
             CliError::ConfirmationRequired(m) => Self::new(ErrorKind::ConfirmationRequired, m),
             // Not "read": a tool that renews a session writes the keychain too.
             CliError::Keychain(m) => Self::other(format!("the OS keychain could not be used: {m}")),
             CliError::Other(m) => Self::other(m),
+            // A message with its remedy kept apart holds only what went wrong, so no
+            // text is searched: an auth message may say `Run` in its own right.
+            detailed @ CliError::Detailed(_) => match detailed.into_base() {
+                CliError::Auth(m) => Self::auth(m),
+                plain => plain.into(),
+            },
         }
     }
 }
 
-/// Why a read was refused, without the remedy a CLI's message closes on for a
-/// terminal (the family words it several ways). The tool error's fix names the
-/// one command to ask for; a second, often different, command in the same error
-/// would leave the user to pick.
-fn auth_reason(message: &str) -> &str {
+/// A plain `CliError::Auth` from a message not yet moved to
+/// [`CliError::with_remedy`]: why a read was refused, without the remedy it closes
+/// on for a terminal (the family words it several ways). The tool error's fix names
+/// the one command to ask for; a second, often different, command in the same error
+/// would leave the user to pick. This reads the text, which rewording breaks silently,
+/// so it goes once every family CLI's auth messages keep their remedies apart.
+fn remedy_cut_from_text(message: &str) -> &str {
     [" \u{2014} run `", "; run `", " Run `", " Re-run `"]
         .iter()
         .filter_map(|remedy| message.find(remedy))
@@ -254,6 +263,54 @@ mod tests {
             assert!(text.starts_with("auth: no stored password"), "{text}");
             assert!(text.contains("`svc auth login`"), "{text}");
             assert!(!text.contains("old"), "{text}");
+        }
+    }
+
+    /// A typed remedy is not searched for: this message says "Run" as part of what went
+    /// wrong, and the text cut would have eaten it.
+    #[test]
+    fn a_remedy_kept_apart_leaves_the_message_whole_and_out_of_the_tool_text() {
+        let e = CliError::Auth("the token from a `; run ` of the old script expired".into())
+            .with_remedy("run `old init`");
+        let tool = ToolError::from(e);
+        assert_eq!(tool.kind(), ErrorKind::Auth);
+        assert_eq!(
+            tool.message(),
+            "the token from a `; run ` of the old script expired"
+        );
+        let text = tool.render(&server("svc"));
+        assert!(text.contains("`svc auth login`"), "{text}");
+        assert!(!text.contains("old init"), "{text}");
+    }
+
+    #[test]
+    fn a_typed_error_keeps_its_kind_and_inner_message() {
+        use pk_cli_core::Reason;
+        for (error, kind, message) in [
+            (
+                CliError::Upstream("HTTP 400".into()).because(Reason::BadRequest),
+                ErrorKind::Upstream,
+                "HTTP 400",
+            ),
+            (
+                CliError::NotFound("no such".into()).with_remedy("list them"),
+                ErrorKind::NotFound,
+                "no such",
+            ),
+            (
+                CliError::Keychain("denied".into()).because(Reason::CredentialUnreadable),
+                ErrorKind::Other,
+                "the OS keychain could not be used: denied",
+            ),
+            (
+                CliError::Other("odd".into()).because(Reason::Provider("x")),
+                ErrorKind::Other,
+                "odd",
+            ),
+        ] {
+            let tool = ToolError::from(error);
+            assert_eq!(tool.kind(), kind);
+            assert_eq!(tool.message(), message);
         }
     }
 

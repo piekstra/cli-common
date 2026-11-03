@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · `Confirm::Undecided`, when a window capture's read cannot decide (§2.2) · 2026-11-03 · `pk-cli-arcgis`, read-only ArcGIS REST layer queries (Part 2) · 2026-11-03 · `SendDeadline`, a late write's check in one place (§1.9, §2.3) · 2026-11-03
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · `Confirm::Undecided`, when a window capture's read cannot decide (§2.2) · 2026-11-03 · `pk-cli-arcgis`, read-only ArcGIS REST layer queries (Part 2) · 2026-11-03 · `SendDeadline`, a late write's check in one place (§1.9, §2.3) · 2026-11-03 · `CliError::because`, a typed cause and a remedy apart from the message (§1.5, §1.9) · 2026-11-03
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -169,6 +169,18 @@ refuses `--json` has no result to carry it.
 
 Drivers can branch on 3 ("run login flow") and 5 ("provider issue, retry later")
 without parsing messages.
+
+Code inside a CLI branches without parsing them too. A producer that knows more than
+the exit code says so on the error: `CliError::because(Reason)` types the cause
+(`Forbidden` for a 403, `BadRequest` for a 400, `RenewalOff`, `Provider("...")` for a
+cause only this CLI has) and `CliError::with_remedy` keeps what to do next apart from
+what went wrong. A caller reads `reason()`, `message()` and `remedy()`, never the text,
+which gets reworded with no compile error. Neither changes the exit code or the slug;
+`Display` and `--json` print the remedy after the message, joined by an em dash. A
+pattern such as `CliError::Auth(_)` does not see through this detail: such a caller
+uses `is_auth()` or matches on `base()`. The shared crates' own errors stay plain, so a
+CLI's patterns over them keep working; a CLI that types a cause checks its own patterns
+when it does.
 
 ### 1.6 `info` — machine discovery (v1.1, enables manifest auto-generation)
 
@@ -580,6 +592,11 @@ remedies above are the local host's. A CLI whose sign-in is not plain
 instructions and every auth error use. A host where that fixes nothing (a
 Worker) sets its own with `Server::hosted`, which replaces it.
 
+A tool's text carries one remedy. An error's `with_remedy` (§1.5) is for a terminal and
+stays out of it, and a tool that answers differently by cause reads `CliError::reason`
+in its `tool_err`. A plain `CliError::Auth` whose message closes on its own remedy has
+that cut from the text, for messages not yet moved to `with_remedy`.
+
 #### A tool never signs in
 
 An MCP server's stdin and stdout carry the protocol. A tool call never
@@ -628,7 +645,7 @@ AGENTS.md, same house style as the CLIs.
 
 | Crate | Contents | Replaces (today) |
 |---|---|---|
-| `pk-cli-core` | `GlobalArgs` clap flatten struct; `ExitCode` enum per 1.5; error type with `code` slugs; output renderer (key/value blocks, pipe tables, JSON emit incl. error shape, `emit_list`/`emit_one` for plain lists and single resources); date/money types (`Money` and its grouped `$1,234.56` text display, ISO parsing helpers, UTC and local-timezone `today`); the §1.3 confirmation gate (`confirm`); reference resolution (`resolve::pick` — exact name, exact id, case-insensitive name, unique partial; ties are exit 4 naming the candidates) | fpl/xfin `output.rs`+`dates.rs`+`error.rs`, lrfl `formatter.rs`, tojfl `output.rs`; ghome/govee/lofty `confirm`, ghome/govee resolve ladders |
+| `pk-cli-core` | `GlobalArgs` clap flatten struct; `ExitCode` enum per 1.5; error type with `code` slugs, a typed `Reason` and a remedy apart from the message; output renderer (key/value blocks, pipe tables, JSON emit incl. error shape, `emit_list`/`emit_one` for plain lists and single resources); date/money types (`Money` and its grouped `$1,234.56` text display, ISO parsing helpers, UTC and local-timezone `today`); the §1.3 confirmation gate (`confirm`); reference resolution (`resolve::pick` — exact name, exact id, case-insensitive name, unique partial; ties are exit 4 naming the candidates) | fpl/xfin `output.rs`+`dates.rs`+`error.rs`, lrfl `formatter.rs`, tojfl `output.rs`; ghome/govee/lofty `confirm`, ghome/govee resolve ladders |
 | `pk-cli-secrets` | keychain read/write/delete under `piekstra.<bin>`; typed one-item JSON credentials (`get_json`/`set_json`) and legacy-service migration (`migrate_from`); secret ingestion (`--stdin`/`--from-env`/`--op` args + logic); 1Password reads through `op` (`OpRef`, `OnePassword`); runtime source precedence (`SecretResolver`, `SourceOrder`); `auth set-credential` command impl | fpl/xfin `secrets.rs`, lrfl `auth/secrets.rs`; ghome `session.rs`/tplc `keychain.rs` item consolidation |
 | `pk-cli-config` | `~/.config/<bin>/config.toml` load/save, typed get/set, `config` subcommand impl, `--config` override | four `config.rs` variants |
 | `pk-cli-selfupdate` | GitHub-release check + in-place replace, `--check`/`-y`/`--json`, `self-update/v1` DTO, release-asset naming convention, a note after an install (`run_noting`) | ~580 duplicated lines across 4 repos |

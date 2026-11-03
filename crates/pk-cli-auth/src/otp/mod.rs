@@ -302,7 +302,7 @@ impl<'a, T: OtpTransport> OtpLogin<'a, T> {
             match self.watch(*mailbox, query, requested_at) {
                 Ok(Some(code)) => match self.redeem(parked, &code) {
                     Ok(session) => return Ok(session),
-                    Err((err, Some(still))) if matches!(err, CliError::Auth(_)) => {
+                    Err((err, Some(still))) if err.is_auth() => {
                         self.note(&format!(
                             "the code read from the mailbox was refused: {err}"
                         ));
@@ -324,7 +324,7 @@ impl<'a, T: OtpTransport> OtpLogin<'a, T> {
                 let code = OtpCode::parse(&raw)?;
                 match self.redeem(parked, &code) {
                     Ok(session) => return Ok(session),
-                    Err((err, Some(still))) if matches!(err, CliError::Auth(_)) => {
+                    Err((err, Some(still))) if err.is_auth() => {
                         self.note(&err.to_string());
                         parked = still;
                     }
@@ -384,7 +384,8 @@ impl<'a, T: OtpTransport> OtpLogin<'a, T> {
                 }
                 Ok(session)
             }
-            Err(CliError::Auth(msg)) => {
+            Err(err) if err.is_auth() => {
+                let msg = err.message();
                 parked.rejected += 1;
                 if parked.rejected >= self.max_rejected {
                     if let Err(err) = self.slot.clear() {
