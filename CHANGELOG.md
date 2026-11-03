@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.24.0 — 2026-11-03
+
+- `pk-cli-core`: `transport::require_secure_url` refuses a URL that is not `https`,
+  except plain `http` to this machine, naming only the scheme and host. Call it where
+  a URL or host comes from outside the binary and a credential goes with the request.
+- `pk-cli-core`: feature `reqwest` adds `transport::secure_redirects`, a redirect policy
+  that keeps the limit of ten and errors on a redirect that leaves `https`.
+- `pk-cli-core`: a `reqwest` failure's message names the origin, not the whole URL. A
+  path or query can carry an account id or a token.
+- `conformance.md`: the rule for both, and every workflow file sets `permissions:` at
+  the top level.
+
 ## v0.22.0 — 2026-11-03
 
 - `pk-cli-mcp`: feature `http` exports `HTTP_TOKEN_ACCOUNT`, the keychain item

@@ -14,6 +14,7 @@
 //! drives them with [`crate::block_on()`] at no cost.
 
 use std::fmt;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use crate::CliError;
@@ -333,6 +334,69 @@ fn origin_and_path(url: &str) -> (String, &str) {
     (format!("{scheme}{host}"), path)
 }
 
+/// Refuse a URL a credential must not travel to: anything but `https`, except
+/// plain `http` to this machine, which a stub or a local tunnel uses.
+///
+/// Call it before sending when the URL or host came from outside the binary:
+/// a raw `api` passthrough, a host override, a URL in a provider's response.
+/// The message names only the scheme and host, since the rest can carry an
+/// account id or a token.
+pub fn require_secure_url(url: &str) -> Result<(), CliError> {
+    if is_secure_url(url) {
+        return Ok(());
+    }
+    Err(CliError::Usage(format!(
+        "refusing to send a request to {}: only https is allowed, or http to this machine",
+        origin_and_path(url).0
+    )))
+}
+
+/// The redirect policy to pair with [`require_secure_url`]: reqwest's default
+/// limit of ten, and an error on a redirect that leaves `https`. reqwest keeps
+/// a provider's own auth headers (anything but `Authorization` and `Cookie`)
+/// across a redirect, and sends a jar's cookies that are not marked `Secure`.
+#[cfg(feature = "reqwest")]
+pub fn secure_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            attempt.error("too many redirects")
+        } else if is_secure_url(attempt.url().as_str()) {
+            attempt.follow()
+        } else {
+            attempt.error("refusing a redirect that leaves https")
+        }
+    })
+}
+
+fn is_secure_url(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    if scheme.eq_ignore_ascii_case("https") {
+        return true;
+    }
+    // `\\` ends the authority too: reqwest's URL parser reads it as `/`, so
+    // `http://example.com\\@127.0.0.1/` goes to example.com.
+    let end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
+    scheme.eq_ignore_ascii_case("http") && is_loopback_authority(&rest[..end])
+}
+
+/// Anything this cannot read as a loopback host is not one, so a spelling the
+/// URL parser would resolve differently is refused rather than guessed at.
+fn is_loopback_authority(authority: &str) -> bool {
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if let Some(bracketed) = host.strip_prefix('[') {
+        return bracketed
+            .split_once(']')
+            .is_some_and(|(ip, _)| ip.parse::<Ipv6Addr>().is_ok_and(|ip| ip.is_loopback()));
+    }
+    let name = host.split_once(':').map_or(host, |(name, _)| name);
+    name.eq_ignore_ascii_case("localhost")
+        || name.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
+}
+
 fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
@@ -361,6 +425,96 @@ pub fn percent_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn https_passes_and_http_passes_only_to_this_machine() {
+        for url in [
+            "https://www.example.com/x?token=dummy",
+            "HTTPS://www.example.com/",
+            "http://127.0.0.1:8080/x",
+            "http://127.8.8.8/x",
+            "http://localhost/x",
+            "HTTP://LOCALHOST:9/x",
+            "http://[::1]:8080/x",
+            "http://user@127.0.0.1/x",
+        ] {
+            assert!(require_secure_url(url).is_ok(), "{url}");
+        }
+    }
+
+    #[test]
+    fn everything_else_is_refused() {
+        for url in [
+            "http://www.example.com/x",
+            "http://10.0.0.1/x",
+            "http://0.0.0.0/x",
+            "http://[::ffff:127.0.0.1]/x",
+            "http://[2001:db8::1]/x",
+            // A loopback name only in the userinfo, the subdomain or the path.
+            "http://127.0.0.1@example.com/x",
+            "http://127.0.0.1:80@example.com/x",
+            "http://localhost.example.com/x",
+            "http://127.0.0.1.example.com/x",
+            "http://example.com/127.0.0.1",
+            "http://example.com?127.0.0.1",
+            "http://example.com#@127.0.0.1",
+            // The URL parser reads a backslash as a slash, and strips tabs.
+            "http://example.com\\@127.0.0.1/",
+            "http://127.0.0.1\t.example.com/",
+            // Spellings of loopback this does not try to resolve.
+            "http://0x7f.0.0.1/x",
+            "http://2130706433/x",
+            "ftp://127.0.0.1/x",
+            "file:///etc/passwd",
+            "www.example.com/x",
+            "",
+        ] {
+            assert!(require_secure_url(url).is_err(), "{url:?}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_names_the_host_and_not_the_rest_of_the_url() {
+        let err = require_secure_url("http://user:dummy-pass@example.com/a/1234?token=dummy-token")
+            .unwrap_err();
+        let message = err.to_string();
+        assert_eq!(err.exit_code(), 2);
+        assert!(message.contains("http://example.com"), "{message}");
+        for leak in ["dummy-pass", "user", "1234", "dummy-token"] {
+            assert!(!message.contains(leak), "{leak} printed: {message}");
+        }
+    }
+
+    /// A loopback server that answers one request with a redirect to `location`.
+    #[cfg(feature = "reqwest")]
+    fn redirecting_server(location: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let base = format!("http://{}", listener.local_addr().expect("local addr"));
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut head = [0u8; 1024];
+            let _ = sock.read(&mut head);
+            let reply = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = sock.write_all(reply.as_bytes());
+        });
+        base
+    }
+
+    #[cfg(feature = "reqwest")]
+    #[test]
+    fn a_redirect_off_https_is_an_error_before_the_next_hop() {
+        let client = reqwest::blocking::Client::builder()
+            .redirect(secure_redirects())
+            .build()
+            .expect("client");
+        let base = redirecting_server("http://www.example.invalid/next");
+        let err = client.get(format!("{base}/x")).send().unwrap_err();
+        assert!(err.is_redirect(), "{err}");
+        assert!(format!("{err:?}").contains("leaves https"), "{err:?}");
+    }
 
     #[test]
     fn a_429_a_5xx_and_a_403_page_say_nothing_about_the_session() {

@@ -77,8 +77,15 @@ impl std::error::Error for CliError {}
 
 #[cfg(feature = "reqwest")]
 impl From<reqwest::Error> for CliError {
+    /// reqwest's own message quotes the whole URL, and a path or query can carry
+    /// an account id or a token, so this keeps only the origin.
     fn from(e: reqwest::Error) -> Self {
-        CliError::Upstream(e.to_string())
+        let origin = e.url().map(|url| url.origin().ascii_serialization());
+        let message = e.without_url().to_string();
+        CliError::Upstream(match origin {
+            Some(origin) => format!("{message} ({origin})"),
+            None => message,
+        })
     }
 }
 
@@ -103,5 +110,24 @@ mod tests {
         let v = e.to_json();
         assert_eq!(v["error"]["code"], "auth");
         assert_eq!(v["error"]["message"], "login required");
+    }
+
+    #[cfg(feature = "reqwest")]
+    #[test]
+    fn a_network_failure_names_the_origin_and_not_the_rest_of_the_url() {
+        // Nothing listens on a port the OS just gave back.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .expect("a free port")
+            .port();
+        let err = reqwest::blocking::get(format!(
+            "http://127.0.0.1:{port}/accounts/1234?token=dummy-token"
+        ))
+        .unwrap_err();
+        let message = CliError::from(err).to_string();
+        assert!(message.contains(&format!("127.0.0.1:{port}")), "{message}");
+        for leak in ["accounts", "1234", "dummy-token"] {
+            assert!(!message.contains(leak), "{leak} printed: {message}");
+        }
     }
 }
