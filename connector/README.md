@@ -255,6 +255,8 @@ restarts it only when it exits. Restart it:
 `launchctl kickstart -k gui/$(id -u)/com.piekstra.m1f-mcp-http`. The new
 server's line in `~/Library/Logs/m1f-mcp-http.log` names its version. A new
 binary may ask once more to read its keychain items; choose **Always Allow**.
+A Claude Desktop extension for the same CLI runs its own copy: install the new
+release's `.mcpb` to replace it.
 
 **A new version of this connector.** Your repository is a copy of this
 folder, at its root, with no shared history, so an update is a copy rather

@@ -283,25 +283,31 @@ fn start_line(server: &Server, addr: SocketAddr, tools: usize, writes: usize) ->
 
 /// The note for `pk_cli_selfupdate::Updater::run_noting`: `self-update` swaps
 /// the binary on disk, but `<bin> mcp --http` runs until it is stopped, so it
-/// keeps serving the old code until someone restarts it. On macOS the note adds
-/// the command for the launchd agent `connector/`'s README installs, whose label
-/// it names; elsewhere there is no one command to give.
+/// keeps serving the old code until someone restarts it, and a Claude Desktop
+/// extension runs the copy its `.mcpb` bundled. On macOS the note adds the command
+/// for the launchd agent `connector/`'s README installs, whose label it names;
+/// elsewhere there is no one command to give.
 pub fn restart_note(bin: &str) -> String {
     note_for(bin, cfg!(target_os = "macos"))
 }
 
 fn note_for(bin: &str, launchd: bool) -> String {
-    let note = format!(
+    let server = format!(
         "note: a running `{bin} mcp --http` keeps serving the old version until it is restarted."
     );
-    if launchd {
+    let restart = if launchd {
         format!(
-            "{note} Under the launchd agent from cli-common's connector/ README:\n  \
+            " Under the launchd agent from cli-common's connector/ README:\n  \
              launchctl kickstart -k gui/$(id -u)/com.piekstra.{bin}-mcp-http"
         )
     } else {
-        note
-    }
+        String::new()
+    };
+    format!(
+        "{server}{restart}\n\
+         note: a Claude Desktop extension runs its own copy: install the new release's `.mcpb` to \
+         replace it."
+    )
 }
 
 /// Serve on 127.0.0.1:`port` until the process is stopped.
@@ -526,6 +532,13 @@ mod tests {
             "svc 1.2.3 mcp: serving 2 tools (read-only) at http://127.0.0.1:8731/mcp to holders \
              of the bearer token"
         );
+    }
+
+    #[test]
+    fn the_note_names_the_extensions_own_copy() {
+        for launchd in [true, false] {
+            assert!(note_for("m1f", launchd).contains("`.mcpb`"));
+        }
     }
 
     #[test]
