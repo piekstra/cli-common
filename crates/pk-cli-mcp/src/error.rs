@@ -211,7 +211,8 @@ impl From<CliError> for ToolError {
             CliError::NotFound(m) => Self::not_found(m),
             CliError::Upstream(m) => Self::upstream(m),
             CliError::ConfirmationRequired(m) => Self::new(ErrorKind::ConfirmationRequired, m),
-            CliError::Keychain(m) => Self::other(format!("the OS keychain could not be read: {m}")),
+            // Not "read": a tool that renews a session writes the keychain too.
+            CliError::Keychain(m) => Self::other(format!("the OS keychain could not be used: {m}")),
             CliError::Other(m) => Self::other(m),
         }
     }
