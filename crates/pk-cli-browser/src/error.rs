@@ -27,8 +27,10 @@ pub enum BrowserError {
     Launch(String),
     /// The CLI's kept browser profile needs repair before it can be used
     /// or removed: it is not a private (`0700`) directory of the current
-    /// user's (a symlink, another owner, another mode), or it could not be
-    /// located, created or removed. The message names the path and the fix.
+    /// user's (a symlink, another owner, another mode), it could not be
+    /// located, created or removed, or its site storage could not be removed
+    /// ([`Launch::clear_site_storage`](crate::Launch::clear_site_storage)). The
+    /// message names the path and the fix.
     Profile(String),
     /// The CLI's kept browser profile is busy: another sign-in, or a Chrome
     /// still running in it, has it open. Waiting (closing that window) or

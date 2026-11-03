@@ -82,6 +82,8 @@ fn a_name_a_launch_would_refuse_is_refused_before_anything_is_looked_up() {
     for err in [
         forget_named_profile("t", "a b").unwrap_err(),
         forget_named_profile_in(Path::new("/nonexistent"), "t", "a b").unwrap_err(),
+        named_profile_exists("t", "a b").unwrap_err(),
+        named_profile_exists_in(Path::new("/nonexistent"), "t", "a b").unwrap_err(),
     ] {
         assert!(matches!(err, BrowserError::Invalid(_)), "{err:?}");
         assert!(
@@ -109,6 +111,18 @@ fn a_platform_without_a_kept_profile_signs_in_with_a_scratch_one() {
 #[should_panic(expected = "a test reached the real data directory")]
 fn tests_never_reach_the_real_data_directory() {
     let _ = default_root();
+}
+
+#[test]
+#[should_panic(expected = "a test reached the real data directory")]
+fn asking_about_the_real_profile_goes_through_the_guarded_directory() {
+    let _ = profile_exists("t");
+}
+
+#[test]
+#[should_panic(expected = "a test reached the real data directory")]
+fn asking_about_a_real_named_profile_goes_through_the_guarded_directory() {
+    let _ = named_profile_exists("t", "member-a");
 }
 
 #[test]
@@ -256,10 +270,7 @@ fn a_directory_is_usable_only_when_it_is_a_private_one_of_the_owners() {
     let cases = [
         (facts(true, false, me, 0o777), "is a symlink"),
         (facts(false, false, me, 0o600), "is not a directory"),
-        (
-            facts(false, true, 0, 0o700),
-            "is owned by uid 0, not by you (uid 501)",
-        ),
+        (facts(false, true, 0, 0o700), "belongs to another user"),
         (
             facts(false, true, me, 0o755),
             "has mode 0755, not 0700 (`chmod 700` it to use it)",
@@ -359,6 +370,20 @@ fn one_sign_in_holds_the_kept_profile_at_a_time() {
     drop(first);
     let second = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap();
     drop((second, named));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// What a process another thread is spawning holds until it execs: a copy of
+/// the lock's descriptor. It must not keep the next sign-in out.
+#[cfg(unix)]
+#[test]
+fn a_copy_of_the_locks_descriptor_does_not_hold_the_profile() {
+    let root = temp_root("lock-copy");
+    let first = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap();
+    let copy = first.run_lock.as_ref().unwrap().0.try_clone().unwrap();
+    drop(first);
+    drop(ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap());
+    drop(copy);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -637,6 +662,268 @@ fn forgetting_removes_only_the_profile_and_says_whether_there_was_one() {
     assert!(
         std::fs::symlink_metadata(&path).is_ok(),
         "the link stays too"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn whether_a_profile_exists_is_read_without_creating_anything() {
+    let root = temp_root("exists");
+    assert!(!profile_exists_in(&root, "t").unwrap());
+    assert!(!named_profile_exists_in(&root, "t", "member-a").unwrap());
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    // The data dir itself may be missing too.
+    let missing = root.join("missing");
+    assert!(!profile_exists_in(&missing, "t").unwrap());
+    assert!(!missing.exists());
+
+    // Each profile answers for itself, under the launch's naming of it.
+    drop(ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap());
+    assert!(profile_exists_in(&root, "t").unwrap());
+    assert!(!named_profile_exists_in(&root, "t", "member-a").unwrap());
+    drop(ProfileDir::open_kept(&root, "t", Some("Member-A"), Path::new(NO_CHROME)).unwrap());
+    assert!(named_profile_exists_in(&root, "t", "Member-A").unwrap());
+    assert!(!named_profile_exists_in(&root, "t", "member-a").unwrap());
+    assert!(!profile_exists_in(&root, "other").unwrap());
+
+    let bad = named_profile_exists_in(&root, "t", "../x").unwrap_err();
+    assert!(matches!(bad, BrowserError::Invalid(_)), "{bad:?}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn asking_whether_a_profile_exists_takes_no_lock() {
+    let root = temp_root("exists-lock");
+    let held = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap();
+    assert!(
+        profile_exists_in(&root, "t").unwrap(),
+        "answers mid sign-in"
+    );
+    let err = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap_err();
+    assert!(matches!(err, BrowserError::ProfileInUse(_)), "still held");
+    drop(held);
+
+    // A directory no sign-in has opened: found, and left as it was.
+    let path = kept_profile_path(&root, "t", Some("bare"));
+    std::fs::create_dir(&path).unwrap();
+    set_mode(&path, 0o755);
+    assert!(named_profile_exists_in(&root, "t", "bare").unwrap());
+    assert!(!path.join(RUN_LOCK).exists());
+    assert_eq!(mode_of(&path), 0o755, "an exposed profile is still one");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn what_is_no_profile_is_refused_as_a_logout_refuses_it() {
+    let root = temp_root("exists-refuse");
+    let path = kept_profile_path(&root, "t", None);
+    std::fs::create_dir(path.parent().unwrap()).unwrap();
+
+    let elsewhere = root.join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+    let err = profile_exists_in(&root, "t").unwrap_err();
+    assert!(matches!(err, BrowserError::Profile(_)), "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains(&path.display().to_string()), "{msg}");
+    assert!(msg.contains("is a symlink"), "{msg}");
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    std::fs::remove_file(&path).unwrap();
+
+    std::fs::write(&path, "x").unwrap();
+    let err = profile_exists_in(&root, "t").unwrap_err();
+    assert!(matches!(err, BrowserError::Profile(_)), "{err:?}");
+    assert!(err.to_string().contains("is not a directory"), "{err}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A kept profile holding every kind of site storage, a file in each.
+#[cfg(unix)]
+fn plant_site_storage(profile: &Path) {
+    for name in SITE_STORAGE {
+        let dir = profile.join(CHROME_PROFILE).join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("000003.log"), "dummy-refresh-token").unwrap();
+    }
+}
+
+#[cfg(unix)]
+fn assert_no_site_storage(profile: &Path) {
+    for name in SITE_STORAGE {
+        let path = profile.join(CHROME_PROFILE).join(name);
+        assert!(std::fs::symlink_metadata(&path).is_err(), "{name}");
+    }
+}
+
+/// What the option is for: script-readable storage goes, and what the
+/// provider remembers the device by stays.
+#[cfg(unix)]
+#[test]
+fn clearing_site_storage_leaves_the_rest_of_the_profile() {
+    let root = temp_root("clear");
+    let mut profile = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap();
+    let path = profile.path().to_path_buf();
+    plant_site_storage(&path);
+    let default = path.join(CHROME_PROFILE);
+    let rest = [
+        path.join("Local State"),
+        default.join("Cookies"),
+        default.join("Network").join("Cookies"),
+        default.join("Preferences"),
+        default.join("Cache").join("Cache_Data").join("index"),
+    ];
+    for file in &rest {
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "x").unwrap();
+    }
+
+    profile.clear_site_storage().unwrap();
+    assert_no_site_storage(&path);
+    for file in &rest {
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "x", "{file:?}");
+    }
+
+    // Written while Chrome runs, gone once this is dropped. A file where a
+    // directory belongs goes the same way.
+    plant_site_storage(&path);
+    std::fs::remove_dir_all(default.join("IndexedDB")).unwrap();
+    std::fs::write(default.join("IndexedDB"), "x").unwrap();
+    drop(profile);
+    assert_no_site_storage(&path);
+    for file in &rest {
+        assert!(file.exists(), "{file:?}");
+    }
+    assert!(path.join(RUN_LOCK).exists());
+
+    // Dropped without asking: nothing is removed.
+    plant_site_storage(&path);
+    drop(ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap());
+    assert!(default.join(SITE_STORAGE[0]).exists());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// Chrome makes `Default` on its first run; clearing does not get ahead of it.
+#[cfg(unix)]
+#[test]
+fn clearing_a_profile_chrome_has_not_used_creates_nothing() {
+    let root = temp_root("clear-new");
+    let mut profile = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap();
+    let path = profile.path().to_path_buf();
+    profile.clear_site_storage().unwrap();
+    assert!(!path.join(CHROME_PROFILE).exists());
+    drop(profile);
+    assert!(!path.join(CHROME_PROFILE).exists());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A `Default` that is no directory of the owner's refuses the clear, and
+/// the refused profile does not try again when dropped.
+#[cfg(unix)]
+#[test]
+fn a_chrome_profile_that_is_not_a_directory_is_refused_untouched() {
+    let root = temp_root("clear-refuse");
+    let outside = root.join("outside");
+    plant_site_storage(&outside);
+    let mut profile = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap();
+    let default = profile.path().join(CHROME_PROFILE);
+
+    std::os::unix::fs::symlink(outside.join(CHROME_PROFILE), &default).unwrap();
+    let err = profile.clear_site_storage().unwrap_err();
+    assert!(matches!(err, BrowserError::Profile(_)), "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains(&default.display().to_string()), "{msg}");
+    assert!(msg.contains("is a symlink; refusing to launch"), "{msg}");
+    std::fs::remove_file(&default).unwrap();
+
+    std::fs::write(&default, "x").unwrap();
+    let err = profile.clear_site_storage().unwrap_err();
+    assert!(matches!(err, BrowserError::Profile(_)), "{err:?}");
+    assert!(err.to_string().contains("is not a directory"), "{err}");
+
+    std::fs::remove_file(&default).unwrap();
+    std::os::unix::fs::symlink(outside.join(CHROME_PROFILE), &default).unwrap();
+    drop(profile);
+    for name in SITE_STORAGE {
+        let kept = outside.join(CHROME_PROFILE).join(name).join("000003.log");
+        assert!(kept.exists(), "{name}");
+    }
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A lock naming a live program the record knows, at the close: nothing is
+/// removed. One naming a pid that is gone is stale, and the removal goes ahead.
+#[cfg(unix)]
+#[test]
+fn the_close_leaves_site_storage_under_a_running_chrome_only() {
+    let root = temp_root("clear-holder");
+    let mut profile = ProfileDir::open_kept(&root, "t", None, Path::new(STAND_IN)).unwrap();
+    let path = profile.path().to_path_buf();
+    profile.clear_site_storage().unwrap();
+    plant_site_storage(&path);
+    let mut process = running_process();
+    let pid = process.id();
+    std::os::unix::fs::symlink(format!("some-host.local-{pid}"), path.join(SINGLETON_LOCK))
+        .unwrap();
+    drop(profile);
+    assert!(path.join(CHROME_PROFILE).join(SITE_STORAGE[0]).exists());
+
+    let warning = still_running_warning(&path, pid);
+    assert!(warning.starts_with("warning: a Chrome (pid "), "{warning}");
+    assert!(warning.contains(&path.display().to_string()), "{warning}");
+    assert!(
+        warning.contains("site storage was not removed"),
+        "{warning}"
+    );
+    assert!(warning.contains("next launch clears it"), "{warning}");
+
+    process.kill().unwrap();
+    process.wait().unwrap();
+    let mut profile = ProfileDir::open_kept(&root, "t", None, Path::new(STAND_IN)).unwrap();
+    profile.clear_site_storage().unwrap();
+    plant_site_storage(&path);
+    std::os::unix::fs::symlink(format!("some-host.local-{pid}"), path.join(SINGLETON_LOCK))
+        .unwrap();
+    drop(profile);
+    assert_no_site_storage(&path);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// The close's removal is best effort: a path that will not go neither
+/// panics nor holds the CLI up, and the profile is released all the same.
+/// Skipped where permissions do not bind (running as root).
+#[cfg(unix)]
+#[test]
+fn site_storage_that_will_not_go_on_close_is_warned_about_not_hung_on() {
+    if current_uid() == 0 {
+        return;
+    }
+    let root = temp_root("clear-stuck");
+    let mut profile = ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap();
+    let path = profile.path().to_path_buf();
+    profile.clear_site_storage().unwrap();
+    plant_site_storage(&path);
+    let default = path.join(CHROME_PROFILE);
+    set_mode(&default, 0o500);
+
+    let started = std::time::Instant::now();
+    drop(profile);
+    let elapsed = started.elapsed();
+    set_mode(&default, 0o700);
+
+    assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+    assert!(default.join(SITE_STORAGE[0]).exists());
+    drop(ProfileDir::open_kept(&root, "t", None, Path::new(NO_CHROME)).unwrap());
+
+    let stuck = default.join(SITE_STORAGE[0]);
+    let warning = storage_warning(&stuck, &std::io::Error::other("stuck"));
+    assert!(warning.starts_with("warning: could not remove the site storage "));
+    assert!(warning.contains(&stuck.display().to_string()), "{warning}");
+    assert!(
+        warning.contains("may hold the provider's tokens"),
+        "{warning}"
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
