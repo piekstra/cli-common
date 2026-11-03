@@ -116,7 +116,13 @@ fn a_result_ending_on_a_page_boundary_ends_on_the_empty_page() {
 
 #[test]
 fn a_layer_that_ignores_the_offset_fails_instead_of_looping() {
-    let server = server(|_| ok(&page_of(&["A1", "A2"], "")));
+    let server = server(|url| {
+        if url.contains("returnCountOnly") {
+            ok(r#"{"count":2}"#)
+        } else {
+            ok(&page_of(&["A1", "A2"], ""))
+        }
+    });
     let err = block_on(
         layer(&server)
             .page_size(2)
@@ -124,7 +130,31 @@ fn a_layer_that_ignores_the_offset_fails_instead_of_looping() {
     )
     .unwrap_err();
     assert_eq!(err.exit_code(), 5);
-    assert_eq!(server.seen.borrow().len(), 2);
+    assert!(err.to_string().contains("same page twice"), "{err}");
+    assert_eq!(server.seen.borrow().len(), 3);
+}
+
+#[test]
+fn identical_pages_are_kept_when_the_chosen_columns_do_not_identify_a_row() {
+    let server = server(|url| {
+        if url.contains("returnCountOnly") {
+            ok(r#"{"count":5}"#)
+        } else if url.contains("resultOffset=4") {
+            ok(&page_of(&["A"], ""))
+        } else {
+            ok(&page_of(&["A", "A"], ""))
+        }
+    });
+    let got = block_on(
+        layer(&server)
+            .page_size(2)
+            .rows(&Query::new("1=1", "OWNER,ID").fields("OWNER")),
+    )
+    .unwrap();
+    assert_eq!(got.len(), 5);
+    let counts = server.seen.borrow();
+    let counts = counts.iter().filter(|u| u.contains("returnCountOnly"));
+    assert_eq!(counts.count(), 1);
 }
 
 #[test]
@@ -200,7 +230,7 @@ fn an_error_in_a_200_body_keeps_its_exit_code() {
 fn an_error_with_no_code_does_not_invent_one() {
     let server = server(|_| ok(r#"{"error":{"message":"no"}}"#));
     let err = block_on(layer(&server).count("1=1")).unwrap_err();
-    assert!(!err.to_string().contains('0'), "{err}");
+    assert_eq!(err.to_string(), "network/upstream error: ArcGIS error: no");
 }
 
 #[test]
@@ -232,6 +262,27 @@ fn a_changed_response_fails_instead_of_reading_as_no_rows() {
     let server = server(|_| ok(r#"{"rows":[]}"#));
     let err = block_on(layer(&server).count("1=1")).unwrap_err();
     assert_eq!(err.exit_code(), 5);
+}
+
+#[test]
+fn a_layer_that_moved_fails_naming_where_it_went() {
+    struct Moved;
+    impl Transport for Moved {
+        async fn send(&self, _: HttpRequest) -> Result<HttpResponse, CliError> {
+            Ok(HttpResponse::new(301, "").header(
+                "Location",
+                "https://new.example/arcgis/rest/layer/0?token=secret",
+            ))
+        }
+    }
+    let err = block_on(Layer::new(Moved, "http://gis.example/0").count("1=1")).unwrap_err();
+    assert_eq!(err.exit_code(), 5);
+    let message = err.to_string();
+    assert!(
+        message.contains("HTTP 301 to https://new.example"),
+        "{message}"
+    );
+    assert!(!message.contains("secret"), "{message}");
 }
 
 #[test]

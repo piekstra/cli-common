@@ -17,8 +17,9 @@
 //!
 //! It runs over [`Transport`], whose errors name the origin only: a `where` clause holds
 //! what someone searched for, and does not belong in an error message. Native code passes
-//! `pk_cli_http::BlockingTransport` and drives the futures with
-//! [`block_on`](pk_cli_core::block_on).
+//! `pk_cli_http::BlockingTransport::new()`, which behaves as the Worker does, and drives the
+//! futures with [`block_on`](pk_cli_core::block_on). A layer that moved answers a redirect,
+//! which is not followed and fails naming where it went, so the CLI's pinned URL gets fixed.
 
 use pk_cli_core::transport::{HttpRequest, Transport};
 use pk_cli_core::CliError;
@@ -36,7 +37,8 @@ pub struct Layer<T> {
 }
 
 /// What to ask a layer for. The sort is required because paging is only coherent over
-/// a stable order: without one, a row can repeat or go missing between pages.
+/// a stable order: without one, a row can repeat or go missing between pages. It has to
+/// identify a row uniquely, or tied rows can do the same.
 #[derive(Debug, Clone)]
 pub struct Query<'a> {
     where_clause: &'a str,
@@ -47,7 +49,7 @@ pub struct Query<'a> {
 
 impl<'a> Query<'a> {
     /// Every column of every matching row, sorted by `order_by`, until [`Query::fields`]
-    /// or [`Query::limit`] say otherwise.
+    /// or [`Query::limit`] say otherwise. `order_by` must identify a row uniquely.
     pub fn new(where_clause: &'a str, order_by: &'a str) -> Self {
         Self {
             where_clause,
@@ -114,7 +116,8 @@ impl<T: Transport> Layer<T> {
     pub async fn rows(&self, query: &Query<'_>) -> Result<Vec<Value>, CliError> {
         let page_size = self.page_size as usize;
         let mut rows: Vec<Value> = Vec::new();
-        let mut last_first_row = None;
+        let mut last_page: Vec<Value> = Vec::new();
+        let mut total = None;
         loop {
             let want = match query.limit {
                 Some(limit) => (limit as usize).saturating_sub(rows.len()).min(page_size),
@@ -147,20 +150,30 @@ impl<T: Transport> Layer<T> {
                     Ok(rows)
                 };
             }
-            // A server that ignores the offset would otherwise send this page forever.
-            let first_row = features[0].get("attributes");
-            if first_row.is_some() && first_row == last_first_row.as_ref() {
-                return Err(CliError::Upstream(
-                    "ArcGIS sent the same page twice, so the layer does not page".into(),
-                ));
+            let page = features
+                .iter()
+                .map(|feature| {
+                    feature.get("attributes").cloned().ok_or_else(|| {
+                        CliError::Upstream("ArcGIS feature had no `attributes`".into())
+                    })
+                })
+                .collect::<Result<Vec<Value>, CliError>>()?;
+            // A server that ignores the offset would send this page forever. Two identical
+            // pages can also be honest, when the chosen columns do not identify a row, so
+            // the count decides.
+            if page == last_page {
+                let total = match total {
+                    Some(total) => total,
+                    None => *total.insert(self.count(query.where_clause).await?),
+                };
+                if (rows.len() + page.len()) as u64 > total {
+                    return Err(CliError::Upstream(
+                        "ArcGIS sent the same page twice, so the layer does not page".into(),
+                    ));
+                }
             }
-            last_first_row = first_row.cloned();
-            for feature in features {
-                let row = feature.get("attributes").cloned().ok_or_else(|| {
-                    CliError::Upstream("ArcGIS feature had no `attributes`".into())
-                })?;
-                rows.push(row);
-            }
+            rows.extend_from_slice(&page);
+            last_page = page;
             if let Some(limit) = query.limit {
                 rows.truncate(limit as usize);
             }
@@ -182,6 +195,17 @@ impl<T: Transport> Layer<T> {
         let response = self.transport.send(request).await?;
         if response.status == 404 {
             return Err(CliError::NotFound("ArcGIS layer not found".into()));
+        }
+        if (300..400).contains(&response.status) {
+            let moved_to = response
+                .header_value("location")
+                .filter(|to| to.starts_with("http"))
+                .map(|to| format!(" to {}", HttpRequest::get(to).origin()))
+                .unwrap_or_default();
+            return Err(CliError::Upstream(format!(
+                "ArcGIS layer moved: HTTP {}{moved_to}",
+                response.status
+            )));
         }
         if !response.is_success() {
             return Err(CliError::Upstream(format!(

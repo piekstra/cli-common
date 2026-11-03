@@ -54,6 +54,7 @@ wasm-check:
 		echo "wasm-check needs the target: rustup target add wasm32-unknown-unknown"; exit 1; }
 	$(CARGO) check --target wasm32-unknown-unknown -p pk-cli-mcp --no-default-features
 	$(CARGO) check --target wasm32-unknown-unknown -p pk-cli-utility --features mcp
+	$(CARGO) check --target wasm32-unknown-unknown -p pk-cli-arcgis
 	$(CARGO) clippy --target wasm32-unknown-unknown -p pk-cli-core -p pk-cli-mcp --features pk-cli-mcp/wasm -- -D warnings
 
 # The WebAssembly ABI end to end: the demo toolset built as a module the way
