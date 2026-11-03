@@ -83,7 +83,7 @@ Drift notes are from the 2026-07-19 family audit.
 | tojfl | **adopted** (v0.3.0) — summary/balance → utility-summary/v1, bills/usage/transactions → Paged envelopes |
 | xfin | **adopted** (v0.7.0) — new summary/balance entry points, statements → Paged |
 | fpl | **adopted** (v0.3.0) — summary/accounts balance → utility-summary/v1, bills/payments/history → Paged |
-| lrfl | adopted, PR open (v0.6.0) — summary/balance + history → payment-list/v1 |
+| lrfl | **adopted** (v0.6.0) — summary/balance + history → payment-list/v1 |
 
 Consumer: utiman parses the profile shapes from their schema tags with zero
 manifest field config (fast path + label-field chains, utiman #22/#26).
@@ -135,7 +135,10 @@ Google Home's, replacing a hand-kept device→room table. Producers declare
 | m1-cli (`m1f`) | `m1_portfolio`, `m1_activity`, `m1_documents`, `m1_realized_gains` | `.mcpb` on each release from v0.4.0 | home module: `m1f mcp --http` from v0.5.0 |
 | robinhood-cli (`rhd`) | `robinhood_portfolio`, `robinhood_activity`, `robinhood_documents` | `.mcpb` on each release from v0.3.0 | home module: `rhd mcp --http` from v0.4.0 |
 | `utility/v1` (`pk-cli-utility`, feature `mcp`, from v0.21.0) | `<prefix>_balance`, `<prefix>_bills`, `<prefix>_payments`, `<prefix>_usage`, written once over a `UtilitySource` per CLI | a CLI's own | a CLI's own |
-| fpl-cli (`fpl`), town-of-jupiter-fl-cli (`tojfl`), loxahatchee-river-fl-cli (`lrfl`), xfinity-cli (`xfin`) | planned: the `utility/v1` tools | planned | planned: home module |
+| fpl-cli (`fpl`) | `fpl_balance`, `fpl_bills`, `fpl_payments`, `fpl_usage` (`utility/v1`) | `.mcpb` on each release from v0.5.0; `fpl-cli` plugin in `claude-plugins` | home module: `fpl mcp --http` from v0.5.0 |
+| town-of-jupiter-fl-cli (`tojfl`) | `jupiter_balance`, `jupiter_bills`, `jupiter_payments`, `jupiter_usage` (`utility/v1`) | `.mcpb` on each release from v0.5.0; `town-of-jupiter-fl-cli` plugin in `claude-plugins` | home module: `tojfl mcp --http` from v0.5.0 |
+| loxahatchee-river-fl-cli (`lrfl`) | `loxahatchee_balance`, `loxahatchee_bills`, `loxahatchee_payments`, `loxahatchee_usage` (`utility/v1`) | `.mcpb` on each release from v0.8.0; `loxahatchee-river-fl-cli` plugin in `claude-plugins` | home module: `lrfl mcp --http` from v0.8.0 |
+| xfinity-cli (`xfin`) | `xfinity_balance`, `xfinity_bills`, `xfinity_usage` (`utility/v1`, no payments tool) | `.mcpb` on each release from v0.10.0; `xfinity-cli` plugin in `claude-plugins` | home module: `xfin mcp --http` from v0.10.0 |
 
 Consumers: Claude Code, Claude Desktop, and (path B) a deploy-your-own
 Cloudflare Worker reached from claude.ai, which runs a portal CLI's tools on

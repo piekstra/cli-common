@@ -16,6 +16,7 @@ Tools it can serve. Every module is optional: you turn on the ones you use.
 | `coinbase_accounts`, `coinbase_transactions` | [coinbase-cli](https://github.com/piekstra/coinbase-cli) | in the Worker | What do I hold on Coinbase? What happened in a wallet, over a period? |
 | `alpaca_portfolio`, `alpaca_activities` | [alpaca-cli](https://github.com/piekstra/alpaca-cli) | in the Worker | What is my Alpaca account worth, and what do I hold? Which fills, dividends and fees, over a period? |
 | `m1_…`, `robinhood_…` and other portal CLIs' tools | [m1-cli](https://github.com/piekstra/m1-cli), [robinhood-cli](https://github.com/piekstra/robinhood-cli) | on your computer, through your tunnel ([home modules](#tools-from-your-computer-home-modules)) | whatever that CLI's `mcp` tools answer |
+| `fpl_…`, `jupiter_…`, `loxahatchee_…`, `xfinity_…` | [fpl-cli](https://github.com/piekstra/fpl-cli), [town-of-jupiter-fl-cli](https://github.com/piekstra/town-of-jupiter-fl-cli), [loxahatchee-river-fl-cli](https://github.com/piekstra/loxahatchee-river-fl-cli), [xfinity-cli](https://github.com/piekstra/xfinity-cli) | on your computer, through your tunnel ([home modules](#tools-from-your-computer-home-modules)) | What do I owe, and when is it due? What did past bills come to? Which payments posted? How much did I use? |
 
 The Coinbase and Alpaca modules call official APIs with keys you create, so
 they run inside the Worker. Portal CLIs (M1, Robinhood) sign in through a
@@ -143,6 +144,17 @@ run in the Worker. Instead the CLI serves them on your computer, on
 through a **Cloudflare Tunnel** in your account (Workers VPC, free while in
 beta). The session never leaves your computer; the Worker holds only the
 bearer token.
+
+The utility CLIs keep their credentials on your computer and run the same way
+(`lrfl` needs none, since the district's lookup is anonymous). Each README's "Use
+with Claude" section names its port and connector secret, for the steps below:
+
+| CLI | Tools | Port | Connector secret |
+|---|---|---|---|
+| `fpl` | `fpl_…` | 8732 | `HOME_FPL_TOKEN` |
+| `xfin` | `xfinity_…` | 8733 | `HOME_XFINITY_TOKEN` |
+| `lrfl` | `loxahatchee_…` | 8734 | `HOME_LOXAHATCHEE_TOKEN` |
+| `tojfl` | `jupiter_…` | 8735 | `HOME_JUPITER_TOKEN` |
 
 The tools work while the computer is awake, signed in to the CLI, and
 running both the CLI's server and `cloudflared`. When it is not, those tools
