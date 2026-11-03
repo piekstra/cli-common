@@ -4,7 +4,8 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::rclone::Remote;
 
@@ -22,7 +23,7 @@ impl Stub {
             dir.path().join("argv").display()
         );
         let path = dir.path().join("rclone");
-        fs::write(&path, script).unwrap();
+        write_from_a_child(&path, &script);
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         Stub { dir }
     }
@@ -61,5 +62,41 @@ esac"#,
             .lines()
             .map(str::to_string)
             .collect()
+    }
+}
+
+/// Write `content` to `path` from a child process, so this process never holds
+/// `path` open for writing. A fork on another test's thread keeps a copy of every
+/// descriptor open here until it execs, and on Linux running a file with a write
+/// descriptor open anywhere fails with ETXTBSY (os error 26).
+fn write_from_a_child(path: &Path, content: &str) {
+    let status = Command::new("sh")
+        .args(["-c", "printf %s \"$1\" > \"$2\"", "sh", content])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "writing {}", path.display());
+}
+
+// Linux only: macOS has no ETXTBSY here, and takes 40 s over this many new scripts.
+#[cfg(target_os = "linux")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stub_runs_while_other_threads_are_spawning() {
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..40 {
+                        let stub = Stub::new("printf 'rclone v1.70.0\\n'");
+                        assert_eq!(stub.remote().version().unwrap(), "rclone v1.70.0");
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
     }
 }
