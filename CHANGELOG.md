@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.19.0 — 2026-11-03
 
 - `pk-cli-browser`: `Launch::clear_site_storage(bool)`, default off, for a CLI
   whose provider keeps tokens in site storage. A kept profile retains that
