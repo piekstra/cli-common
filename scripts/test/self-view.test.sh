@@ -92,6 +92,21 @@ check "a refused shot left no file" [ ! -e "$work/x.png" ]
 windows ""
 run "no windows at all: 4" 4 "no on-screen window" -- "$sv" bounds --pidfile "$pf" --wait 0
 
+# elsewhere LINE... — the windows on every desktop; none is on this one.
+elsewhere() { printf '%s\n' "$@" >"$work/elsewhere.txt"; }
+every_desktop="if [ \"\${1:-}\" = --all ]; then cat '$work/elsewhere.txt'; fi"
+elsewhere "1 900 0 0 0 3000 2000" "$root 21 0 0 0 500 500" "$root 22 0 0 0 1100 720" "$root 23 25 0 0 1600 1000"
+run "a window on another desktop is named, by its largest normal window: 4" 4 "owns a 1100x720 window that is not on the current desktop" -- \
+  env SELF_VIEW_WINDOW_LIST="$every_desktop" "$sv" bounds --pidfile "$pf" --wait 0
+run "a shot of a window on another desktop refuses too" 4 "not on the current desktop" -- \
+  env SELF_VIEW_WINDOW_LIST="$every_desktop" "$sv" shot --pidfile "$pf" --wait 0 --out "$work/y.png"
+check "a shot refused for another desktop left no file" [ ! -e "$work/y.png" ]
+elsewhere "1 900 0 0 0 3000 2000"
+run "another app's window elsewhere is not ours" 4 "no on-screen window" -- \
+  env SELF_VIEW_WINDOW_LIST="$every_desktop" "$sv" bounds --pidfile "$pf" --wait 0
+run "a failed listing of every desktop leaves the plain refusal" 4 "no on-screen window" -- \
+  env SELF_VIEW_WINDOW_LIST="if [ \"\${1:-}\" = --all ]; then exit 7; fi" "$sv" bounds --pidfile "$pf" --wait 0
+
 run "a failing window source: 5, with its error" 5 "boom" -- \
   env SELF_VIEW_WINDOW_LIST="echo boom >&2; exit 7" "$sv" bounds --pidfile "$pf" --wait 30
 
