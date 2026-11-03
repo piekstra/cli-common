@@ -8,9 +8,14 @@
   The tools are read-only, take `account` by number or address, filter by
   `since`/`until`, page with cursors, and answer concisely by default. A provider
   without payments, usage or several accounts drops the tool or argument with
-  `without_payments`, `without_usage` or `single_account`. `sign_in_command` names
-  a sign-in other than `<bin> auth login`. The feature uses `pk-cli-mcp`'s core only,
-  and `make wasm-check` holds it to `wasm32-unknown-unknown`.
+  `without_payments`, `without_usage` or `single_account`. Concise results name an
+  account by address and send its number only under `detailed`. The feature uses
+  `pk-cli-mcp`'s core only, and `make wasm-check` holds it to
+  `wasm32-unknown-unknown`.
+- `pk-cli-mcp`: `Server::sign_in_command` names a sign-in other than `<bin> auth login`
+  for the instructions and every auth error; `Server::hosted` replaces it. A
+  `CliError::Auth` converted to a `ToolError` loses the remedy its message closes on
+  for a terminal, so one error names one command.
 
 ## v0.20.0 — 2026-11-03
 

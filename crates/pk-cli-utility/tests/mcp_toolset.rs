@@ -7,7 +7,7 @@ use std::rc::Rc;
 use pk_cli_core::{block_on, CliError, Money};
 use pk_cli_mcp::conformance::{assert_conforms, assert_fits, call, definitions_size};
 use pk_cli_mcp::{call_tool, instructions, tools_list, Server, Toolset};
-use pk_cli_utility::mcp::{auth_reason, UtilityAccount, UtilitySource, UtilityTools};
+use pk_cli_utility::mcp::{UtilityAccount, UtilitySource, UtilityTools};
 use pk_cli_utility::{Payment, Statement, UsagePeriod, UtilitySummary};
 use serde_json::{json, Value};
 
@@ -167,13 +167,48 @@ fn every_tool_is_read_only() {
 fn balance_reads_the_default_account_and_names_the_others() {
     let (t, log) = tools();
     let out = ok(&t, "util_balance", json!({}));
-    assert_eq!(out["balance"], "12.34");
-    assert_eq!(out["due_date"], "2026-08-01");
-    assert_eq!(out["autopay"], true);
-    assert_eq!(out["account"], "1234567890");
-    assert_eq!(out["accounts"].as_array().unwrap().len(), 2);
-    assert_eq!(out["accounts"][1]["name"], "200 Example Street");
+    assert_eq!(
+        out,
+        json!({
+            "balance": "12.34",
+            "due_date": "2026-08-01",
+            "autopay": true,
+            "account": "100 Example Street",
+            "accounts": [{"name": "100 Example Street"}, {"name": "200 Example Street"}]
+        })
+    );
     assert_eq!(*log.borrow(), ["accounts", "summary None"]);
+}
+
+#[test]
+fn only_detailed_sends_account_numbers() {
+    let (t, _) = tools();
+    let out = ok(&t, "util_balance", json!({"response_format": "detailed"}));
+    assert_eq!(out["account"], "100 Example Street");
+    assert_eq!(out["account_id"], "1234567890");
+    assert_eq!(out["accounts"][1]["id"], "2345678901");
+}
+
+#[test]
+fn an_account_with_no_name_shows_only_the_end_of_its_number() {
+    let mut source = Fixtures::new();
+    source.accounts.clear();
+    let (t, _) = over(source);
+    let out = ok(&t, "util_balance", json!({}));
+    assert_eq!(out["account"], "ending 7890");
+    assert!(out.get("account_id").is_none(), "{out}");
+}
+
+#[test]
+fn a_listed_account_with_no_name_keeps_the_number_it_is_asked_for_by() {
+    let mut source = Fixtures::new();
+    source.accounts[1].name = None;
+    let (t, _) = over(source);
+    let out = ok(&t, "util_balance", json!({}));
+    assert_eq!(
+        out["accounts"],
+        json!([{"name": "100 Example Street"}, {"id": "2345678901"}])
+    );
 }
 
 #[test]
@@ -190,15 +225,27 @@ fn a_login_with_one_account_lists_no_others() {
     let (t, _) = over(source);
     let out = ok(&t, "util_balance", json!({}));
     assert!(out.get("accounts").is_none(), "{out}");
+    assert!(out.get("accounts_unavailable").is_none(), "{out}");
 }
 
 #[test]
-fn an_unreadable_account_list_does_not_cost_the_balance_when_none_was_named() {
+fn an_unreadable_account_list_keeps_the_balance_and_says_the_list_is_missing() {
     let mut source = Fixtures::new();
     source.fail = |m| (m == "accounts").then(|| CliError::Upstream("the list failed".into()));
     let (t, _) = over(source);
-    assert_eq!(ok(&t, "util_balance", json!({}))["balance"], "12.34");
+    let out = ok(&t, "util_balance", json!({}));
+    assert_eq!(out["balance"], "12.34");
+    assert_eq!(out["accounts_unavailable"], true);
     assert!(err(&t, "util_balance", json!({"account": "100"})).contains("the list failed"));
+}
+
+#[test]
+fn an_auth_failure_on_the_account_list_is_left_to_the_read_that_needs_the_login() {
+    let mut source = Fixtures::new();
+    source.fail = |m| (m == "accounts").then(|| CliError::Auth("signed out".into()));
+    let (t, _) = over(source);
+    let out = ok(&t, "util_balance", json!({}));
+    assert!(out.get("accounts_unavailable").is_none(), "{out}");
 }
 
 #[test]
@@ -226,6 +273,32 @@ fn a_provider_with_no_list_takes_the_argument_as_the_id() {
     let (t, log) = over(source);
     ok(&t, "util_usage", json!({"account": "0000000000"}));
     assert_eq!(*log.borrow(), ["accounts", "usage Some(\"0000000000\")"]);
+}
+
+#[test]
+fn with_no_list_an_argument_that_cannot_be_a_number_never_reaches_the_source() {
+    let mut source = Fixtures::new();
+    source.accounts.clear();
+    let (t, log) = over(source);
+    let long = "1".repeat(65);
+    for account in [
+        "../other/9",
+        "1?all=true",
+        "12/34",
+        "12%2F34",
+        "a..b",
+        "100 Example Street",
+        long.as_str(),
+    ] {
+        let text = err(&t, "util_bills", json!({"account": account}));
+        assert!(text.starts_with("usage:"), "{account}: {text}");
+    }
+    assert!(
+        log.borrow().iter().all(|c| c == "accounts"),
+        "{:?}",
+        log.borrow()
+    );
+    ok(&t, "util_bills", json!({"account": "12-34_5.6"}));
 }
 
 #[test]
@@ -327,6 +400,7 @@ fn a_bad_argument_fails_before_any_provider_call() {
         ),
         ("util_bills", json!({"response_format": "huge"}), "huge"),
         ("util_balance", json!({"since": "2026-06-01"}), "since"),
+        ("util_balance", json!({"response_format": "huge"}), "huge"),
     ] {
         let text = err(&t, tool, args);
         assert!(text.starts_with("usage:"), "{tool}: {text}");
@@ -365,7 +439,7 @@ fn a_one_account_provider_takes_no_account_argument() {
 }
 
 #[test]
-fn an_auth_failure_asks_for_the_cli_sign_in_and_only_that() {
+fn an_auth_failure_asks_for_the_server_s_sign_in_and_only_that() {
     fn expired(_: &str) -> Option<CliError> {
         Some(CliError::Auth(
             "session expired \u{2014} run `util init` again".into(),
@@ -381,25 +455,11 @@ fn an_auth_failure_asks_for_the_cli_sign_in_and_only_that() {
 
     let mut source = Fixtures::new();
     source.fail = expired;
-    let (t, _) = over(source);
-    let t = t.sign_in_command("util auth login --stdin");
+    let t = UtilityTools::new(server().sign_in_command("util auth login --stdin"), source);
     let text = err(&t, "util_bills", json!({}));
     assert!(text.contains("`util auth login --stdin`"), "{text}");
     assert!(!text.contains("util init"), "{text}");
-}
-
-#[test]
-fn the_family_s_ways_of_closing_an_auth_message_all_come_off() {
-    for message in [
-        "no stored password \u{2014} run `fpl init` or `fpl set-credential --stdin`",
-        "no stored password; run `fpl init`",
-        "no stored password. Run `fpl init` again.",
-        "no stored password. Re-run `fpl init` with the credentials you use.",
-    ] {
-        let reason = auth_reason(message);
-        assert!(reason.starts_with("no stored password"), "{message}");
-        assert!(!reason.contains("fpl"), "{message}");
-    }
+    assert!(instructions(&t).contains("`util auth login --stdin`"));
 }
 
 #[test]
@@ -420,7 +480,9 @@ fn a_currency_other_than_usd_stays_with_the_amount() {
         currency: "CAD".into(),
     };
     let (t, _) = over(source);
-    assert_eq!(ok(&t, "util_balance", json!({}))["balance"], "12.34 CAD");
+    let out = ok(&t, "util_balance", json!({}));
+    assert_eq!(out["balance"], "12.34");
+    assert_eq!(out["currency"], "CAD");
 }
 
 #[test]

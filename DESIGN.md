@@ -562,8 +562,10 @@ Only an unknown tool name is a protocol error (JSON-RPC `-32602`).
 
 A tool may replace the remedy with its own (`ToolError::with_fix`: "call
 coinbase_accounts to see the account names"). The `auth` and `other`
-remedies above are the local host's; a host where `<bin> auth login` fixes
-nothing (a Worker) sets its own with `Server::hosted`.
+remedies above are the local host's. A CLI whose sign-in is not plain
+`<bin> auth login` names its command with `Server::sign_in_command`, which the
+instructions and every auth error use. A host where that fixes nothing (a
+Worker) sets its own with `Server::hosted`, which replaces it.
 
 #### A tool never signs in
 

@@ -18,7 +18,8 @@
 
 use pk_cli_core::{dates, resolve, CliError, Money};
 use pk_cli_mcp::{
-    parse_args, ListArgs, Page, PageRequest, Server, ToolDef, ToolError, ToolOutput, Toolset,
+    parse_args, ListArgs, Page, PageRequest, ResponseFormat, Server, ToolDef, ToolError,
+    ToolOutput, Toolset,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -40,9 +41,11 @@ pub struct UtilityAccount {
 /// Where the tools get a provider's data: blocking HTTP natively, `fetch` in a
 /// Worker, fixtures in tests.
 ///
-/// `account` is a resolved id from [`Self::accounts`], or the argument as
-/// given when that list is empty; `None` means the provider's default account
-/// (the one its commands read with no flag). Lists come newest first.
+/// `account` is a resolved id from [`Self::accounts`], or, when that list is
+/// empty, the argument after a check that it could be an account number
+/// (letters, digits, `-`, `_`, `.`; no `..`; at most 64 characters), which a
+/// source may put in a request path. `None` means the provider's default
+/// account (the one its commands read with no flag). Lists come newest first.
 #[allow(async_fn_in_trait)] // deliberate: no `Send` bound, as in `Toolset`
 pub trait UtilitySource {
     /// Every account on the login. Empty when the provider has no list to
@@ -71,7 +74,6 @@ pub struct UtilityTools<S> {
     metering: Option<String>,
     payments: bool,
     accounts: bool,
-    sign_in: Option<String>,
 }
 
 impl<S: UtilitySource> UtilityTools<S> {
@@ -84,7 +86,6 @@ impl<S: UtilitySource> UtilityTools<S> {
             metering: Some("usage".into()),
             payments: true,
             accounts: true,
-            sign_in: None,
         }
     }
 
@@ -114,13 +115,6 @@ impl<S: UtilitySource> UtilityTools<S> {
         self
     }
 
-    /// The command a missing or rejected credential asks the user to run, for
-    /// a CLI whose sign-in is not plain `<bin> auth login`.
-    pub fn sign_in_command(mut self, command: impl Into<String>) -> Self {
-        self.sign_in = Some(command.into());
-        self
-    }
-
     fn name(&self, what: &str) -> String {
         format!("{}_{what}", self.server.tool_prefix)
     }
@@ -134,25 +128,15 @@ impl<S: UtilitySource> UtilityTools<S> {
         }
     }
 
-    fn tool_err(&self, e: CliError) -> ToolError {
-        match e {
-            CliError::Auth(m) => {
-                let err = ToolError::auth(auth_reason(&m));
-                match &self.sign_in {
-                    Some(command) => err.with_fix(format!(
-                        "Ask the user to run `{command}` in a terminal, then call the tool \
-                         again. Tools never sign in or create credentials themselves"
-                    )),
-                    None => err,
-                }
-            }
-            other => other.into(),
-        }
-    }
-
     /// The `account` argument as the id the source takes.
     fn pick_account(&self, accounts: &[UtilityAccount], query: &str) -> Result<String, ToolError> {
         if accounts.is_empty() {
+            if !could_be_an_account_number(query) {
+                return Err(ToolError::usage(
+                    "account must be the account number here: this login has no list of \
+                     addresses to match against",
+                ));
+            }
             return Ok(query.to_string());
         }
         resolve::pick(
@@ -175,36 +159,54 @@ impl<S: UtilitySource> UtilityTools<S> {
         let Some(query) = present(query) else {
             return Ok(None);
         };
-        let accounts = self.source.accounts().await.map_err(|e| self.tool_err(e))?;
+        let accounts = self.source.accounts().await?;
         self.pick_account(&accounts, query).map(Some)
     }
 
     async fn balance(&self, args: Value) -> Result<ToolOutput, ToolError> {
         let args: BalanceArgs = parse_args(args)?;
+        let detailed = args.response_format.unwrap_or_default().is_detailed();
         let query = present(args.account.as_deref());
+        let mut accounts_unavailable = false;
         let accounts = match (self.accounts, query) {
             (false, _) => Vec::new(),
-            (true, Some(_)) => self.source.accounts().await.map_err(|e| self.tool_err(e))?,
-            // The list is a courtesy when no account was named: failing to
-            // read it must not cost the balance that can still be read.
-            (true, None) => self.source.accounts().await.unwrap_or_default(),
+            (true, Some(_)) => self.source.accounts().await?,
+            // Nothing needs the list to resolve, so failing to read it must not
+            // cost the balance. The result says so, or a login with several
+            // accounts would read as a login with one. Auth is left for the
+            // summary read below to report.
+            (true, None) => match self.source.accounts().await {
+                Ok(accounts) => accounts,
+                Err(CliError::Auth(_)) => Vec::new(),
+                Err(_) => {
+                    accounts_unavailable = true;
+                    Vec::new()
+                }
+            },
         };
         let account = query.map(|q| self.pick_account(&accounts, q)).transpose()?;
-        let summary = self
-            .source
-            .summary(account.as_deref())
-            .await
-            .map_err(|e| self.tool_err(e))?;
+        let summary = self.source.summary(account.as_deref()).await?;
+        let (balance, currency) = amount(&summary.balance);
+        let id = summary.account.or(account);
+        let name = id
+            .as_deref()
+            .and_then(|id| accounts.iter().find(|a| a.id == id))
+            .and_then(|a| a.name.clone());
         ToolOutput::new(&BalanceOut {
-            balance: amount(&summary.balance),
+            balance,
+            currency,
             due_date: summary.due_date,
             autopay: summary.autopay,
-            account: summary.account.or(account),
+            account: name.or_else(|| id.as_deref().map(masked)),
+            account_id: id.filter(|_| detailed),
+            accounts_unavailable,
             accounts: if accounts.len() > 1 {
                 accounts
                     .into_iter()
                     .map(|a| AccountItem {
-                        id: a.id,
+                        // An account with no name can only be asked for by
+                        // its number.
+                        id: (detailed || a.name.is_none()).then_some(a.id),
                         name: a.name,
                     })
                     .collect()
@@ -223,8 +225,7 @@ impl<S: UtilitySource> UtilityTools<S> {
         let rows = self
             .source
             .statements(account.as_deref())
-            .await
-            .map_err(|e| self.tool_err(e))?
+            .await?
             .into_iter()
             .filter(|s| {
                 s.date
@@ -232,12 +233,16 @@ impl<S: UtilitySource> UtilityTools<S> {
                     .or(s.due_date.as_deref())
                     .map_or(true, |d| in_range(d, since.as_deref(), until.as_deref()))
             })
-            .map(|s| BillItem {
-                date: s.date,
-                amount: amount(&s.amount),
-                due_date: s.due_date,
-                paid: s.paid,
-                id: detailed.then_some(s.id),
+            .map(|s| {
+                let (amount, currency) = amount(&s.amount);
+                BillItem {
+                    date: s.date,
+                    amount,
+                    currency,
+                    due_date: s.due_date,
+                    paid: s.paid,
+                    id: detailed.then_some(s.id),
+                }
             })
             .collect();
         ToolOutput::new(&page.page(rows, self.narrow())?)
@@ -252,16 +257,19 @@ impl<S: UtilitySource> UtilityTools<S> {
         let rows = self
             .source
             .payments(account.as_deref(), since.as_deref())
-            .await
-            .map_err(|e| self.tool_err(e))?
+            .await?
             .into_iter()
             .filter(|p| in_range(&p.date, since.as_deref(), until.as_deref()))
-            .map(|p| PaymentItem {
-                date: p.date,
-                amount: amount(&p.amount),
-                status: p.status,
-                method: p.method.filter(|_| detailed),
-                confirmation: p.confirmation.filter(|_| detailed),
+            .map(|p| {
+                let (amount, currency) = amount(&p.amount);
+                PaymentItem {
+                    date: p.date,
+                    amount,
+                    currency,
+                    status: p.status,
+                    method: p.method.filter(|_| detailed),
+                    confirmation: p.confirmation.filter(|_| detailed),
+                }
             })
             .collect();
         ToolOutput::new(&page.page(rows, self.narrow())?)
@@ -275,15 +283,21 @@ impl<S: UtilitySource> UtilityTools<S> {
         let rows = self
             .source
             .usage(account.as_deref())
-            .await
-            .map_err(|e| self.tool_err(e))?
+            .await?
             .into_iter()
             .filter(|u| in_range(&u.period, since.as_deref(), until.as_deref()))
-            .map(|u| UsageItem {
-                period: u.period,
-                quantity: u.quantity,
-                unit: u.unit,
-                cost: u.cost.as_ref().map(amount),
+            .map(|u| {
+                let (cost, currency) = match u.cost.as_ref().map(amount) {
+                    Some((cost, currency)) => (Some(cost), currency),
+                    None => (None, None),
+                };
+                UsageItem {
+                    period: u.period,
+                    quantity: u.quantity,
+                    unit: u.unit,
+                    cost,
+                    currency,
+                }
             })
             .collect();
         ToolOutput::new(&page.page(rows, self.narrow())?)
@@ -298,11 +312,13 @@ impl<S: UtilitySource> Toolset for UtilityTools<S> {
     fn tools(&self) -> Vec<ToolDef> {
         let service = &self.server.service;
         let others = if self.accounts {
-            ", and the login's other accounts when it has several"
+            ", and the login's other accounts when it has several (accounts_unavailable: true \
+             when they could not be read)"
         } else {
             ""
         };
         let narrow = self.narrow();
+        let money = "US dollars unless currency is set";
         let mut tools = vec![
             ToolDef::read(
                 self.name("balance"),
@@ -310,8 +326,8 @@ impl<S: UtilitySource> Toolset for UtilityTools<S> {
                 format!(
                     "Shows what the user owes {service} now and when it is due. Use it for what \
                      they owe, when the bill is due, or whether autopay is on. Returns balance \
-                     (a decimal string in US dollars unless a currency code follows; negative \
-                     is a credit), due_date, autopay and account{others}."
+                     (a decimal string, negative for a credit; {money}), due_date, autopay and \
+                     account{others}. Detailed adds account numbers."
                 ),
             )
             .input::<BalanceArgs>()
@@ -321,8 +337,8 @@ impl<S: UtilitySource> Toolset for UtilityTools<S> {
                 format!("{service} bills"),
                 format!(
                     "Lists the user's {service} bills, newest first. Use it for what past bills \
-                     came to and whether they were paid. Items carry date, amount, due_date and \
-                     paid (detailed adds id). Narrow with {narrow}."
+                     came to and whether they were paid. Items carry date, amount ({money}), \
+                     due_date and paid (detailed adds id). Narrow with {narrow}."
                 ),
             )
             .input::<ListToolArgs>()
@@ -336,8 +352,8 @@ impl<S: UtilitySource> Toolset for UtilityTools<S> {
                     format!(
                         "Lists payments posted to the user's {service} account, newest first. \
                          Use it to check whether a payment went through or what was paid over a \
-                         period. Items carry date, amount and status (detailed adds method and \
-                         confirmation). Narrow with {narrow}."
+                         period. Items carry date, amount ({money}) and status (detailed adds \
+                         method and confirmation). Narrow with {narrow}."
                     ),
                 )
                 .input::<ListToolArgs>()
@@ -352,8 +368,8 @@ impl<S: UtilitySource> Toolset for UtilityTools<S> {
                     format!(
                         "Lists the user's {metering} by billing period, newest first. Use it for \
                          how much they used and how periods compare. Items carry period, \
-                         quantity, unit, and cost where the provider states one. Narrow with \
-                         {narrow}."
+                         quantity, unit, and cost ({money}) where the provider states one. \
+                         Narrow with {narrow}."
                     ),
                 )
                 .input::<ListToolArgs>()
@@ -392,28 +408,32 @@ impl<S: UtilitySource> Toolset for UtilityTools<S> {
 
 /// `<prefix>_balance`'s arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct BalanceArgs {
+struct BalanceArgs {
     /// The account: its number, or its address or a unique part of it. Omit
     /// for the default account.
     #[serde(default)]
-    pub account: Option<String>,
+    account: Option<String>,
+    /// `concise` (default) names accounts by address. `detailed` adds their
+    /// numbers.
+    #[serde(default)]
+    response_format: Option<ResponseFormat>,
 }
 
 /// The list tools' arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ListToolArgs {
+struct ListToolArgs {
     /// The account: its number, or its address or a unique part of it. Omit
     /// for the default account.
     #[serde(default)]
-    pub account: Option<String>,
+    account: Option<String>,
     /// Earliest date, YYYY-MM-DD.
     #[serde(default)]
-    pub since: Option<String>,
+    since: Option<String>,
     /// Latest date, YYYY-MM-DD.
     #[serde(default)]
-    pub until: Option<String>,
+    until: Option<String>,
     #[serde(flatten)]
-    pub list: ListArgs,
+    list: ListArgs,
 }
 
 /// The filters a cursor is bound to.
@@ -460,71 +480,104 @@ impl ListToolArgs {
 
 /// `<prefix>_balance`'s result.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct BalanceOut {
-    pub balance: String,
+struct BalanceOut {
+    balance: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_date: Option<String>,
+    currency: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub autopay: Option<bool>,
+    due_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub account: Option<String>,
+    autopay: Option<bool>,
+    /// The account's address, or the end of its number when it has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    accounts_unavailable: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub accounts: Vec<AccountItem>,
+    accounts: Vec<AccountItem>,
 }
 
 /// One account on the login, in `<prefix>_balance`'s result.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct AccountItem {
-    pub id: String,
+struct AccountItem {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
 }
 
 /// One bill, in `<prefix>_bills`'s result.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct BillItem {
+struct BillItem {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub date: Option<String>,
-    pub amount: String,
+    date: Option<String>,
+    amount: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_date: Option<String>,
+    currency: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub paid: Option<bool>,
+    due_date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
+    paid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
 }
 
 /// One payment, in `<prefix>_payments`'s result.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct PaymentItem {
-    pub date: String,
-    pub amount: String,
+struct PaymentItem {
+    date: String,
+    amount: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
+    currency: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub method: Option<String>,
+    status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub confirmation: Option<String>,
+    method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmation: Option<String>,
 }
 
 /// One period, in `<prefix>_usage`'s result.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct UsageItem {
-    pub period: String,
-    pub quantity: f64,
-    pub unit: String,
+struct UsageItem {
+    period: String,
+    quantity: f64,
+    unit: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cost: Option<String>,
+    cost: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    currency: Option<String>,
 }
 
-/// A profile `Money` as the decimal string a tool returns; a currency other
-/// than USD stays with the amount rather than being dropped.
-fn amount(money: &Money) -> String {
-    if money.currency == "USD" {
-        money.amount.clone()
-    } else {
-        format!("{} {}", money.amount, money.currency)
+/// A profile `Money` as a tool's decimal string, and its currency when that
+/// is not US dollars, so the amount always parses as a number.
+fn amount(money: &Money) -> (String, Option<String>) {
+    let currency = Some(money.currency.clone()).filter(|c| c != "USD");
+    (money.amount.clone(), currency)
+}
+
+/// An account number as a person recognizes it, without sending all of it: the
+/// last four characters, or nothing of one too short to mask.
+fn masked(id: &str) -> String {
+    let chars: Vec<char> = id.chars().collect();
+    match chars.len().checked_sub(4) {
+        Some(start) if start > 0 => {
+            format!("ending {}", chars[start..].iter().collect::<String>())
+        }
+        _ => "on file".to_string(),
     }
+}
+
+/// Whether an argument with no list to check it against could be an account
+/// number. It comes from the model, and a source may put it in a request path.
+fn could_be_an_account_number(value: &str) -> bool {
+    value.len() <= 64
+        && !value.contains("..")
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 fn present(value: Option<&str>) -> Option<&str> {
@@ -545,16 +598,4 @@ fn in_range(date: &str, since: Option<&str>, until: Option<&str>) -> bool {
         return true;
     };
     since.map_or(true, |s| date >= &s[..len]) && until.map_or(true, |u| date <= &u[..len])
-}
-
-/// Why a read was refused, without the remedy the CLI's message closes on (the
-/// family words it several ways): the error's fix names the one command to ask
-/// for, and a second, often different, command in the same error would leave
-/// the user to pick.
-pub fn auth_reason(message: &str) -> &str {
-    [" \u{2014} run `", "; run `", " Run `", " Re-run `"]
-        .iter()
-        .filter_map(|remedy| message.find(remedy))
-        .min()
-        .map_or(message, |cut| &message[..cut])
 }

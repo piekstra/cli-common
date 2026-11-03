@@ -207,7 +207,7 @@ impl From<CliError> for ToolError {
         // "network/upstream error:" for a terminal; the slug says that here.
         match e {
             CliError::Usage(m) => Self::usage(m),
-            CliError::Auth(m) => Self::auth(m),
+            CliError::Auth(m) => Self::auth(auth_reason(&m)),
             CliError::NotFound(m) => Self::not_found(m),
             CliError::Upstream(m) => Self::upstream(m),
             CliError::ConfirmationRequired(m) => Self::new(ErrorKind::ConfirmationRequired, m),
@@ -217,9 +217,68 @@ impl From<CliError> for ToolError {
     }
 }
 
+/// Why a read was refused, without the remedy a CLI's message closes on for a
+/// terminal (the family words it several ways). The tool error's fix names the
+/// one command to ask for; a second, often different, command in the same error
+/// would leave the user to pick.
+fn auth_reason(message: &str) -> &str {
+    [" \u{2014} run `", "; run `", " Run `", " Re-run `"]
+        .iter()
+        .filter_map(|remedy| message.find(remedy))
+        .min()
+        .map_or(message, |cut| &message[..cut])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cli_auth_message_loses_its_own_remedy_whichever_way_it_is_worded() {
+        for message in [
+            "no stored password \u{2014} run `old init` or `old set-credential --stdin`",
+            "no stored password; run `old init`",
+            "no stored password. Run `old init` again.",
+            "no stored password. Re-run `old init` with the credentials you use.",
+        ] {
+            let text = ToolError::from(CliError::Auth(message.into())).render(&server("svc"));
+            assert!(text.starts_with("auth: no stored password"), "{text}");
+            assert!(text.contains("`svc auth login`"), "{text}");
+            assert!(!text.contains("old"), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_sign_in_command_reaches_errors_and_instructions_and_a_host_replaces_it() {
+        struct Empty(Server);
+        impl crate::toolset::Toolset for Empty {
+            fn server(&self) -> Server {
+                self.0.clone()
+            }
+            fn tools(&self) -> Vec<crate::tool::ToolDef> {
+                Vec::new()
+            }
+            async fn call(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+            ) -> Result<crate::result::ToolOutput, ToolError> {
+                Err(ToolError::other("unused"))
+            }
+        }
+        let local = server("svc").sign_in_command("svc auth login --stdin");
+        let err = ToolError::auth("expired").render(&local);
+        assert!(err.contains("`svc auth login --stdin`"), "{err}");
+        assert!(!err.contains("`svc auth login`"), "{err}");
+        let says = crate::toolset::instructions(&Empty(local.clone()));
+        assert!(says.contains("`svc auth login --stdin`"), "{says}");
+        assert!(!says.contains("`svc auth login`"), "{says}");
+
+        let hosted = local.hosted("in the user's Worker", "ask the user to update the secret");
+        let err = ToolError::auth("expired").render(&hosted);
+        assert!(err.contains("update the secret"), "{err}");
+        assert!(!err.contains("svc auth login"), "{err}");
+    }
 
     fn server(bin: &str) -> Server {
         Server::new(bin, "0", "Svc", "svc")

@@ -30,7 +30,7 @@ status here.
 - [ ] Every tool has a `title`, all four hints set explicitly (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), an `outputSchema` generated for serialization, and a description of at least three sentences naming the returned fields; arguments are one flat struct, every one described
 - [ ] Every write is its own tool, never combined with a read, never moves money, and carries `_meta` `anthropic/requiresUserInteraction: true`
 - [ ] Results are `structuredContent` plus the same JSON as compact text; lists use `ListArgs`/`PageRequest`/`Page` (limit 25 default, 200 max, filter-bound cursors, `response_format` concise/detailed, the 32,000-character budget with `truncated` + `hint`)
-- [ ] Errors keep their exit code's meaning and say how to fix the call; an auth error names `<bin> auth login`, and no tool call signs in, prompts, or creates a keychain item
+- [ ] Errors keep their exit code's meaning and say how to fix the call; an auth error names `<bin> auth login` (or the CLI's `Server::sign_in_command`), and no tool call signs in, prompts, or creates a keychain item
 - [ ] `tools/list` touches no credential; the credential is also read from named environment variables (env before keychain), so an `.mcpb` can pass it
 - [ ] Tests call `pk_cli_mcp::conformance::assert_conforms` and run each tool through `assert_fits` on scrubbed fixtures, offline; all definitions together stay under 8,000 characters
 - [ ] Releases attach `<bin>-<version>.mcpb` (binary server type; macOS universal, Linux and Windows x86_64; credential as `sensitive` `user_config`), and a `claude-plugins` plugin's `.mcp.json` runs `<bin> mcp`
