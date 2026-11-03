@@ -10,7 +10,10 @@
 
 use std::time::Duration;
 
-use pk_cli_core::transport::{HttpRequest, HttpResponse, PlatformSigner, Transport};
+pub use pk_cli_core::transport::Inconclusive;
+use pk_cli_core::transport::{
+    inconclusive_answer, parse_retry_after, HttpRequest, HttpResponse, PlatformSigner, Transport,
+};
 use pk_cli_core::CliError;
 use serde_json::Value;
 
@@ -189,9 +192,50 @@ pub fn json_response(resp: reqwest::blocking::Response) -> Result<Value, CliErro
         .map_err(|e| CliError::Upstream(format!("parsing provider JSON: {e}")))
 }
 
+/// Whether this answer is [`Inconclusive`]: a 429, a 5xx, or a 403 with an HTML
+/// page, which is an edge block rather than a provider's refusal. [`json_response`]
+/// maps every 403 to exit 3, so a read that decides a session uses this first.
+/// It reads the status and headers only, and leaves the body to the caller, so a
+/// 2xx is not acceptance. A client on the transport seam uses
+/// [`HttpResponse::inconclusive`].
+pub fn inconclusive(resp: &reqwest::blocking::Response) -> Option<Inconclusive> {
+    let header = |name| {
+        resp.headers()
+            .get(name)
+            .and_then(|value: &reqwest::header::HeaderValue| value.to_str().ok())
+    };
+    inconclusive_answer(
+        resp.status().as_u16(),
+        header(reqwest::header::CONTENT_TYPE),
+        header(reqwest::header::RETRY_AFTER),
+        unix_now(),
+    )
+}
+
+/// How long a response asks to wait, from its `Retry-After`
+/// ([`parse_retry_after`]).
+pub fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    parse_retry_after(value, unix_now())
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_retry_after_header_reads_through_the_seam() {
+        let mut map = reqwest::header::HeaderMap::new();
+        assert_eq!(retry_after(&map), None);
+        map.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
+        assert_eq!(retry_after(&map), Some(Duration::from_secs(120)));
+    }
 
     fn args(method: &str, path: &str, data: Option<&str>) -> ApiArgs {
         ApiArgs {

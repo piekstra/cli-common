@@ -1348,6 +1348,218 @@ fn the_hook_is_shown_what_was_read_and_only_once_the_browser_side_is_ready() {
     assert!(seen[0].3.unwrap() > 0);
 }
 
+fn bare_candidate() -> Captured {
+    Captured {
+        label: "Example".into(),
+        host: "www.example.com".into(),
+        value: None,
+        cookies: Vec::new(),
+        jar: None,
+        request: None,
+        request_log: None,
+        user_agent: None,
+    }
+}
+
+#[test]
+fn an_undecided_read_keeps_the_tab_and_warns_once_until_a_read_decides() {
+    let mut fake = fake_with(vec![page("T-app", "https://www.example.com/")]);
+    fake.0.borrow_mut().cookies = split_jar();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let hook = move |_: &Captured| {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Confirm::undecided("GET /me answered 429")
+        } else {
+            Confirm::Ready
+        }
+    };
+    let out = run(
+        &mut fake,
+        &[jar_capture().confirm(hook)],
+        Duration::from_millis(60),
+    );
+    assert_eq!(out.result.unwrap().len(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.0.borrow().closed, ["T-app"], "closed only once ready");
+    let warned: Vec<_> = out
+        .notes
+        .iter()
+        .filter(|line| line.contains("GET /me answered 429"))
+        .collect();
+    assert_eq!(warned.len(), 1, "{:?}", out.notes);
+    assert!(warned[0].contains("Ctrl-C"), "{warned:?}");
+}
+
+#[test]
+fn a_short_retry_after_does_not_shorten_the_backoff() {
+    let capture = jar_capture().confirm(|_| Confirm::Undecided {
+        reason: "GET /me answered 503".into(),
+        retry_after: Some(Duration::ZERO),
+    });
+    let mut w = Waiting::new(&capture);
+    let start = Instant::now();
+    let mut notes = Vec::new();
+    assert!(confirm_gate(&mut w, bare_candidate(), start, &mut notes).is_err());
+    let read = w.undecided.as_ref().unwrap();
+    assert_eq!(read.ask_at, start + Duration::from_secs(6));
+    let next = read.ask_at;
+    assert!(confirm_gate(&mut w, bare_candidate(), next, &mut notes).is_err());
+    let read = w.undecided.as_ref().unwrap();
+    assert_eq!(
+        read.ask_at,
+        next + Duration::from_secs(12),
+        "it still doubles"
+    );
+    assert_eq!(notes.len(), 1, "{notes:?}");
+}
+
+#[test]
+fn an_undecided_read_is_not_asked_again_inside_its_backoff() {
+    let mut fake = fake_with(vec![page("T-app", "https://www.example.com/")]);
+    fake.0.borrow_mut().cookies = split_jar();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let hook = move |_: &Captured| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Confirm::undecided("GET /me answered 503")
+    };
+    let out = run(
+        &mut fake,
+        &[jar_capture().confirm(hook)],
+        Duration::from_millis(60),
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the first backoff is 6 s, so only the first ask and the deadline's last one"
+    );
+    assert!(
+        calls_named(&fake, "Target.getTargets").len() > 1,
+        "the wait kept polling"
+    );
+    let err = out.result.unwrap_err();
+    assert!(matches!(&err, BrowserError::Undecided(_)), "{err:?}");
+    assert_eq!(err.exit_code(), 5);
+    let message = err.to_string();
+    assert!(message.contains("GET /me answered 503"), "{message}");
+    assert!(message.contains("Nothing was captured"), "{message}");
+    assert!(message.contains("ex auth login --browser"), "{message}");
+    assert!(fake.0.borrow().closed.is_empty());
+}
+
+#[test]
+fn the_deadline_brings_one_last_ask_that_can_finish_the_sign_in() {
+    let mut fake = fake_with(vec![page("T-app", "https://www.example.com/")]);
+    fake.0.borrow_mut().cookies = split_jar();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let hook = move |_: &Captured| {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Confirm::undecided("GET /me answered 503")
+        } else {
+            Confirm::Ready
+        }
+    };
+    let out = run(
+        &mut fake,
+        &[jar_capture().confirm(hook)],
+        Duration::from_millis(60),
+    );
+    assert_eq!(
+        out.result.unwrap().len(),
+        1,
+        "the last ask kept the sign-in"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.0.borrow().closed, ["T-app"]);
+}
+
+#[test]
+fn only_a_wait_that_every_capture_is_undecided_on_is_the_provider_s_exit_code() {
+    let (a, b, c) = (
+        Capture::new("Alpha", HostRule::exact("a.example.com").unwrap()),
+        Capture::new("Beta", HostRule::exact("b.example.com").unwrap()),
+        Capture::new("Gamma", HostRule::exact("c.example.com").unwrap()),
+    );
+    let waiting = |blocked: [Option<Blocked>; 2]| {
+        let mut w = vec![Waiting::new(&a), Waiting::new(&b), Waiting::new(&c)];
+        w[0].done = true;
+        let [one, two] = blocked;
+        w[1].progress.blocked = one;
+        w[2].progress.blocked = two;
+        w
+    };
+    let undecided = || Some(Blocked::Undecided("GET /me answered 503".into()));
+    let out = timed_out("x", LONG, &waiting([undecided(), undecided()]), None);
+    assert!(matches!(&out, BrowserError::Undecided(_)), "{out:?}");
+    assert_eq!(out.exit_code(), 5);
+    let message = out.to_string();
+    assert!(message.contains("Beta"), "{message}");
+    assert!(!message.contains("Alpha"), "a finished capture: {message}");
+    let mixed = [undecided(), Some(Blocked::Unconfirmed("401".into()))];
+    let out = timed_out("x", LONG, &waiting(mixed), None);
+    assert!(matches!(&out, BrowserError::TimedOut(_)), "{out:?}");
+    assert_eq!(out.exit_code(), 3);
+}
+
+#[test]
+fn a_retry_after_is_honoured_and_capped() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let hook = move |_: &Captured| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Confirm::Undecided {
+            reason: "GET /me answered 429".into(),
+            retry_after: Some(Duration::from_secs(86_400)),
+        }
+    };
+    let capture = jar_capture().confirm(hook);
+    let mut w = Waiting::new(&capture);
+    let now = Instant::now();
+    let mut notes = Vec::new();
+    assert!(confirm_gate(&mut w, bare_candidate(), now, &mut notes).is_err());
+    let read = w.undecided.as_ref().unwrap();
+    assert_eq!(read.ask_at, now + MAX_RETRY_AFTER);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+}
+
+#[test]
+fn the_undecided_backoff_doubles_up_to_its_ceiling() {
+    let mut last = None;
+    let mut seen = Vec::new();
+    for _ in 0..7 {
+        let next = next_undecided_backoff(last);
+        seen.push(next.as_secs());
+        last = Some(next);
+    }
+    assert_eq!(seen, [6, 12, 24, 48, 60, 60, 60]);
+}
+
+#[test]
+fn a_clear_answer_ends_the_backoff() {
+    let capture = jar_capture().confirm({
+        let calls = AtomicUsize::new(0);
+        move |_| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Confirm::undecided("GET /me answered 503")
+            } else {
+                Confirm::NotYet("GET /me answered 401".into())
+            }
+        }
+    });
+    let mut w = Waiting::new(&capture);
+    let start = Instant::now();
+    let mut notes = Vec::new();
+    assert!(confirm_gate(&mut w, bare_candidate(), start, &mut notes).is_err());
+    assert!(w.undecided.is_some());
+    let later = start + MAX_UNDECIDED_BACKOFF;
+    assert!(confirm_gate(&mut w, bare_candidate(), later, &mut notes).is_err());
+    assert!(w.undecided.is_none(), "a refusal is not undecided");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+}
+
 #[test]
 fn fail_ends_the_wait_with_the_hook_s_error_and_closes_nothing() {
     let mut fake = fake_with(vec![page("T-app", "https://www.example.com/")]);
@@ -2019,12 +2231,18 @@ fn the_confirm_gate_keeps_the_request_for_the_next_poll_on_not_yet() {
     let capture = jar_capture().request(GRAPHQL).confirm(hook);
     let mut w = Waiting::new(&capture);
     assert_eq!(
-        gate_blocked(confirm_gate(&mut w, candidate(Some(sample_request())))),
+        gate_blocked(confirm_gate(
+            &mut w,
+            candidate(Some(sample_request())),
+            Instant::now(),
+            &mut Vec::new(),
+        )),
         Some(Blocked::Unconfirmed("GET /me answered 401 (call 1)".into()))
     );
     let kept = w.seen.take();
     assert!(kept.is_some(), "the request is kept for the next poll");
-    let Ok(captured) = confirm_gate(&mut w, candidate(kept)) else {
+    let Ok(captured) = confirm_gate(&mut w, candidate(kept), Instant::now(), &mut Vec::new())
+    else {
         panic!("the second answer is Ready");
     };
     assert!(captured.request().is_some());
@@ -2034,11 +2252,17 @@ fn the_confirm_gate_keeps_the_request_for_the_next_poll_on_not_yet() {
     let mut w = Waiting::new(&capture);
     let plain = jar_capture();
     let mut plain_w = Waiting::new(&plain);
-    assert!(confirm_gate(&mut plain_w, candidate(None)).is_ok());
+    assert!(confirm_gate(
+        &mut plain_w,
+        candidate(None),
+        Instant::now(),
+        &mut Vec::new()
+    )
+    .is_ok());
     let failing = jar_capture().confirm(|_| Confirm::Fail(CliError::Other("refused".into())));
     w.capture = &failing;
     assert!(matches!(
-        confirm_gate(&mut w, candidate(None)),
+        confirm_gate(&mut w, candidate(None), Instant::now(), &mut Vec::new()),
         Err(Gate::Failed(CliError::Other(m))) if m == "refused"
     ));
 }

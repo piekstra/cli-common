@@ -274,18 +274,22 @@ impl RefreshLock {
     }
 
     /// The open file holds the lock until it is closed.
-    fn acquire(&self) -> Result<File, Refused> {
+    fn acquire(&self) -> Result<HeldLock, Refused> {
         self.acquire_within(self.wait, || {})
     }
 
     /// `contended` runs once, the first time another process holds the lock.
-    fn acquire_within(&self, wait: Duration, contended: impl FnOnce()) -> Result<File, Refused> {
+    fn acquire_within(
+        &self,
+        wait: Duration,
+        contended: impl FnOnce(),
+    ) -> Result<HeldLock, Refused> {
         let file = self.open().map_err(Refused::Broken)?;
         let started = Instant::now();
         let mut contended = Some(contended);
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(file),
+                Ok(()) => return Ok(HeldLock(file)),
                 Err(TryLockError::Error(e)) => {
                     return Err(Refused::Broken(format!(
                         "locking {}: {e}",
@@ -346,6 +350,19 @@ impl Refused {
             }
             Self::Broken(why) => CliError::Other(why),
         }
+    }
+}
+
+/// The open lock file, with the lock on it.
+#[derive(Debug)]
+struct HeldLock(File);
+
+impl Drop for HeldLock {
+    /// Unlocks rather than relying on the close: a process another thread is
+    /// spawning has a copy of the descriptor until it execs, and the lock would
+    /// last as long as that copy, so the next holder would find it taken.
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
     }
 }
 
@@ -655,6 +672,23 @@ mod tests {
             .wait_at_most(Duration::ZERO)
             .hold(|| Ok(()))
             .unwrap();
+    }
+
+    #[test]
+    fn a_copy_of_the_descriptor_does_not_outlast_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = lock_in(dir.path());
+        let Ok(held) = lock.acquire() else {
+            panic!("the lock is free");
+        };
+        // What a process being spawned on another thread holds until it execs.
+        let copy = held.0.try_clone().unwrap();
+        drop(held);
+        lock_in(dir.path())
+            .wait_at_most(Duration::ZERO)
+            .hold(|| Ok(()))
+            .unwrap();
+        drop(copy);
     }
 
     #[test]

@@ -10,8 +10,10 @@ use pk_cli_core::CliError;
 /// never a value. Converts into [`CliError`] with the family's exit codes:
 /// [`TimedOut`](BrowserError::TimedOut) and
 /// [`WindowClosed`](BrowserError::WindowClosed) are exit 3 (the owner did
-/// not finish signing in), [`Handler`](BrowserError::Handler) is the CLI's
-/// own error, and everything else is exit 1.
+/// not finish signing in), [`Undecided`](BrowserError::Undecided) is exit 5
+/// (the provider never answered any pending capture's read clearly),
+/// [`Handler`](BrowserError::Handler)
+/// is the CLI's own error, and everything else is exit 1.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum BrowserError {
@@ -41,6 +43,11 @@ pub enum BrowserError {
     Canceled,
     /// The sign-in did not finish within the timeout.
     TimedOut(String),
+    /// The wait ran out with every pending capture's confirm read unable to
+    /// decide ([`Confirm::Undecided`](crate::Confirm::Undecided)). If any
+    /// pending capture is still waiting on the owner, the error is
+    /// [`TimedOut`](BrowserError::TimedOut) instead.
+    Undecided(String),
     /// The owner closed the window before the sign-in finished.
     WindowClosed(String),
     /// The CLI's own error, passed through unchanged: what the
@@ -59,6 +66,7 @@ impl fmt::Display for BrowserError {
             | BrowserError::Profile(m)
             | BrowserError::ProfileInUse(m)
             | BrowserError::TimedOut(m)
+            | BrowserError::Undecided(m)
             | BrowserError::WindowClosed(m) => f.write_str(m),
             BrowserError::Canceled => f.write_str("browser login canceled"),
             BrowserError::Handler(e) => write!(f, "{e}"),
@@ -71,6 +79,7 @@ impl BrowserError {
     pub fn exit_code(&self) -> i32 {
         match self {
             BrowserError::TimedOut(_) | BrowserError::WindowClosed(_) => 3,
+            BrowserError::Undecided(_) => 5,
             BrowserError::Handler(e) => e.exit_code(),
             _ => 1,
         }
@@ -83,6 +92,7 @@ impl From<BrowserError> for CliError {
     fn from(e: BrowserError) -> Self {
         match e {
             BrowserError::TimedOut(m) | BrowserError::WindowClosed(m) => CliError::Auth(m),
+            BrowserError::Undecided(m) => CliError::Upstream(m),
             BrowserError::Handler(e) => e,
             other => CliError::Other(other.to_string()),
         }
@@ -137,5 +147,18 @@ mod tests {
             assert_eq!(cli.exit_code(), code, "{message}");
             assert_eq!(cli.to_string(), message);
         }
+    }
+
+    #[test]
+    fn a_wait_that_ran_out_undecided_is_the_provider_s_exit_code() {
+        let err = BrowserError::Undecided("no answer".into());
+        assert_eq!(err.to_string(), "no answer");
+        assert_eq!(err.exit_code(), 5);
+        let cli = CliError::from(err);
+        assert!(
+            matches!(&cli, CliError::Upstream(m) if m == "no answer"),
+            "{cli:?}"
+        );
+        assert_eq!(cli.exit_code(), 5);
     }
 }

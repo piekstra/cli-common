@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+- `pk-cli-browser`: `Confirm::Undecided { reason, retry_after }` and
+  `Confirm::undecided(reason)`, for a confirm hook's read that could not decide (a
+  429, a 5xx, no answer, an edge block's page). The crate keeps the tab and the jar
+  and asks again after a backoff of 6 s, doubling to 60 s, or longer if the
+  provider's `Retry-After` asks, up to five minutes, with one last ask at the
+  deadline. The first
+  such answer prints one status line. A wait that runs out with every pending
+  capture undecided is `BrowserError::Undecided`, exit 5, rather than `TimedOut`,
+  exit 3, because signing in again fixes nothing.
+- `pk-cli-auth`: `RefreshLock` unlocks when released rather than relying on the
+  close. A process being spawned on another thread holds a copy of the descriptor
+  until it execs, so the next holder could find the lock taken. This also failed
+  about 1 test run in 25.
+- `pk-cli-core`: `HttpResponse::inconclusive(now)` names an answer that says nothing
+  about the session (a 429, a 5xx, a 403 with an HTML page), and
+  `parse_retry_after(value, now)` reads `Retry-After` in seconds or as an IMF-fixdate.
+  `pk-cli-http`: `inconclusive(&response)` and `retry_after(&headers)` do the same for
+  a `reqwest` response.
+- `pk-cli-auth`: `AuthLogin`, the `auth-login/v1` result, and an optional
+  `AuthStatus::verified` for a login that answers with `auth-status/v1`.
+- `DESIGN.md` §2.2 and `conformance.md` state what a window capture does when its
+  verifying read cannot decide. A refusal stores nothing. A value that can only be
+  this sign-in's stores with a warning and exit 0. A value that could predate the
+  sign-in answers `Confirm::Undecided`. A 2xx alone is not acceptance. §1.4 defines
+  `auth-login/v1` for a CLI with `auth login --browser`, which always carries
+  `verified`.
+
 ## v0.19.0 — 2026-11-03
 
 - `pk-cli-browser`: `Launch::clear_site_storage(bool)`, default off, for a CLI
