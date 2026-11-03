@@ -579,7 +579,7 @@ Additive: no existing function, default or `/v1` shape changes.
   back to UTC. `today()` is unchanged and now documents when to use which.
   Adds `libc` (Unix only; bindings, already in the workspace lockfile).
 - **`pk-cli-auth::otp`** — the park-and-resume one-time-code login
-  every code-login CLI carries its own copy of (`insp` by email; `rpmfl`,
+  every code-login CLI carries its own copy of (a payroll CLI by email; `rpmfl`,
   `pmac`, `sfi`, `rhd`, `m1f` by text message), as one flow.
   `OtpLogin::login` requests a code through the CLI's `OtpTransport`, parks
   the in-flight session in a `ParkingSlot` *before* waiting on anything
@@ -595,9 +595,9 @@ Additive: no existing function, default or `/v1` shape changes.
   only mail received after the request (`after:<unix>`), a bounded poll
   (9 looks, 10 s apart), a 30 s limit per call, and no second call after a
   failure, since `gro`'s keychain read can raise a macOS dialog per call. The
-  stored `ParkedLogin` keeps `insp`'s field names (`rejected` is new and
-  defaulted), so adopting it reads the item `insp` already parks. Adopting
-  CLIs that exit 0 on "code sent" today (`insp`) change to exit 3.
+  stored `ParkedLogin` keeps the earlier field names (`rejected` is new and
+  defaulted), so adopting it reads the item a CLI already parks. Adopting
+  CLIs that exit 0 on "code sent" today change to exit 3.
 - **1Password as a credential source in `pk-cli-secrets`** (DESIGN.md
   §1.7). `OpRef` is a validated `op://vault/item/[section/]field[?query]`
   reference that parses from a flag and (de)serializes as a config string.
