@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## v0.27.0 — 2026-11-03
 
+- `pk-cli-mcp`: `hold_within(lock, wait)` is a server's turn lock with a bound on the wait,
+  moved from schwab-cli and nelnet-cli, which carried the same one. Native only.
+- `pk-cli-mcp`: `stop_note(bin)`, beside `restart_note`, is what `auth logout --forget` owes
+  whoever ran it once it has removed the connector token: a running `<bin> mcp --http` keeps
+  the token it started with, the environment variable is beyond the command, and a connector
+  still in use needs a new token. On macOS it gives the `launchctl bootout` command.
 - `pk-cli-secrets`: on Windows, `CredentialStore::set` stores a value over one credential's
   limit across several and `get` puts it back together, so a browser session's tokens no
   longer fail at the end of a sign-in. The limit is 2,560 bytes, which `keyring` fills as

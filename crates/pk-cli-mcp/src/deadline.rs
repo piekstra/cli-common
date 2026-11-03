@@ -19,11 +19,15 @@
 //! }
 //! ```
 //!
-//! Nothing here reads a real clock but [`SystemClock`], which does not exist on
-//! `wasm32-unknown-unknown`: `Instant::now` and `SystemTime::now` both panic there.
+//! Nothing here reads a real clock but [`SystemClock`] and [`hold_within`], which do not exist
+//! on `wasm32-unknown-unknown`: `Instant::now` and `SystemTime::now` both panic there.
 
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use pk_cli_core::CliError;
 
@@ -58,6 +62,32 @@ impl Clock for SystemClock {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
+    }
+}
+
+/// A server's turn lock, or `None` once `wait` has passed.
+///
+/// For a server that takes its calls one at a time, so parallel tool calls keep a client's request
+/// pacing or do not race one rotating refresh token. A call in the queue has to give up in time
+/// to answer inside [`CALL_LIMIT`], or nobody hears why, and the wait for this lock is on another
+/// call on this machine and not a prompt, so the monotonic clock is the one to read.
+///
+/// It guards a turn and no data, so a call that panicked holding it leaves it usable.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn hold_within(lock: &Mutex<()>, wait: Duration) -> Option<MutexGuard<'_, ()>> {
+    let until = Instant::now() + wait;
+    loop {
+        match lock.try_lock() {
+            Ok(held) => return Some(held),
+            Err(TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) => {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return None;
+                }
+                std::thread::sleep(left.min(Duration::from_millis(50)));
+            }
+        }
     }
 }
 
@@ -128,6 +158,7 @@ mod tests {
     use super::*;
     use crate::conformance::ManualClock;
     use crate::{Server, ToolError};
+    use std::sync::Arc;
 
     const LIMIT: Duration = Duration::from_secs(60);
     const JUST_UNDER: Duration = Duration::from_millis(59_999);
@@ -211,6 +242,45 @@ mod tests {
         clock.advance(JUST_UNDER);
         let copy = deadline;
         assert_eq!(copy.elapsed(), JUST_UNDER);
+    }
+
+    #[test]
+    fn a_call_waits_for_a_turn_only_so_long() {
+        let lock = Mutex::new(());
+        let held = hold_within(&lock, Duration::ZERO).expect("a free lock is taken");
+        let start = Instant::now();
+        assert!(hold_within(&lock, Duration::from_millis(60)).is_none());
+        assert!(start.elapsed() >= Duration::from_millis(60));
+        assert!(hold_within(&lock, Duration::ZERO).is_none());
+        drop(held);
+        assert!(hold_within(&lock, Duration::ZERO).is_some());
+    }
+
+    #[test]
+    fn a_call_in_the_queue_gets_the_turn_when_it_comes() {
+        let lock = Arc::new(Mutex::new(()));
+        let held = lock.lock().unwrap();
+        let waiting = {
+            let lock = Arc::clone(&lock);
+            std::thread::spawn(move || hold_within(&lock, Duration::from_secs(30)).is_some())
+        };
+        std::thread::sleep(Duration::from_millis(60));
+        drop(held);
+        assert!(waiting.join().unwrap());
+    }
+
+    /// One call's panic must not fail every call after it for as long as the server runs.
+    #[test]
+    fn a_turn_a_panicking_call_held_is_still_usable() {
+        let lock = Arc::new(Mutex::new(()));
+        let poisoner = Arc::clone(&lock);
+        let _ = std::thread::spawn(move || {
+            let _held = poisoner.lock().unwrap();
+            panic!("a call fell over");
+        })
+        .join();
+        assert!(lock.is_poisoned());
+        assert!(hold_within(&lock, Duration::ZERO).is_some());
     }
 
     #[test]
