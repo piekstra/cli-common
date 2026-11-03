@@ -225,7 +225,12 @@ conventions alone; TOML manifests stay as the escape hatch for non-conforming CL
   per-field layout is migrated on first read, then deleted). On Windows, whose
   store holds 2,560 bytes per credential and makes no such prompt,
   `CredentialStore` stores a longer value across several and reads it back whole,
-  so a CLI writes one item whatever its size on every platform.
+  so a CLI writes one item whatever its size on every platform. An older copy sharing
+  the item (a running server, an installed extension) reads a split value's head as its
+  value: `get_json` calls it the wrong shape and a plain `get` hands over the head's text,
+  which holds no secret and which a provider refuses. Its logout deletes only the head, so
+  a logout after a downgrade is repeated from a current build, which removes the parts.
+  A value that long never fit an older build, so nothing it stored changes shape.
 - **A rotating refresh token is renewed under a lock.** All of a CLI's
   processes share one keychain item, and a provider that rotates refresh
   tokens may revoke the whole session when a retired one is presented. A CLI

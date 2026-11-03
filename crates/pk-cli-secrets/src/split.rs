@@ -18,10 +18,17 @@
 //! - **The head changes last.** A new value goes into the slot the head does not name, then the
 //!   head moves to it, then the old slot is cleared. A failure or a crash partway leaves the old
 //!   value readable. Two slots and no more, so a crash can only ever leave one old copy behind,
-//!   which the next write or `auth logout --forget` clears.
+//!   which the next write clears. A part a failed delete left past a gap waits for
+//!   `auth logout --forget`, which looks everywhere.
 //! - **A read checks what it joined** against the head's hash, so a torn write reads as an error
 //!   and is never handed to a provider as a credential. It reads twice, because a reader can
 //!   meet a writer clearing the slot it was reading.
+//! - **Two writers need no lock for this,** as one item did not. A write reads its parts back
+//!   before pointing the head at them and once after, tries again if another write reached them,
+//!   and clears a slot only while the head is still its own. The last write wins, as it does on
+//!   one item. What remains is a clear already under way when another write starts into that
+//!   slot, which reads as parts that do not belong together until the next sign-in. A CLI whose
+//!   provider rotates holds `RefreshLock` around its writes anyway.
 //!
 //! macOS and Linux have no such limit, so there none of this runs and a call is the one
 //! keychain operation it always was: an extra lookup there could mean an extra prompt.
@@ -48,6 +55,14 @@ const MARKER: &str = "pk-split/1 ";
 /// The most parts one value may take, which also bounds what a damaged head can ask a read to
 /// do: about 80 KB at Windows's limit, many times a browser session's tokens.
 const MAX_PARTS: usize = 64;
+
+/// How many times a write goes round when another write keeps reaching its parts.
+const WRITE_TRIES: u32 = 4;
+
+/// So two writers that met do not stay in step: each process waits its own time.
+fn out_of_step() -> std::time::Duration {
+    std::time::Duration::from_millis(20 + u64::from(std::process::id() % 80))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Slot {
@@ -190,13 +205,18 @@ pub(crate) fn get(
 }
 
 fn joined(store: &impl ItemStore, account: &str) -> Result<Option<Secret>, CliError> {
-    let service = store.service();
     let item = store.get(account)?;
     let head = head_of(item.as_ref())
-        .map_err(|()| too_damaged(service, account, "has a head that cannot be read"))?;
-    let Some(head) = head else {
-        return Ok(item);
-    };
+        .map_err(|()| too_damaged(store.service(), account, "has a head that cannot be read"))?;
+    match head {
+        Some(head) => joined_from(store, account, head).map(Some),
+        None => Ok(item),
+    }
+}
+
+/// The value `head` names, if its parts are all there and belong together.
+fn joined_from(store: &impl ItemStore, account: &str, head: Head) -> Result<Secret, CliError> {
+    let service = store.service();
     let mut parts = Vec::with_capacity(head.parts);
     for index in 0..head.parts {
         let part = store
@@ -218,7 +238,7 @@ fn joined(store: &impl ItemStore, account: &str) -> Result<Option<Secret>, CliEr
             "has parts that do not belong together",
         ));
     }
-    Ok(Some(value))
+    Ok(value)
 }
 
 pub(crate) fn set(
@@ -231,44 +251,69 @@ pub(crate) fn set(
         return store.set(account, secret);
     };
     let value = secret.expose();
-    let was = store.get(account)?;
-    // A head that cannot be read names no slot to keep: this write is what repairs it.
-    let was = head_of(was.as_ref()).unwrap_or(None);
     let units: usize = value.chars().map(char::len_utf16).sum();
     if units <= limit && !value.starts_with(MARKER) {
         store.set(account, secret)?;
-    } else {
-        let pieces = pieces(value, limit);
-        if pieces.len() > MAX_PARTS {
-            return Err(CliError::Keychain(format!(
-                "item `{account}` under `{}` is too long to store here: {units} UTF-16 code \
-                 units, in {} parts of {limit}, past the {MAX_PARTS} kept",
-                store.service(),
-                pieces.len(),
-            )));
+        // Nothing names the slots now, so nothing else will clear them, whatever was here before:
+        // a head, one that cannot be read, or a plain value after a crash. Unless another write
+        // has moved the head since, and one of them is its.
+        if store.get(account)?.as_ref().map(Secret::expose) == Some(value) {
+            clear_run(store, account, Slot::A, 0);
+            clear_run(store, account, Slot::B, 0);
         }
-        let slot = was.map_or(Slot::A, |head| head.slot.other());
+        return Ok(());
+    }
+    let pieces = pieces(value, limit);
+    if pieces.len() > MAX_PARTS {
+        return Err(CliError::Keychain(format!(
+            "item `{account}` under `{}` is too long to store here: {units} UTF-16 code \
+             units, in {} parts of {limit}, past the {MAX_PARTS} kept",
+            store.service(),
+            pieces.len(),
+        )));
+    }
+    let hash = hash_of(value);
+    for attempt in 0..WRITE_TRIES {
+        if attempt > 0 {
+            std::thread::sleep(out_of_step());
+        }
+        // A head that cannot be read names no slot to keep: this write is what repairs it.
+        let was = head_of(store.get(account)?.as_ref()).unwrap_or(None);
+        let head = Head {
+            slot: was.map_or(Slot::A, |head| head.slot.other()),
+            parts: pieces.len(),
+            hash,
+        };
         for (index, piece) in pieces.iter().enumerate() {
             store.set(
-                &part_account(account, slot, index),
+                &part_account(account, head.slot, index),
                 &Secret::new(piece.to_string()),
             )?;
         }
-        let head = Head {
-            slot,
-            parts: pieces.len(),
-            hash: hash_of(value),
-        };
-        store.set(account, &Secret::new(head.text()))?;
-        // Whatever an earlier crash left past the end of this value's parts.
-        clear_run(store, account, slot, pieces.len());
+        // Another write in this slot has mixed its parts with these: point nobody at them.
+        if joined_from(store, account, head).is_err() {
+            continue;
+        }
+        let text = head.text();
+        store.set(account, &Secret::new(text.as_str()))?;
+        if store.get(account)?.as_ref().map(Secret::expose) != Some(text.as_str()) {
+            // A later write has the head, and the slots are its to clear. The last write wins.
+            return Ok(());
+        }
+        if joined_from(store, account, head).is_err() {
+            continue;
+        }
+        // The value is stored. A copy left in the old slot is overwritten or cleared later, and
+        // to fail here would tell a caller holding a rotated token that it was not saved.
+        clear_run(store, account, head.slot, pieces.len());
+        clear_run(store, account, head.slot.other(), 0);
+        return Ok(());
     }
-    // The value is stored. A copy left in the old slot is overwritten or cleared later, and to
-    // fail here would tell a caller holding a rotated token that it was not saved.
-    if let Some(old) = was {
-        clear_run(store, account, old.slot, 0);
-    }
-    Ok(())
+    Err(CliError::Keychain(format!(
+        "item `{account}` under `{}` kept changing while this wrote it: another copy of this \
+         command is writing it; run this again when that has finished",
+        store.service()
+    )))
 }
 
 pub(crate) fn delete(
@@ -311,6 +356,10 @@ mod tests {
         writes_left: Cell<Option<usize>>,
         /// Refuse a delete of this item.
         refuse_delete: RefCell<Option<String>>,
+        /// The first read of this item finds nothing, and later ones find what is there.
+        missing_once: RefCell<Option<String>>,
+        /// Right after this item is written, another whole write of this value runs.
+        then_write: RefCell<Option<(String, String)>>,
         reads: Cell<usize>,
     }
 
@@ -329,6 +378,10 @@ mod tests {
         }
         fn get(&self, account: &str) -> Result<Option<Secret>, CliError> {
             self.reads.set(self.reads.get() + 1);
+            if self.missing_once.borrow().as_deref() == Some(account) {
+                self.missing_once.replace(None);
+                return Ok(None);
+            }
             Ok(self.raw(account).map(Secret::new))
         }
         fn set(&self, account: &str, secret: &Secret) -> Result<(), CliError> {
@@ -343,6 +396,15 @@ mod tests {
             self.items
                 .borrow_mut()
                 .insert(account.into(), secret.expose().into());
+            let meets = self
+                .then_write
+                .borrow()
+                .as_ref()
+                .is_some_and(|(after, _)| after == account);
+            if meets {
+                let (_, other) = self.then_write.take().unwrap();
+                super::set(self, "session", &Secret::new(other), Some(LIMIT)).unwrap();
+            }
             Ok(())
         }
         fn delete(&self, account: &str) -> Result<bool, CliError> {
@@ -527,8 +589,110 @@ mod tests {
         assert!(err.to_string().contains("belong together"), "{err}");
     }
 
-    /// A reader that met a writer clearing the slot it read finds the new value on its second
-    /// look, and a damaged item costs two reads and no more.
+    /// What the second look is for: a reader that met a writer clearing the slot it read.
+    #[test]
+    fn a_read_that_fails_once_finds_the_value_on_its_second_look() {
+        let store = Fake::default();
+        let value = long(LIMIT * 2);
+        put(&store, &value);
+        let head = Head::parse(&store.raw("session").unwrap()).unwrap();
+        store
+            .missing_once
+            .replace(Some(part_account("session", head.slot, 1)));
+        assert_eq!(read(&store).as_deref(), Some(value.as_str()));
+    }
+
+    /// Two writers, both reading the same head and so both choosing the same slot: the second
+    /// runs to the end after the first has written one part, and the first's next parts land
+    /// among the second's in the slot the head now names.
+    #[test]
+    fn two_writers_in_one_slot_leave_one_whole_value() {
+        let store = Fake::default();
+        put(&store, &long(LIMIT * 2));
+        let first = "1".repeat(LIMIT * 3);
+        let second = "2".repeat(LIMIT * 3);
+        let slot = Head::parse(&store.raw("session").unwrap())
+            .unwrap()
+            .slot
+            .other();
+        store
+            .then_write
+            .replace(Some((part_account("session", slot, 0), second)));
+        put(&store, &first);
+        assert_eq!(read(&store).as_deref(), Some(first.as_str()));
+        assert_eq!(store.accounts().len(), 4, "{:?}", store.accounts());
+    }
+
+    /// The first writer has moved the head and not yet cleared the old slot, which the second
+    /// then fills and points the head at. The first must not clear what is now live.
+    #[test]
+    fn a_writer_does_not_clear_a_slot_another_write_has_taken() {
+        let store = Fake::default();
+        put(&store, &long(LIMIT * 2));
+        let first = "1".repeat(LIMIT * 2);
+        let second = "2".repeat(LIMIT * 3);
+        store
+            .then_write
+            .replace(Some(("session".into(), second.clone())));
+        put(&store, &first);
+        assert_eq!(read(&store).as_deref(), Some(second.as_str()));
+    }
+
+    /// A short write's clear must not take the parts a long write just pointed the head at.
+    #[test]
+    fn a_short_write_does_not_clear_the_slot_of_a_long_one_after_it() {
+        let store = Fake::default();
+        let second = long(LIMIT * 2);
+        store
+            .then_write
+            .replace(Some(("session".into(), second.clone())));
+        put(&store, "short");
+        assert_eq!(read(&store).as_deref(), Some(second.as_str()));
+    }
+
+    /// The head says nothing of a slot once a short value has replaced it, so a crash there
+    /// must not strand the retired tokens until a logout.
+    #[test]
+    fn a_short_write_clears_what_a_failed_clear_left_behind() {
+        let store = Fake::default();
+        put(&store, &long(LIMIT * 2));
+        let head = Head::parse(&store.raw("session").unwrap()).unwrap();
+        store
+            .refuse_delete
+            .replace(Some(part_account("session", head.slot, 0)));
+        put(&store, "short one");
+        assert_eq!(store.accounts().len(), 3, "{:?}", store.accounts());
+        store.refuse_delete.replace(None);
+        put(&store, "short two");
+        assert_eq!(store.accounts(), ["session"]);
+    }
+
+    #[test]
+    fn a_short_write_clears_the_parts_of_a_head_that_cannot_be_read() {
+        let store = Fake::default();
+        put(&store, &long(LIMIT * 2));
+        store
+            .items
+            .borrow_mut()
+            .insert("session".into(), format!("{MARKER}damaged"));
+        put(&store, "short");
+        assert_eq!(store.accounts(), ["session"]);
+    }
+
+    /// A long write clears the slot it did not use, whatever the head had said.
+    #[test]
+    fn a_long_write_clears_what_a_crash_left_in_the_other_slot() {
+        let store = Fake::default();
+        store
+            .items
+            .borrow_mut()
+            .insert(part_account("session", Slot::B, 0), "retired".into());
+        put(&store, &long(LIMIT * 2));
+        assert_eq!(store.accounts().len(), 3, "{:?}", store.accounts());
+        assert!(store.raw(&part_account("session", Slot::B, 0)).is_none());
+    }
+
+    /// A damaged item costs two reads and no more.
     #[test]
     fn a_failed_read_looks_once_more() {
         let store = Fake::default();

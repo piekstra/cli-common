@@ -18,6 +18,7 @@ status here.
 - [ ] A provider client that attaches a credential follows no redirects (`Policy::none()`, as `BlockingTransport` does, and every client behind `Transport` keeps that), or sets `transport::secure_redirects`, or `transport::same_host_redirects` if it sends a provider's own auth header, which reqwest keeps on every hop
 - [ ] A request with a password, a code or another credential in its body uses `transport::same_host_redirects`, since reqwest re-sends the body on a 307 or 308 and `secure_redirects` allows that to any https host. A sign-in that has to cross hosts on its 302s, which drop the body, refuses a 307 or 308 to another host (pennymac-cli's `portal_redirects`), or follows the hops by hand as GETs
 - [ ] One keychain item per credential set (a JSON blob via `get_json`/`set_json`; a legacy per-field layout is migrated on first read, then deleted)
+- [ ] A Windows build with a value that can pass 1,280 UTF-16 code units is on cli-common v0.26.0 or later, which splits it (DESIGN.md §1.7). Its `SECURITY.md` says a logout after a downgrade is repeated from a current build, since an older build's logout leaves the parts
 - [ ] ISO `YYYY-MM-DD` accepted on all date flags; `--limit N` on lists
 - [ ] Mutations prompt unless `--force`; exit 6 when non-interactive — decided **before** any keychain or network work (`pk_cli_core::confirm`)
 - [ ] Mutations report success from a read-back (or the write's echo only when it carries the values), never from the write's status code
