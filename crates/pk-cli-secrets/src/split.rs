@@ -209,20 +209,26 @@ fn joined(store: &impl ItemStore, account: &str) -> Result<Option<Secret>, CliEr
     let head = head_of(item.as_ref())
         .map_err(|()| too_damaged(store.service(), account, "has a head that cannot be read"))?;
     match head {
-        Some(head) => joined_from(store, account, head).map(Some),
+        Some(head) => parts_of(store, account, head)?
+            .map(Some)
+            .map_err(|what| too_damaged(store.service(), account, what)),
         None => Ok(item),
     }
 }
 
-/// The value `head` names, if its parts are all there and belong together.
-fn joined_from(store: &impl ItemStore, account: &str, head: Head) -> Result<Secret, CliError> {
-    let service = store.service();
+/// The value `head` names, or `Err` with what is wrong with its parts. The outer error is the
+/// store failing to answer, which says nothing about them.
+fn parts_of(
+    store: &impl ItemStore,
+    account: &str,
+    head: Head,
+) -> Result<Result<Secret, &'static str>, CliError> {
     let mut parts = Vec::with_capacity(head.parts);
     for index in 0..head.parts {
-        let part = store
-            .get(&part_account(account, head.slot, index))?
-            .ok_or_else(|| too_damaged(service, account, "is missing a part"))?;
-        parts.push(part);
+        match store.get(&part_account(account, head.slot, index))? {
+            Some(part) => parts.push(part),
+            None => return Ok(Err("is missing a part")),
+        }
     }
     // One allocation of the final size: growing a `String` would leave secret bytes behind in
     // the buffers it let go, which `Secret`'s zeroize never sees.
@@ -231,14 +237,11 @@ fn joined_from(store: &impl ItemStore, account: &str, head: Head) -> Result<Secr
         value.push_str(part.expose());
     }
     let value = Secret::new(value);
-    if hash_of(value.expose()) != head.hash {
-        return Err(too_damaged(
-            service,
-            account,
-            "has parts that do not belong together",
-        ));
-    }
-    Ok(value)
+    Ok(if hash_of(value.expose()) == head.hash {
+        Ok(value)
+    } else {
+        Err("has parts that do not belong together")
+    })
 }
 
 pub(crate) fn set(
@@ -256,8 +259,9 @@ pub(crate) fn set(
         store.set(account, secret)?;
         // Nothing names the slots now, so nothing else will clear them, whatever was here before:
         // a head, one that cannot be read, or a plain value after a crash. Unless another write
-        // has moved the head since, and one of them is its.
-        if store.get(account)?.as_ref().map(Secret::expose) == Some(value) {
+        // has moved the head since, and one of them is its. The value is stored from here on, so
+        // a read that fails costs only the clear, which a later write does.
+        if matches!(store.get(account), Ok(Some(now)) if now.expose() == value) {
             clear_run(store, account, Slot::A, 0);
             clear_run(store, account, Slot::B, 0);
         }
@@ -291,20 +295,25 @@ pub(crate) fn set(
             )?;
         }
         // Another write in this slot has mixed its parts with these: point nobody at them.
-        if joined_from(store, account, head).is_err() {
+        if parts_of(store, account, head)?.is_err() {
             continue;
         }
         let text = head.text();
         store.set(account, &Secret::new(text.as_str()))?;
-        if store.get(account)?.as_ref().map(Secret::expose) != Some(text.as_str()) {
+        // The value is stored from here on. A read that fails costs only the clears, which a
+        // later write does, and to fail now would tell a caller holding a rotated token that it
+        // was not saved. So does a clear that fails.
+        match store.get(account) {
+            Ok(now) if now.as_ref().map(Secret::expose) == Some(text.as_str()) => {}
             // A later write has the head, and the slots are its to clear. The last write wins.
-            return Ok(());
+            Ok(_) => return Ok(()),
+            Err(_) => return Ok(()),
         }
-        if joined_from(store, account, head).is_err() {
-            continue;
+        match parts_of(store, account, head) {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => continue,
+            Err(_) => return Ok(()),
         }
-        // The value is stored. A copy left in the old slot is overwritten or cleared later, and
-        // to fail here would tell a caller holding a rotated token that it was not saved.
         clear_run(store, account, head.slot, pieces.len());
         clear_run(store, account, head.slot.other(), 0);
         return Ok(());
@@ -360,6 +369,11 @@ mod tests {
         missing_once: RefCell<Option<String>>,
         /// Right after this item is written, another whole write of this value runs.
         then_write: RefCell<Option<(String, String)>>,
+        /// Right after this item is written, every read fails.
+        reads_fail_after: RefCell<Option<String>>,
+        reads_failing: Cell<bool>,
+        /// Every part written lands changed, as if another write kept reaching it.
+        parts_land_changed: Cell<bool>,
         reads: Cell<usize>,
     }
 
@@ -378,6 +392,9 @@ mod tests {
         }
         fn get(&self, account: &str) -> Result<Option<Secret>, CliError> {
             self.reads.set(self.reads.get() + 1);
+            if self.reads_failing.get() {
+                return Err(CliError::Keychain("simulated read failure".into()));
+            }
             if self.missing_once.borrow().as_deref() == Some(account) {
                 self.missing_once.replace(None);
                 return Ok(None);
@@ -393,9 +410,15 @@ mod tests {
             }
             let units = secret.expose().encode_utf16().count();
             assert!(units <= LIMIT, "{account} is {units} units, past the limit");
-            self.items
-                .borrow_mut()
-                .insert(account.into(), secret.expose().into());
+            let landed = if self.parts_land_changed.get() && account.contains(".pk-split-") {
+                "changed".to_string()
+            } else {
+                secret.expose().to_string()
+            };
+            self.items.borrow_mut().insert(account.into(), landed);
+            if self.reads_fail_after.borrow().as_deref() == Some(account) {
+                self.reads_failing.set(true);
+            }
             let meets = self
                 .then_write
                 .borrow()
@@ -690,6 +713,75 @@ mod tests {
         put(&store, &long(LIMIT * 2));
         assert_eq!(store.accounts().len(), 3, "{:?}", store.accounts());
         assert!(store.raw(&part_account("session", Slot::B, 0)).is_none());
+    }
+
+    /// The one way a write gives up on another writer: it says so, and what was stored stays.
+    #[test]
+    fn a_write_that_never_gets_its_parts_to_hold_says_so_and_keeps_the_old_value() {
+        let store = Fake::default();
+        let old = long(LIMIT * 2);
+        put(&store, &old);
+        store.parts_land_changed.set(true);
+        let err = set(
+            &store,
+            "session",
+            &Secret::new(long(LIMIT * 3)),
+            Some(LIMIT),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("kept changing"), "{err}");
+        store.parts_land_changed.set(false);
+        assert_eq!(read(&store).as_deref(), Some(old.as_str()));
+    }
+
+    /// Before the head moves, a store that cannot answer is reported as what it is, and no copy
+    /// of anything is blamed.
+    #[test]
+    fn a_read_failing_before_the_head_moves_is_that_failure_and_the_old_value_stays() {
+        let store = Fake::default();
+        let old = long(LIMIT * 2);
+        put(&store, &old);
+        let slot = Head::parse(&store.raw("session").unwrap())
+            .unwrap()
+            .slot
+            .other();
+        store
+            .reads_fail_after
+            .replace(Some(part_account("session", slot, 2)));
+        let err = set(
+            &store,
+            "session",
+            &Secret::new(long(LIMIT * 3)),
+            Some(LIMIT),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("simulated read failure"), "{err}");
+        store.reads_fail_after.replace(None);
+        store.reads_failing.set(false);
+        assert_eq!(read(&store).as_deref(), Some(old.as_str()));
+    }
+
+    /// Past the head's move the new value is what is stored, and a caller holding a rotated
+    /// token must not be told otherwise.
+    #[test]
+    fn a_read_failing_after_the_head_moves_still_reports_the_value_stored() {
+        let store = Fake::default();
+        let new = long(LIMIT * 3);
+        store.reads_fail_after.replace(Some("session".into()));
+        set(&store, "session", &Secret::new(new.as_str()), Some(LIMIT)).unwrap();
+        store.reads_fail_after.replace(None);
+        store.reads_failing.set(false);
+        assert_eq!(read(&store).as_deref(), Some(new.as_str()));
+    }
+
+    #[test]
+    fn a_read_failing_after_a_short_write_still_reports_the_value_stored() {
+        let store = Fake::default();
+        store.reads_fail_after.replace(Some("session".into()));
+        set(&store, "session", &Secret::new("short"), Some(LIMIT)).unwrap();
+        store.reads_fail_after.replace(None);
+        store.reads_failing.set(false);
+        assert_eq!(read(&store).as_deref(), Some("short"));
     }
 
     /// A damaged item costs two reads and no more.
