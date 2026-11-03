@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- `pk-cli-core`: `CliError::because(Reason)` types why an error happened and
+  `CliError::with_remedy` keeps what to do next apart from what went wrong, on any kind
+  of error, so a caller answers by cause without reading the message: `reason()`,
+  `remedy()`, `message()`, `base()`, `into_base()` and `is_auth()`. The exit code and slug
+  are the wrapped error's. `Display` and `--json` print the remedy after the message,
+  joined by an em dash. **A new variant, `CliError::Detailed`:** a `match` on `CliError`
+  with no catch-all needs an arm for it, and a pattern such as `CliError::Auth(_)` does
+  not see through it, so a CLI that types a cause moves its own patterns to `is_auth()`
+  or `base()`. The shared crates' own errors stay plain.
+- `pk-cli-mcp`: a remedy kept apart stays out of a tool's text, with nothing searched for
+  in the message. An auth message with no remedy kept apart still has its closing remedy
+  cut from the text, for messages not yet moved.
+- `pk-cli-auth`: `with_reauth` and the one-time-code flow treat any exit-3 error as auth,
+  typed or not. `pk-cli-drive`'s `is_stale_write_refusal` and `pk-cli-utility`'s masking
+  of account ids look through a typed error too.
+
 ## v0.25.0 — 2026-11-03
 
 - `pk-cli-mcp`: `SendDeadline` is DESIGN.md §1.9's "A late write sends nothing" in one

@@ -151,13 +151,13 @@ impl<S: UtilitySource> UtilityTools<S> {
             // The ladder's message lists each candidate's id; concise output
             // holds account numbers back, and this path has no format to ask
             // for them with.
-            let error = match e {
+            let error = match e.base() {
                 CliError::NotFound(message) => ToolError::not_found(
                     accounts
                         .iter()
-                        .fold(message, |m, a| m.replace(&a.id, &masked(&a.id))),
+                        .fold(message.clone(), |m, a| m.replace(&a.id, &masked(&a.id))),
                 ),
-                other => other.into(),
+                _ => e.into(),
             };
             error.with_fix(format!(
                 "Call {} with no account to see the accounts on this login (response_format \
