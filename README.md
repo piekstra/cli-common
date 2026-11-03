@@ -71,11 +71,17 @@ $ example-cli --json auth status
 
 ## macOS dev signing
 
-Plain `cargo build` ad-hoc signs, so macOS keychain "Always Allow" grants die
-on every rebuild. One-time: `scripts/setup-dev-signing.sh` creates a stable
-self-signed `pk-cli-codesign` identity; then re-sign dev builds with
+Plain `cargo build` ad-hoc signs, so every build has a new code identity.
+One-time: `scripts/setup-dev-signing.sh` creates a stable self-signed
+`pk-cli-codesign` identity; then re-sign dev builds with
 `scripts/dev-sign.sh target/debug/<bin>` (each family CLI wires this up as
-`make dev`). One final "Always Allow" per CLI and the prompts stop.
+`make dev`).
+
+A stable signature does not stop the prompts. It satisfies a keychain item's
+access list, but the item's partition list pins each binary's `cdhash:` when the
+certificate has no Apple team ID. So every rebuilt binary still asks for one
+"Always Allow" per item it reads. `security dump-keychain -a` shows both lists
+without reading a secret.
 
 ## Self-view for family desktop apps
 

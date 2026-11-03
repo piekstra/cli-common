@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 #
 # ONE-TIME, RUN BY THE OWNER (macOS): create the stable self-signed
-# "pk-cli-codesign" identity so keychain "Always Allow" decisions stick across
-# rebuilds of the family CLIs (fpl, xfin, lrfl, tojfl, …).
+# "pk-cli-codesign" identity, so rebuilds of the family CLIs (fpl, xfin, lrfl,
+# tojfl, …) keep one designated requirement.
 #
 # Plain `cargo build` ad-hoc signs, which gives every build a DIFFERENT code
 # signature — the keychain ACL treats each rebuild as a brand-new app and
 # re-prompts. Signing dev builds with one named identity (same pattern as the
 # tosui-codesign / optio-codesign identities) gives every build the same
-# designated requirement, so one "Always Allow" holds forever.
+# designated requirement. That satisfies a keychain item's access list, but not
+# its partition list, which pins each binary's cdhash when the certificate has no
+# Apple team ID. So each rebuilt binary still prompts once per item it reads.
 #
-# macOS may prompt for your login password once (trust settings). After the
-# first RE-SIGNED build touches the keychain, expect ONE final prompt per CLI —
-# answer "Always Allow" and that's the last one. Re-sign each build with
+# macOS may prompt for your login password once (trust settings). Answer "Always
+# Allow" when a re-signed build first reads an item; that binary then reads it
+# without a prompt until the next rebuild. Re-sign each build with
 # scripts/dev-sign.sh (or a `make dev` target that calls it).
 set -euo pipefail
 

@@ -35,9 +35,9 @@ Shared surface spec + library crates for the piekstra CLI family. Read
 
 ## Code signing (macOS)
 
-`scripts/setup-dev-signing.sh` (one-time) + `scripts/dev-sign.sh <bin>` keep
-keychain ACL grants stable by signing with the `pk-cli-codesign` identity. The
-identity lives only in the owner's login keychain — never commit or distribute
+`scripts/setup-dev-signing.sh` (one-time) + `scripts/dev-sign.sh <bin>` keep the
+designated requirement stable by signing with the `pk-cli-codesign` identity,
+which satisfies a keychain item's access list. The identity lives only in the owner's login keychain — never commit or distribute
 it.
 
 The targets below belong in each **family CLI's** Makefile, the repos that
@@ -49,9 +49,10 @@ ships needs these targets like any family CLI.
 
 **Sign every target that produces a binary.** `cargo build` and
 `cargo install` both ad-hoc sign, giving the binary a *new* code identity each
-time. macOS scopes keychain "Always Allow" grants to that identity, so any
-unsigned rebuild silently revokes the grant and the next run prompts again —
-which reads as a flaky keychain rather than a signing problem.
+time, so it fails a keychain item's access list and the next run prompts again —
+which reads as a flaky keychain rather than a signing problem. Signing fixes the
+access list only: the item's partition list pins each binary's `cdhash:` when the
+certificate has no Apple team ID, so a signed rebuild still prompts once per item.
 
 Signing only `install` and `dev` is not enough: the binary most often run
 during development is `./target/release/<bin>`, produced by the CLI's
@@ -89,9 +90,8 @@ endef
 ```
 
 Verify with `codesign -dv $(which <bin>)`: you want the stable
-`pk-cli-codesign` signature, not `Signature=adhoc`. Changing the identity
-invalidates the previous grant, so expect exactly one more prompt after
-adopting this.
+`pk-cli-codesign` signature, not `Signature=adhoc`. Every new binary prompts
+once per keychain item it reads, as the signing section above explains.
 
 `install` passes `--locked`. Without it `cargo install` ignores Cargo.lock and
 resolves dependencies afresh, so the installed binary is built from newer

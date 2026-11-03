@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # Re-sign freshly built dev binaries with the stable "pk-cli-codesign"
-# identity (created once by setup-dev-signing.sh) so macOS keychain
-# "Always Allow" grants survive rebuilds.
+# identity (created once by setup-dev-signing.sh), which keeps the designated
+# requirement stable across rebuilds. A rebuilt binary still prompts once per
+# keychain item; setup-dev-signing.sh says why.
 #
 #   cargo build && /path/to/cli-common/scripts/dev-sign.sh target/debug/fpl
 #
