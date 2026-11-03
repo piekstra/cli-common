@@ -34,6 +34,7 @@ status here.
 - [ ] Every write is its own tool, never combined with a read, never moves money, and carries `_meta` `anthropic/requiresUserInteraction: true`
 - [ ] A write that reaches a device or an account checks the time right before each send, on both clocks, and sends nothing past a deadline that leaves room for its read-back inside 120 s: `pk_cli_mcp::SendDeadline`, cli-common v0.25.0 or later (DESIGN.md §1.9, "A late write sends nothing")
 - [ ] Results are `structuredContent` plus the same JSON as compact text; lists use `ListArgs`/`PageRequest`/`Page` (limit 25 default, 200 max, filter-bound cursors, `response_format` concise/detailed, the 32,000-character budget with `truncated` + `hint`)
+- [ ] A list whose rows can arrive or leave between pages pages by position: `PageRequest::page_by_position` (cli-common v0.26.0 or later), with a key of what the row is and not where it sits. A tool that reads only `wanted()` rows passes `more_upstream`
 - [ ] Errors keep their exit code's meaning and say how to fix the call; an auth error names `<bin> auth login` (or the CLI's `Server::sign_in_command`), and no tool call signs in, prompts, or creates a keychain item
 - [ ] `tools/list` touches no credential; the credential is also read from named environment variables (env before keychain), so an `.mcpb` can pass it
 - [ ] Tests call `pk_cli_mcp::conformance::assert_conforms` and run each tool through `assert_fits` on scrubbed fixtures, offline; all definitions together stay under 8,000 characters

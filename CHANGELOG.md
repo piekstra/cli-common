@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- `pk-cli-mcp`: a position cursor. `PageRequest::page_by_position` takes `(key, row)` pairs
+  and an `Order`, sorts them, and returns a cursor holding the last row's position instead
+  of a count of rows, so a row that arrives between pages cannot repeat one and a row that
+  leaves cannot skip one. `page_by_position_with_more` is for a tool that read only part of
+  the list. A cursor from before a tool moved is honoured as its count, and a position cursor
+  reaching a count-of-rows page is refused.
+- `pk-cli-utility`: `<prefix>_bills` and `<prefix>_payments` page by position, so every
+  `utility/v1` CLI moves on its bump. Rows sharing a date now run by id, the provider's
+  order within a day aside. `<prefix>_usage` stays by count of rows: a period's label can be
+  a provider's cycle name, which says nothing about where it sorts.
+
 ## v0.25.0 — 2026-11-03
 
 - `pk-cli-mcp`: `SendDeadline` is DESIGN.md §1.9's "A late write sends nothing" in one
