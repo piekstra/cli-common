@@ -329,7 +329,12 @@ impl Updater {
             .to_vec())
     }
 
-    /// Pull the named binary out of a `.tar.gz` archive.
+    fn names_binary(&self, file: &std::ffi::OsStr) -> bool {
+        file == self.binary.as_str() || file == format!("{}.exe", self.binary).as_str()
+    }
+
+    /// Pull the named binary out of a `.tar.gz` archive. A Windows archive holds it as
+    /// `<binary>.exe`, whatever `binary` says.
     fn extract_binary(&self, archive: &[u8]) -> Result<Vec<u8>, CliError> {
         let decoder = flate2::read::GzDecoder::new(archive);
         let mut tar = tar::Archive::new(decoder);
@@ -342,7 +347,7 @@ impl Updater {
             let is_bin = entry
                 .path()
                 .ok()
-                .and_then(|p| p.file_name().map(|n| n == self.binary.as_str()))
+                .and_then(|p| p.file_name().map(|n| self.names_binary(n)))
                 .unwrap_or(false);
             if is_bin {
                 let mut buf = Vec::new();
@@ -602,6 +607,36 @@ mod tests {
             url,
             "https://api.github.com/repos/piekstra/schwab-options-cli/releases/assets/222"
         );
+    }
+
+    fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut tar = tar::Builder::new(gz);
+        for (name, body) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, name, *body).unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn extracts_the_binary_as_a_unix_or_a_windows_release_packs_it() {
+        let updater = sample_updater("x86_64-pc-windows-msvc");
+        let unix = archive(&[("README", b"no"), ("schwopts", b"unix")]);
+        assert_eq!(updater.extract_binary(&unix).unwrap(), b"unix");
+        let windows = archive(&[("schwopts.exe", b"windows")]);
+        assert_eq!(updater.extract_binary(&windows).unwrap(), b"windows");
+    }
+
+    #[test]
+    fn an_archive_without_the_binary_is_not_found() {
+        let updater = sample_updater("x86_64-pc-windows-msvc");
+        let other = archive(&[("schwopts-helper.exe", b"no"), ("other", b"no")]);
+        let err = updater.extract_binary(&other).unwrap_err();
+        assert!(matches!(err, CliError::NotFound(_)), "{err}");
     }
 
     #[test]

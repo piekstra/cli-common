@@ -4,6 +4,7 @@
 //! `${XDG_CONFIG_HOME:-~/.config}/<app>/config.json`. Secrets never land
 //! here — they live in the OS keychain (see `pk-cli-secrets`).
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 
@@ -30,20 +31,18 @@ impl ConfigStore {
         self
     }
 
-    /// `${XDG_CONFIG_HOME:-~/.config}/<app>/config.json`, unless overridden.
+    /// `${XDG_CONFIG_HOME:-~/.config}/<app>/config.json`, unless overridden. `~` is `HOME`,
+    /// then `USERPROFILE`: Windows normally sets only the second, and a client that starts
+    /// outside a shell, as Claude Desktop does, sees no other.
     pub fn path(&self) -> Result<PathBuf, CliError> {
         if let Some(p) = &self.override_path {
             return Ok(p.clone());
         }
-        let base = match std::env::var("XDG_CONFIG_HOME") {
-            Ok(x) if !x.is_empty() => PathBuf::from(x),
-            _ => {
-                let home = std::env::var("HOME").map_err(|_| {
-                    CliError::Other("cannot locate home directory ($HOME unset)".into())
-                })?;
-                PathBuf::from(home).join(".config")
-            }
-        };
+        let base = config_base(|name| std::env::var_os(name)).ok_or_else(|| {
+            CliError::Other(
+                "cannot locate the home directory (HOME and USERPROFILE are unset)".into(),
+            )
+        })?;
         Ok(base.join(&self.app).join("config.json"))
     }
 
@@ -82,6 +81,16 @@ impl ConfigStore {
     }
 }
 
+/// Where configs live, from the environment `var` reads. An empty variable counts as unset.
+fn config_base(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let set = |name: &str| var(name).filter(|value| !value.is_empty());
+    set("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| {
+        set("HOME")
+            .or_else(|| set("USERPROFILE"))
+            .map(|home| PathBuf::from(home).join(".config"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +126,40 @@ mod tests {
         assert!(store.clear().unwrap());
         assert!(!store.clear().unwrap());
         let _ = fs::remove_dir_all(dir);
+    }
+
+    fn base_from(vars: &[(&str, &str)]) -> Option<PathBuf> {
+        config_base(|name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        })
+    }
+
+    #[test]
+    fn the_config_base_is_xdg_then_home_then_userprofile() {
+        let xdg = ("XDG_CONFIG_HOME", "/x");
+        let home = ("HOME", "/h");
+        let profile = ("USERPROFILE", "/p");
+        assert_eq!(base_from(&[xdg, home, profile]), Some(PathBuf::from("/x")));
+        assert_eq!(
+            base_from(&[home, profile]),
+            Some(PathBuf::from("/h").join(".config"))
+        );
+        assert_eq!(
+            base_from(&[profile]),
+            Some(PathBuf::from("/p").join(".config"))
+        );
+        assert_eq!(base_from(&[]), None);
+    }
+
+    #[test]
+    fn an_empty_variable_counts_as_unset() {
+        assert_eq!(
+            base_from(&[("XDG_CONFIG_HOME", ""), ("HOME", ""), ("USERPROFILE", "/p")]),
+            Some(PathBuf::from("/p").join(".config"))
+        );
+        assert_eq!(base_from(&[("HOME", "")]), None);
     }
 
     #[test]

@@ -8,6 +8,14 @@
   whoever ran it once it has removed the connector token: a running `<bin> mcp --http` keeps
   the token it started with, the environment variable is beyond the command, and a connector
   still in use needs a new token. On macOS it gives the `launchctl bootout` command.
+
+## v0.26.0 — 2026-11-03
+
+- `pk-cli-config`: `~` is `HOME`, then `USERPROFILE`, so a config resolves on Windows, where
+  Claude Desktop starts a server with no `HOME`. It failed with "$HOME unset".
+  An empty variable counts as unset.
+- `pk-cli-selfupdate`: a release archive's binary may be `<binary>.exe`. Every Windows install
+  failed with "the release archive did not contain" it.
 - `pk-cli-mcp`: a position cursor. `PositionRequest`, beside `PageRequest`, takes every
   matching row paired with its `PositionKey` and an `Order`, sorts them, and returns a cursor
   holding the last row's position instead of a count of rows, so a row that arrives between
