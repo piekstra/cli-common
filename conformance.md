@@ -25,12 +25,12 @@ status here.
 
 ### MCP profile (DESIGN.md §1.9), for a CLI that serves tools
 
-- [ ] `<bin> mcp` through `pk-cli-mcp` (`McpArgs` + `run`), two to four workflow-shaped tools over the CLI's own command logic and DTOs
+- [ ] `<bin> mcp` through `pk-cli-mcp` (`McpArgs` + `run`), two to four workflow-shaped tools over the CLI's own command logic and DTOs (a `utility/v1` CLI serves `pk_cli_utility::mcp::UtilityTools` over its own `UtilitySource` instead of writing them)
 - [ ] Tool names `<service>_<what>`, one prefix, at most 64 characters of `[a-z0-9_]`; arguments take names as well as ids
 - [ ] Every tool has a `title`, all four hints set explicitly (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), an `outputSchema` generated for serialization, and a description of at least three sentences naming the returned fields; arguments are one flat struct, every one described
 - [ ] Every write is its own tool, never combined with a read, never moves money, and carries `_meta` `anthropic/requiresUserInteraction: true`
 - [ ] Results are `structuredContent` plus the same JSON as compact text; lists use `ListArgs`/`PageRequest`/`Page` (limit 25 default, 200 max, filter-bound cursors, `response_format` concise/detailed, the 32,000-character budget with `truncated` + `hint`)
-- [ ] Errors keep their exit code's meaning and say how to fix the call; an auth error names `<bin> auth login`, and no tool call signs in, prompts, or creates a keychain item
+- [ ] Errors keep their exit code's meaning and say how to fix the call; an auth error names `<bin> auth login` (or the CLI's `Server::sign_in_command`), and no tool call signs in, prompts, or creates a keychain item
 - [ ] `tools/list` touches no credential; the credential is also read from named environment variables (env before keychain), so an `.mcpb` can pass it
 - [ ] Tests call `pk_cli_mcp::conformance::assert_conforms` and run each tool through `assert_fits` on scrubbed fixtures, offline; all definitions together stay under 8,000 characters
 - [ ] Releases attach `<bin>-<version>.mcpb` (binary server type; macOS universal, Linux and Windows x86_64; credential as `sensitive` `user_config`), and a `claude-plugins` plugin's `.mcp.json` runs `<bin> mcp`
@@ -134,6 +134,8 @@ Google Home's, replacing a hand-kept device→room table. Producers declare
 | alpaca-cli (`alp`) | `alpaca_portfolio`, `alpaca_activities` | `.mcpb` on each release from v0.2.0 | `alp-mcp-<version>.wasm` on each release from v0.3.0; served by `connector/` |
 | m1-cli (`m1f`) | `m1_portfolio`, `m1_activity`, `m1_documents`, `m1_realized_gains` | `.mcpb` on each release from v0.4.0 | home module: `m1f mcp --http` from v0.5.0 |
 | robinhood-cli (`rhd`) | `robinhood_portfolio`, `robinhood_activity`, `robinhood_documents` | `.mcpb` on each release from v0.3.0 | home module: `rhd mcp --http` from v0.4.0 |
+| `utility/v1` (`pk-cli-utility`, feature `mcp`, from v0.21.0) | `<prefix>_balance`, `<prefix>_bills`, `<prefix>_payments`, `<prefix>_usage`, written once over a `UtilitySource` per CLI | a CLI's own | a CLI's own |
+| fpl-cli (`fpl`), town-of-jupiter-fl-cli (`tojfl`), loxahatchee-river-fl-cli (`lrfl`), xfinity-cli (`xfin`) | planned: the `utility/v1` tools | planned | planned: home module |
 
 Consumers: Claude Code, Claude Desktop, and (path B) a deploy-your-own
 Cloudflare Worker reached from claude.ai, which runs a portal CLI's tools on

@@ -42,6 +42,8 @@ mcp-check:
 	$(CARGO) clippy -p pk-cli-mcp --all-targets --features test-util -- -D warnings
 	$(CARGO) clippy -p pk-cli-mcp --all-targets --features wasm -- -D warnings
 	$(CARGO) test -p pk-cli-mcp --all-features
+	$(CARGO) clippy -p pk-cli-utility --all-targets --features mcp -- -D warnings
+	$(CARGO) test -p pk-cli-utility --features mcp
 
 # The pk-cli-mcp core and its `wasm` feature, and pk-cli-core under them,
 # build for WebAssembly, so a CLI's toolset can run in a deploy-your-own
@@ -51,6 +53,7 @@ wasm-check:
 	@rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown || { \
 		echo "wasm-check needs the target: rustup target add wasm32-unknown-unknown"; exit 1; }
 	$(CARGO) check --target wasm32-unknown-unknown -p pk-cli-mcp --no-default-features
+	$(CARGO) check --target wasm32-unknown-unknown -p pk-cli-utility --features mcp
 	$(CARGO) clippy --target wasm32-unknown-unknown -p pk-cli-core -p pk-cli-mcp --features pk-cli-mcp/wasm -- -D warnings
 
 # The WebAssembly ABI end to end: the demo toolset built as a module the way

@@ -30,6 +30,8 @@ pub struct Server {
     pub tool_prefix: String,
     /// Extra server instructions, appended to the standard ones.
     pub extra_instructions: Option<String>,
+    /// The command a person signs in with, where it is not `<bin> auth login`.
+    sign_in_command: Option<String>,
     /// A non-local host's wording, set by [`Server::hosted`]; `None` for
     /// the local host. One field for one fact, so the two sentences can
     /// never disagree about which host this is.
@@ -56,8 +58,18 @@ impl Server {
             service: service.into(),
             tool_prefix: tool_prefix.into(),
             extra_instructions: None,
+            sign_in_command: None,
             hosted: None,
         }
+    }
+
+    /// The command the local host asks a person to run in a terminal when a
+    /// credential is missing or rejected, for a CLI whose sign-in is not plain
+    /// `<bin> auth login` (`xfin auth login --stdin`). The instructions and
+    /// every auth error use it. [`Server::hosted`] replaces it.
+    pub fn sign_in_command(mut self, command: impl Into<String>) -> Self {
+        self.sign_in_command = Some(command.into());
+        self
     }
 
     /// Run on a host other than the user's own copy of the CLI (a Worker
@@ -99,10 +111,13 @@ impl Server {
     pub(crate) fn sign_in(&self) -> String {
         match &self.hosted {
             Some(h) => h.sign_in_remedy.clone(),
-            None => format!(
-                "ask the user to run `{} auth login` in a terminal",
-                self.bin
-            ),
+            None => match &self.sign_in_command {
+                Some(command) => format!("ask the user to run `{command}` in a terminal"),
+                None => format!(
+                    "ask the user to run `{} auth login` in a terminal",
+                    self.bin
+                ),
+            },
         }
     }
 

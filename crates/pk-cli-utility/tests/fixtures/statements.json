@@ -1,0 +1,6 @@
+[
+  { "id": "2026-06-15", "date": "2026-06-15", "amount": { "amount": "12.34", "currency": "USD" }, "due_date": "2026-07-05", "paid": false },
+  { "id": "2026-05-15", "date": "2026-05-15", "amount": { "amount": "23.45", "currency": "USD" }, "due_date": "2026-06-05", "paid": true },
+  { "id": "2026-04-15", "date": "2026-04-15", "amount": { "amount": "34.56", "currency": "USD" }, "due_date": "2026-05-05", "paid": true },
+  { "id": "no-date", "amount": { "amount": "45.67", "currency": "USD" } }
+]

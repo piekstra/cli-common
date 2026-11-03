@@ -339,6 +339,14 @@ With this profile, utiman's `[summary]`/`[[series]]` manifest sections
 (`balance-fields`, `scale = "cents"`, `items-path`) collapse to defaults:
 `summary --json` → `balance` + `due_date`, lists → `items`.
 
+The profile's MCP tools (§1.9) are written once, in the crate's `mcp` feature:
+`<prefix>_balance`, `<prefix>_bills`, `<prefix>_payments` and `<prefix>_usage`,
+read-only, over these DTOs. A CLI implements `UtilitySource` (accounts, summary,
+statements, payments, usage, each returning the DTO its commands already build)
+and serves `UtilityTools`, naming its prefix in `Server` and what it meters. A
+provider lacking a capability says so (`without_payments`, `without_usage`,
+`single_account`), and that tool or argument is not served.
+
 #### The `documents/v1` profile (crate `pk-cli-documents`)
 
 For any portal that publishes **files** — statements, escrow analyses, tax
@@ -554,8 +562,10 @@ Only an unknown tool name is a protocol error (JSON-RPC `-32602`).
 
 A tool may replace the remedy with its own (`ToolError::with_fix`: "call
 coinbase_accounts to see the account names"). The `auth` and `other`
-remedies above are the local host's; a host where `<bin> auth login` fixes
-nothing (a Worker) sets its own with `Server::hosted`.
+remedies above are the local host's. A CLI whose sign-in is not plain
+`<bin> auth login` names its command with `Server::sign_in_command`, which the
+instructions and every auth error use. A host where that fixes nothing (a
+Worker) sets its own with `Server::hosted`, which replaces it.
 
 #### A tool never signs in
 
@@ -613,7 +623,7 @@ AGENTS.md, same house style as the CLIs.
 | `pk-cli-http` | reqwest client builder (UA, cookie store, timeouts, retry-with-backoff), `BlockingTransport` (a blocking client behind core's `Transport`: no redirects, cookies or default headers), `api` passthrough command impl, error→exit-code-5 mapping | per-CLI `client.rs` boilerplate (session logic stays per-CLI) |
 | `pk-cli-core` (transport) | the seam a provider client is written against so it runs natively and in a WebAssembly Worker: `HttpRequest` (query parameters percent-encoded), `HttpResponse` (status, headers and body text), the async `Transport` trait with no `Send` bound and one contract for every implementation (no redirects followed, no state between sends, a request with no HTTP answer is `Upstream` naming the origin only), the separate `PlatformSigner` trait for platform ECDSA (so a transport wrapper cannot silently drop it), and `block_on` to drive a blocking transport's futures | a per-CLI `http.rs` seam, and a second copy of every provider client for the Worker |
 | `pk-cli-core` (list) | profile-agnostic list primitives — `Paged<T>` envelope + `RangeArgs` (`--limit`/`--since`/`--until`) — shared by every domain profile | duplicated paging/range structs, and non-utility CLIs depending on `pk-cli-utility` just to page |
-| `pk-cli-utility` | the `utility/v1` domain profile (§1.8): `UtilitySummary`, `Statement`, `Payment`, `UsagePeriod`, `Transaction` (re-exports core's `Paged`/`RangeArgs`) | utiman's per-provider `balance-fields`/`scale`/`items-path` manifest hacks |
+| `pk-cli-utility` | the `utility/v1` domain profile (§1.8): `UtilitySummary`, `Statement`, `Payment`, `UsagePeriod`, `Transaction` (re-exports core's `Paged`/`RangeArgs`); feature `mcp`: the profile's MCP tools over a `UtilitySource` (`UtilityTools`) | utiman's per-provider `balance-fields`/`scale`/`items-path` manifest hacks |
 | `pk-cli-documents` | the `documents/v1` domain profile (§1.8): `Document`, `SavedDocument`, `DownloadBatch`, `OpenedDocument` — list & download a portal's published files | `organize-scans`' per-CLI download-command adapter table |
 | `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages: elements, attributes, table rows/cells, entity decoding — all total, never panicking | a DOM-parser dependency, and the ad-hoc `str::find` scraping each portal CLI grows on its own |
 | `pk-cli-drive` | state in the owner's Drive (§2.1): one `Backend` over a mounted folder or an rclone remote, the stale-while-revalidate read cache in front of the remote (`CachedRemote`), its bounded background refresh, and owner-only file output (`private_file`) | tax-cli's `drive.rs` + `cache.rs` + `private_file.rs`, and the copy every other CLI that keeps state in Drive would write |

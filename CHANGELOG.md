@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.21.0 — 2026-11-03
+
+- `pk-cli-utility`: feature `mcp`, the `utility/v1` MCP tools written once.
+  `UtilityTools` serves `<prefix>_balance`, `<prefix>_bills`, `<prefix>_payments`
+  and `<prefix>_usage` over a `UtilitySource` a CLI writes from its existing reads.
+  The tools are read-only, take `account` by number or address (only the number when
+  the login lists no addresses), filter by `since`/`until`, page with cursors, and
+  answer concisely by default. A provider without payments, usage or several accounts
+  drops the tool or argument with `without_payments`, `without_usage` or
+  `single_account`. Concise results name an account by address, or by the last four
+  characters of its number when it has none, and send full numbers only under
+  `detailed`. The exception is a listed account whose name does not single it out,
+  which can only be asked for by number. The feature uses
+  `pk-cli-mcp`'s core only, and `make wasm-check` holds it to
+  `wasm32-unknown-unknown`.
+- `pk-cli-mcp`: `Server::sign_in_command` names a sign-in other than `<bin> auth login`
+  for the instructions and every auth error; `Server::hosted` replaces it. A
+  `CliError::Auth` converted to a `ToolError` loses the remedy its message closes on
+  for a terminal, so one error names one command.
+
 ## v0.20.0 — 2026-11-03
 
 - `pk-cli-browser`: `Confirm::Undecided { reason, retry_after }` and

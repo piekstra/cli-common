@@ -14,3 +14,20 @@ pk-cli-core = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# `mcp`: the profile's MCP tools. pk-cli-mcp's core only (no features), which
+# builds for wasm32-unknown-unknown; a CLI turns on `stdio`/`http` itself. The
+# schemars derive expands to `::schemars` paths, so it is a direct dependency.
+pk-cli-mcp = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+
+[features]
+default = []
+mcp = ["dep:pk-cli-mcp", "dep:schemars"]
+
+[dev-dependencies]
+pk-cli-mcp = { workspace = true, features = ["test-util"] }
+
+[[test]]
+name = "mcp_toolset"
+required-features = ["mcp"]
