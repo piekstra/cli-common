@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · `Confirm::Undecided`, when a window capture's read cannot decide (§2.2) · 2026-11-03 · `pk-cli-arcgis`, read-only ArcGIS REST layer queries (Part 2) · 2026-11-03 · `SendDeadline`, a late write's check in one place (§1.9, §2.3) · 2026-11-03 · `CliError::because`, a typed cause and a remedy apart from the message (§1.5, §1.9) · 2026-11-03 · a position cursor for lists whose rows move (§1.9) · 2026-11-03
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · `Confirm::Undecided`, when a window capture's read cannot decide (§2.2) · 2026-11-03 · `pk-cli-arcgis`, read-only ArcGIS REST layer queries (Part 2) · 2026-11-03 · `SendDeadline`, a late write's check in one place (§1.9, §2.3) · 2026-11-03 · `CliError::because`, a typed cause and a remedy apart from the message (§1.5, §1.9) · 2026-11-03 · a position cursor for lists whose rows move (§1.9) · 2026-11-03 · an item over Windows's credential limit, split and put back together (§1.7) · 2026-11-03
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -222,7 +222,15 @@ conventions alone; TOML manifests stay as the escape hatch for non-conforming CL
   freshly built binary reads is a permission prompt, so a four-item layout
   asks four times after every rebuild and reads as "flaky"
   (`pk_cli_secrets::CredentialStore::{get_json, set_json}`; a legacy
-  per-field layout is migrated on first read, then deleted).
+  per-field layout is migrated on first read, then deleted). On Windows, whose
+  store holds 2,560 bytes per credential and makes no such prompt,
+  `CredentialStore` stores a longer value across several and reads it back whole,
+  so a CLI writes one item whatever its size on every platform. An older copy sharing
+  the item (a running server, an installed extension) reads a split value's head as its
+  value: `get_json` calls it the wrong shape and a plain `get` hands over the head's text,
+  which holds no secret and which a provider refuses. Its logout deletes only the head, so
+  a logout after a downgrade is repeated from a current build, which removes the parts.
+  A value that long never fit an older build, so nothing it stored changes shape.
 - **A rotating refresh token is renewed under a lock.** All of a CLI's
   processes share one keychain item, and a provider that rotates refresh
   tokens may revoke the whole session when a retired one is presented. A CLI
@@ -1037,4 +1045,5 @@ does, including every refusal. `pk-cli-mcp-wasm-demo` is the worked example for 
    credential-free case; babylist the template consumer for new CLIs).
 
 Non-goals for v1: plugin systems, config schemas beyond flat keys, i18n,
-Windows keychain parity beyond what the `keyring` crate already gives.
+Windows keychain parity beyond what the `keyring` crate already gives and the split
+over its credential limit (§1.7).

@@ -21,6 +21,9 @@
 //! layout moves off it with [`CredentialStore::migrate_from`] (for a service
 //! rename) or its own first-read migration (for a re-shaping).
 //!
+//! On Windows, whose store holds 2,560 bytes per credential, a longer value becomes
+//! several items under the hood and reads back whole. See `split.rs`.
+//!
 //! # 1Password
 //!
 //! [`op`] reads a secret from 1Password through the `op` CLI, given an
@@ -30,6 +33,7 @@
 
 pub mod op;
 pub mod resolve;
+mod split;
 
 pub use op::{OnePassword, OpArgs, OpRef};
 pub use resolve::{KeychainRead, Resolved, SecretResolver, SecretSpec, SourceKind, SourceOrder};
@@ -211,30 +215,24 @@ impl CredentialStore {
             .map_err(|e| CliError::Keychain(format!("opening keychain entry: {e}")))
     }
 
-    /// Keychain only. `None` if no entry exists.
+    /// Keychain only. `None` if no entry exists. On Windows, a value stored across
+    /// several items reads back whole, and one that cannot be put back together is
+    /// an error naming the item.
     pub fn get(&self, account: &str) -> Result<Option<Secret>, CliError> {
-        match self.entry(account)?.get_password() {
-            Ok(p) => Ok(Some(Secret::new(p))),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(CliError::Keychain(format!("reading credential: {e}"))),
-        }
+        split::get(&OsItems(self), account, split::ITEM_LIMIT)
     }
 
-    /// Store (or overwrite) a credential in the keychain.
+    /// Store (or overwrite) a credential in the keychain. On Windows, a value over
+    /// the 2,560 bytes one credential holds is stored across several, and a failure
+    /// partway leaves the value it was replacing readable.
     pub fn set(&self, account: &str, secret: &Secret) -> Result<(), CliError> {
-        self.entry(account)?
-            .set_password(secret.expose())
-            .map_err(|e| CliError::Keychain(format!("storing credential: {e}")))
+        split::set(&OsItems(self), account, secret, split::ITEM_LIMIT)
     }
 
-    /// Delete a credential. Returns `true` if something was removed, `false`
-    /// if there was nothing stored.
+    /// Delete a credential, and on Windows every item it was stored across. Returns
+    /// `true` if something was removed, `false` if there was nothing stored.
     pub fn delete(&self, account: &str) -> Result<bool, CliError> {
-        match self.entry(account)?.delete_credential() {
-            Ok(()) => Ok(true),
-            Err(keyring::Error::NoEntry) => Ok(false),
-            Err(e) => Err(CliError::Keychain(format!("deleting credential: {e}"))),
-        }
+        split::delete(&OsItems(self), account, split::ITEM_LIMIT)
     }
 
     /// Read a typed JSON item — the one-item-per-credential-set layout (see
@@ -276,8 +274,8 @@ impl CredentialStore {
     }
 }
 
-/// The three operations a keychain item supports, as a seam: the typed-JSON
-/// and migration logic is written against this so it can be exercised
+/// The three operations a keychain item supports, as a seam: the typed-JSON,
+/// migration and splitting logic is written against this so it can be exercised
 /// against an in-memory store in tests. A test that read the real keychain
 /// would prompt on every macOS run of an ad-hoc-signed test binary.
 trait ItemStore {
@@ -285,6 +283,35 @@ trait ItemStore {
     fn get(&self, account: &str) -> Result<Option<Secret>, CliError>;
     fn set(&self, account: &str, secret: &Secret) -> Result<(), CliError>;
     fn delete(&self, account: &str) -> Result<bool, CliError>;
+}
+
+/// The OS store itself, one item to a call: what [`split`] runs over.
+struct OsItems<'a>(&'a CredentialStore);
+
+impl ItemStore for OsItems<'_> {
+    fn service(&self) -> &str {
+        self.0.service()
+    }
+    fn get(&self, account: &str) -> Result<Option<Secret>, CliError> {
+        match self.0.entry(account)?.get_password() {
+            Ok(p) => Ok(Some(Secret::new(p))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(CliError::Keychain(format!("reading credential: {e}"))),
+        }
+    }
+    fn set(&self, account: &str, secret: &Secret) -> Result<(), CliError> {
+        self.0
+            .entry(account)?
+            .set_password(secret.expose())
+            .map_err(|e| CliError::Keychain(format!("storing credential: {e}")))
+    }
+    fn delete(&self, account: &str) -> Result<bool, CliError> {
+        match self.0.entry(account)?.delete_credential() {
+            Ok(()) => Ok(true),
+            Err(keyring::Error::NoEntry) => Ok(false),
+            Err(e) => Err(CliError::Keychain(format!("deleting credential: {e}"))),
+        }
+    }
 }
 
 impl ItemStore for CredentialStore {

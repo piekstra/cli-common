@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `pk-cli-secrets`: on Windows, `CredentialStore::set` stores a value over one credential's
+  limit across several and `get` puts it back together, so a browser session's tokens no
+  longer fail at the end of a sign-in. The limit is 2,560 bytes, which `keyring` fills as
+  UTF-16, so 1,280 code units. A value that fits stays one plain item, so what an older
+  build stored still reads. A failed write leaves the old value readable, a read that
+  cannot put a value together is an error naming the item, and `delete` removes every part.
+  macOS and Linux have no such limit, and there each call stays the one keychain operation
+  it was. A new workflow runs this on the real Credential Manager, on any change to the crate.
+
 ## v0.26.0 — 2026-11-03
 
 - `pk-cli-config`: `~` is `HOME`, then `USERPROFILE`, so a config resolves on Windows, where
