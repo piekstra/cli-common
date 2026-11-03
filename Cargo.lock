@@ -1520,8 +1520,6 @@ name = "pk-cli-arcgis"
 version = "0.23.0"
 dependencies = [
  "pk-cli-core",
- "pk-cli-http",
- "reqwest",
  "serde_json",
 ]
 

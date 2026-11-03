@@ -11,6 +11,4 @@ authors.workspace = true
 
 [dependencies]
 pk-cli-core = { workspace = true }
-pk-cli-http = { workspace = true }
-reqwest = { workspace = true }
 serde_json = { workspace = true }
