@@ -109,15 +109,15 @@ pub struct Page<T> {
 /// Which way a list runs, by its rows' position keys ([`PageRequest::page_by_position`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Order {
-    /// Largest key first: newest first, for a key that starts with an ISO date. A row
-    /// with no date, whose key starts with nothing, comes last.
+    /// Largest first: newest first, for an ISO date. A row with no date, sorting by nothing,
+    /// comes last.
     Descending,
     /// Smallest key first: by symbol or by name.
     Ascending,
 }
 
 impl Order {
-    fn cmp(self, a: &str, b: &str) -> std::cmp::Ordering {
+    fn cmp(self, a: &PositionKey, b: &PositionKey) -> std::cmp::Ordering {
         match self {
             Self::Ascending => a.cmp(b),
             Self::Descending => b.cmp(a),
@@ -125,10 +125,37 @@ impl Order {
     }
 }
 
+/// Where a row belongs in a list that pages by position ([`PageRequest::page_by_position`]):
+/// a value to sort by, and what tells the row from others with the same one. Neither may change
+/// while the row exists: a row whose key changes moves with it, and can repeat or be missed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PositionKey {
+    sort: String,
+    id: u64,
+}
+
+impl PositionKey {
+    /// `sort` is what the list runs by, such as an ISO date or a symbol. It travels in the
+    /// cursor, encoded and not encrypted, so it is something the concise format shows. Over
+    /// [`MAX_SORT_BYTES`] it is cut to that. `id` is whatever tells rows with the same `sort`
+    /// apart, such as a transaction id or a confirmation number. The cursor holds only its hash,
+    /// so an id the concise format holds back stays out, and rows with the same `sort` run in
+    /// the order of those hashes, a fixed order and not a meaningful one. A timestamp in `sort`
+    /// keeps a day's rows in time order.
+    pub fn new(sort: impl Into<String>, id: &str) -> Self {
+        let mut sort = sort.into();
+        cut_sort(&mut sort);
+        Self {
+            sort,
+            id: fnv1a(id.as_bytes()),
+        }
+    }
+}
+
 /// A row's place in a list: its key, and how many rows before it share that key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Position {
-    key: String,
+    key: PositionKey,
     repeat: usize,
 }
 
@@ -187,22 +214,20 @@ impl PageRequest {
         self.limit
     }
 
-    /// Where this page starts in the full list of matching records. Under a position
-    /// cursor, where it started when the cursor was issued, which rows that arrived
-    /// since have moved: only an estimate of how far to read.
+    /// Where this page starts in the full list of matching records. A count of rows: none
+    /// under a position cursor, which says where it starts by a row's key.
     pub fn offset(&self) -> usize {
         self.offset
     }
 
     /// How many matching records the tool must fetch, counted from the first,
     /// for [`Self::page`] to know whether another page exists: the page's
-    /// end plus one.
-    ///
-    /// Under a position cursor, rows that arrived since push the position down, so this
-    /// many may hold fewer rows of the page, and not the extra one. A tool that reads only
-    /// this far says so through [`Self::page_by_position_with_more`]'s `more_upstream`:
-    /// the page may come up short, and it still continues.
+    /// end plus one. [`Self::page_by_position`] needs every matching record, so under a
+    /// position cursor this is all of them.
     pub fn wanted(&self) -> usize {
+        if self.position.is_some() {
+            return usize::MAX;
+        }
         self.offset.saturating_add(self.limit).saturating_add(1)
     }
 
@@ -235,60 +260,41 @@ impl PageRequest {
     /// [`Self::page`] for a list whose rows can arrive, leave or change between pages:
     /// the next cursor holds the last row's position rather than a count of rows.
     ///
-    /// `keyed` pairs every record matching the filters with its key, a string that says
-    /// where the row belongs and does not change while the row exists, such as
-    /// `format!("{date} {id}")`. A count of rows would repeat one when a new row arrives
-    /// above the page's end, and skip one when a row above it leaves; a position does
-    /// neither, and a total added up across pages stays right. Rows that arrive above a
-    /// position already passed are not seen until the list is read again from the start,
-    /// and a row whose key changes moves with it.
+    /// `keyed` pairs **every** record matching the filters with its [`PositionKey`]. A count
+    /// of rows would repeat one when a new row arrives above the page's end, and skip one when
+    /// a row above it leaves; a position does neither, and a total added up across pages stays
+    /// right. Rows that arrive above a position already passed are not seen until the list is
+    /// read again from the start.
     ///
-    /// The rows are sorted here by key in `order`, stably, so a tool cannot return them
-    /// in an order its cursor disagrees with. Rows sharing a key keep the order they came
-    /// in, and are told apart by count. A key over [`MAX_KEY_BYTES`] is cut to it.
+    /// The rows are sorted here by key in `order`, stably, so a tool cannot return them in an
+    /// order its cursor disagrees with. A read of part of the list could not keep that promise:
+    /// an unread row could sort above a cursor already past it and never be returned, so this
+    /// has no form for one. Rows sharing a key keep the order they came in, and are told apart
+    /// by count.
     ///
-    /// The key travels in the cursor, encoded and not encrypted: build it from what the
-    /// tool's `detailed` format already shows. A cursor from a count-of-rows page of this
-    /// tool, held across an upgrade, is honoured as that count.
+    /// A cursor from a count-of-rows page of this tool, held across an upgrade, is honoured as
+    /// that count.
     pub fn page_by_position<T: Serialize>(
         &self,
-        keyed: Vec<(String, T)>,
+        mut keyed: Vec<(PositionKey, T)>,
         order: Order,
         narrow: &str,
     ) -> Result<Page<T>, ToolError> {
-        self.page_by_position_with_more(keyed, false, order, narrow)
-    }
-
-    /// As [`Self::page_by_position`], for a tool that fetched only part of the list:
-    /// `more_upstream` says records exist beyond `keyed`.
-    pub fn page_by_position_with_more<T: Serialize>(
-        &self,
-        mut keyed: Vec<(String, T)>,
-        more_upstream: bool,
-        order: Order,
-        narrow: &str,
-    ) -> Result<Page<T>, ToolError> {
-        for (key, _) in &mut keyed {
-            cut_key(key);
-        }
         keyed.sort_by(|a, b| order.cmp(&a.0, &b.0));
-        let (keys, rows): (Vec<String>, Vec<T>) = keyed.into_iter().unzip();
+        let (keys, rows): (Vec<PositionKey>, Vec<T>) = keyed.into_iter().unzip();
         let start = match &self.position {
             Some(at) => position_after(&keys, at, order),
             None => self.offset.min(keys.len()),
         };
         let available = keys.len() - start;
         let rows = rows.into_iter().skip(start);
-        self.cut(rows, available, more_upstream, narrow, |kept| {
-            let next = start + kept;
-            let position = match next.checked_sub(1).filter(|_| kept > 0) {
-                Some(last) => Some(position_of(&keys, last, order)),
-                None => self.position.clone(),
-            };
-            match position {
-                Some(position) => encode_position_cursor(next, self.fingerprint, &position),
-                None => encode_cursor(next, self.fingerprint),
-            }
+        self.cut(rows, available, false, narrow, |kept| {
+            // `more` is true here, so a row was kept or the budget refused the first: never
+            // past the list, and `cut` turns a first row over budget into an error.
+            encode_position_cursor(
+                self.fingerprint,
+                &position_of(&keys, start + kept - 1, order),
+            )
         })
     }
 
@@ -364,12 +370,13 @@ impl PageRequest {
 fn fingerprint<F: Serialize + ?Sized>(filters: &F) -> Result<u64, ToolError> {
     let bytes = serde_json::to_vec(filters)
         .map_err(|e| ToolError::other(format!("serializing the list filters: {e}")))?;
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    Ok(hash)
+    Ok(fnv1a(&bytes))
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, b| {
+        (hash ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 fn foreign_cursor() -> ToolError {
@@ -379,31 +386,31 @@ fn foreign_cursor() -> ToolError {
     )
 }
 
-/// The most of a position key a cursor holds. A key is a date and an id; this bounds a
-/// cursor when a provider's id is not what it looks like.
-pub const MAX_KEY_BYTES: usize = 200;
+/// The most of a position's sort value a cursor holds. A sort value is a date or a symbol; this
+/// bounds a cursor when a provider's value is not what it looks like.
+pub const MAX_SORT_BYTES: usize = 200;
 
-/// Cut at a character boundary, for every row and the cursor alike, so a long key still
+/// Cut at a character boundary, for every row and the cursor alike, so a long value still
 /// compares the same on the next page.
-fn cut_key(key: &mut String) {
-    if key.len() > MAX_KEY_BYTES {
-        let end = (0..=MAX_KEY_BYTES)
+fn cut_sort(sort: &mut String) {
+    if sort.len() > MAX_SORT_BYTES {
+        let end = (0..=MAX_SORT_BYTES)
             .rev()
-            .find(|i| key.is_char_boundary(*i))
+            .find(|i| sort.is_char_boundary(*i))
             .unwrap_or(0);
-        key.truncate(end);
+        sort.truncate(end);
     }
 }
 
 /// How many rows of `keys`, sorted by `order`, come at or before `at`.
-fn position_after(keys: &[String], at: &Position, order: Order) -> usize {
+fn position_after(keys: &[PositionKey], at: &Position, order: Order) -> usize {
     let first = keys.partition_point(|k| order.cmp(k, &at.key).is_lt());
     let past = keys.partition_point(|k| order.cmp(k, &at.key).is_le());
     first.saturating_add(at.repeat).saturating_add(1).min(past)
 }
 
 /// The position of the row at `index` of `keys`, sorted by `order`.
-fn position_of(keys: &[String], index: usize, order: Order) -> Position {
+fn position_of(keys: &[PositionKey], index: usize, order: Order) -> Position {
     let key = &keys[index];
     Position {
         key: key.clone(),
@@ -418,8 +425,8 @@ const POSITION_CURSOR_VERSION: &str = "c2";
 /// which can hand-build one, and no real list pages this far.
 const MAX_OFFSET: usize = 10_000_000;
 
-/// The hex of the longest cursor: a position's key, and room for the version and counts.
-const MAX_CURSOR_CHARS: usize = (MAX_KEY_BYTES + 64) * 2;
+/// The hex of the longest cursor: a position's sort value, and room for the rest.
+const MAX_CURSOR_CHARS: usize = (MAX_SORT_BYTES + 64) * 2;
 
 /// A cursor as it decodes.
 struct DecodedCursor {
@@ -437,12 +444,12 @@ fn encode_cursor(offset: usize, fingerprint: u64) -> String {
     to_hex(&format!("{CURSOR_VERSION}:{offset}:{fingerprint:016x}"))
 }
 
-/// Hex of `c2:<offset>:<fingerprint>:<repeat>:<key>`, the key last because it may hold a
-/// colon. The offset only estimates how far to read ([`PageRequest::wanted`]).
-fn encode_position_cursor(offset: usize, fingerprint: u64, position: &Position) -> String {
+/// Hex of `c2:<fingerprint>:<repeat>:<id hash>:<sort>`, the sort value last because it may hold
+/// a colon.
+fn encode_position_cursor(fingerprint: u64, position: &Position) -> String {
     to_hex(&format!(
-        "{POSITION_CURSOR_VERSION}:{offset}:{fingerprint:016x}:{}:{}",
-        position.repeat, position.key
+        "{POSITION_CURSOR_VERSION}:{fingerprint:016x}:{}:{:016x}:{}",
+        position.repeat, position.key.id, position.key.sort
     ))
 }
 
@@ -455,33 +462,39 @@ fn decode_cursor(cursor: &str) -> Option<DecodedCursor> {
         .map(|i| u8::from_str_radix(cursor.get(i..i + 2)?, 16).ok())
         .collect::<Option<_>>()?;
     let plain = String::from_utf8(bytes).ok()?;
-    let mut parts = plain.splitn(5, ':');
-    let version = parts.next()?;
-    let offset: usize = parts.next()?.parse().ok()?;
-    if offset > MAX_OFFSET {
-        return None;
-    }
-    let fingerprint = u64::from_str_radix(parts.next()?, 16).ok()?;
-    let position = match version {
-        CURSOR_VERSION => None,
-        POSITION_CURSOR_VERSION => {
-            let repeat = parts.next()?.parse().ok()?;
-            let key = parts.next()?;
-            (key.len() <= MAX_KEY_BYTES).then(|| Position {
-                key: key.to_string(),
-                repeat,
+    let (version, rest) = plain.split_once(':')?;
+    match version {
+        CURSOR_VERSION => {
+            let (offset, fingerprint) = rest.split_once(':')?;
+            let offset: usize = offset.parse().ok()?;
+            (offset <= MAX_OFFSET).then_some(())?;
+            Some(DecodedCursor {
+                offset,
+                fingerprint: u64::from_str_radix(fingerprint, 16).ok()?,
+                position: None,
             })
         }
-        _ => return None,
-    };
-    if position.is_none() && version != CURSOR_VERSION {
-        return None;
+        POSITION_CURSOR_VERSION => {
+            let mut parts = rest.splitn(4, ':');
+            let fingerprint = u64::from_str_radix(parts.next()?, 16).ok()?;
+            let repeat = parts.next()?.parse().ok()?;
+            let id = u64::from_str_radix(parts.next()?, 16).ok()?;
+            let sort = parts.next()?;
+            (sort.len() <= MAX_SORT_BYTES).then_some(())?;
+            Some(DecodedCursor {
+                offset: 0,
+                fingerprint,
+                position: Some(Position {
+                    key: PositionKey {
+                        sort: sort.to_string(),
+                        id,
+                    },
+                    repeat,
+                }),
+            })
+        }
+        _ => None,
     }
-    parts.next().is_none().then_some(DecodedCursor {
-        offset,
-        fingerprint,
-        position,
-    })
 }
 
 #[cfg(test)]
@@ -655,9 +668,9 @@ mod tests {
     }
 
     /// `(key, row)` for rows named by date and id.
-    fn keyed(rows: &[(&str, &str)]) -> Vec<(String, String)> {
+    fn keyed(rows: &[(&str, &str)]) -> Vec<(PositionKey, String)> {
         rows.iter()
-            .map(|(date, id)| (format!("{date} {id}"), format!("{date}/{id}")))
+            .map(|(date, id)| (PositionKey::new(*date, id), format!("{date}/{id}")))
             .collect()
     }
 
@@ -682,6 +695,15 @@ mod tests {
             .page_by_position(keyed(rows), Order::Descending, "since/until")
             .unwrap();
         (page.items, page.info.next_cursor)
+    }
+
+    /// The plain text of a cursor.
+    fn decoded(cursor: &str) -> String {
+        let bytes: Vec<u8> = (0..cursor.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&cursor[i..i + 2], 16).unwrap())
+            .collect();
+        String::from_utf8(bytes).unwrap()
     }
 
     #[test]
@@ -740,6 +762,38 @@ mod tests {
         assert_eq!(second, ["2026-03-03/c", "2026-03-02/b"]);
     }
 
+    /// A busy day, split by a page boundary: a row of that day arriving between pages, on
+    /// either side of where the first page stopped, repeats nothing and loses nothing that
+    /// was there.
+    #[test]
+    fn a_day_split_by_a_page_boundary_holds_when_it_gains_a_row() {
+        let day = [
+            ("2026-03-02", "p"),
+            ("2026-03-02", "q"),
+            ("2026-03-02", "r"),
+            ("2026-03-02", "s"),
+            ("2026-03-01", "older"),
+        ];
+        let (first, cursor) = newest_page(&day, None, 2);
+        let mut grown = day.to_vec();
+        grown.insert(0, ("2026-03-02", "new"));
+        let mut seen = first.clone();
+        let mut cursor = cursor;
+        while let Some(c) = cursor {
+            let (items, next) = newest_page(&grown, Some(&c), 2);
+            seen.extend(items);
+            cursor = next;
+        }
+        let mut unique = seen.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), seen.len(), "a row repeated: {seen:?}");
+        for (date, id) in day {
+            let row = format!("{date}/{id}");
+            assert!(seen.contains(&row), "{row} lost: {seen:?}");
+        }
+    }
+
     /// A tool sorts here, so its rows and its cursors cannot disagree.
     #[test]
     fn rows_are_sorted_by_key_in_the_order_asked_for() {
@@ -765,8 +819,8 @@ mod tests {
     #[test]
     fn an_undated_row_comes_last_when_newest_is_first() {
         let rows = vec![
-            (" z".to_string(), "undated"),
-            ("2026-03-01 a".to_string(), "dated"),
+            (PositionKey::new("", "z"), "undated"),
+            (PositionKey::new("2026-03-01", "a"), "dated"),
         ];
         let page = PageRequest::new(&args(None, None), &())
             .unwrap()
@@ -779,12 +833,13 @@ mod tests {
     /// lost, and they keep the order they came in.
     #[test]
     fn rows_sharing_a_key_are_told_apart_by_count() {
+        let same = || PositionKey::new("2026-03-02", "same");
         let rows = || {
             vec![
-                ("2026-03-02 same".to_string(), "first"),
-                ("2026-03-02 same".to_string(), "second"),
-                ("2026-03-02 same".to_string(), "third"),
-                ("2026-03-01 a".to_string(), "older"),
+                (same(), "first"),
+                (same(), "second"),
+                (same(), "third"),
+                (PositionKey::new("2026-03-01", "a"), "older"),
             ]
         };
         let mut seen = Vec::new();
@@ -808,10 +863,9 @@ mod tests {
     fn a_count_past_the_rows_sharing_a_key_stops_at_the_next_key() {
         let fp = fingerprint(&()).unwrap();
         let forged = encode_position_cursor(
-            0,
             fp,
             &Position {
-                key: "2026-03-03 c".into(),
+                key: PositionKey::new("2026-03-03", "c"),
                 repeat: usize::MAX,
             },
         );
@@ -819,14 +873,33 @@ mod tests {
         assert_eq!(items, ["2026-03-02/b"]);
     }
 
+    /// A concise result holds an id back, and a cursor is plain hex a client can read.
     #[test]
-    fn a_key_with_a_colon_or_past_the_limit_still_finds_its_place() {
-        let long = "x".repeat(MAX_KEY_BYTES + 50);
+    fn a_cursor_holds_the_sort_value_and_never_the_id() {
+        let (_, cursor) = newest_page(
+            &[("2026-03-02", "CONF-DUMMY"), ("2026-03-01", "a")],
+            None,
+            1,
+        );
+        let plain = decoded(&cursor.unwrap());
+        assert!(plain.ends_with(":2026-03-02"), "{plain}");
+        assert!(!plain.contains("CONF-DUMMY"), "{plain}");
+    }
+
+    #[test]
+    fn a_sort_value_with_a_colon_or_past_the_limit_still_finds_its_place() {
+        let long = "x".repeat(MAX_SORT_BYTES + 50);
         let rows = || {
             vec![
-                (format!("2026-03-03T10:00:00 {long}a"), "c"),
-                (format!("2026-03-02T10:00:00 {long}b"), "b"),
-                ("2026-03-01T10:00:00".to_string(), "a"),
+                (
+                    PositionKey::new(format!("2026-03-03T10:00:00 {long}"), "c"),
+                    "c",
+                ),
+                (
+                    PositionKey::new(format!("2026-03-02T10:00:00 {long}"), "b"),
+                    "b",
+                ),
+                (PositionKey::new("2026-03-01T10:00:00", "a"), "a"),
             ]
         };
         let page = PageRequest::new(&args(Some(1), None), &())
@@ -844,11 +917,10 @@ mod tests {
     }
 
     #[test]
-    fn a_long_key_is_cut_on_a_character_boundary() {
-        let mut key = "é".repeat(MAX_KEY_BYTES);
-        cut_key(&mut key);
-        assert!(key.len() <= MAX_KEY_BYTES);
-        assert!(key.chars().all(|c| c == 'é'));
+    fn a_long_sort_value_is_cut_on_a_character_boundary() {
+        let key = PositionKey::new("é".repeat(MAX_SORT_BYTES), "id");
+        assert!(key.sort.len() <= MAX_SORT_BYTES);
+        assert!(key.sort.chars().all(|c| c == 'é'));
     }
 
     #[test]
@@ -864,7 +936,7 @@ mod tests {
     }
 
     /// A tool has one kind of cursor; the other kind reaching `page` means it was not
-    /// this tool's, and counting from its estimate would page the wrong rows.
+    /// this tool's, and there is no count to page from.
     #[test]
     fn a_count_of_rows_page_refuses_a_position_cursor() {
         let (_, cursor) = newest_page(&ledger(), None, 1);
@@ -887,20 +959,31 @@ mod tests {
         assert_eq!(rest, ["2026-03-01/a"]);
     }
 
+    /// A tool that still sizes a read by `wanted()` gets all of it once a position is in play.
+    #[test]
+    fn a_position_cursor_wants_every_row() {
+        let (_, cursor) = newest_page(&ledger(), None, 1);
+        let r = PageRequest::new(&args(Some(1), cursor.as_deref()), &()).unwrap();
+        assert_eq!(r.wanted(), usize::MAX);
+        assert_eq!(r.offset(), 0);
+    }
+
     /// Hand-built cursors come back from clients, as with the offsets above.
     #[test]
     fn a_forged_position_cursor_is_refused_or_harmless() {
         let fp = fingerprint(&()).unwrap();
+        let id = "0000000000000001";
         for forged in [
-            to_hex(&format!("c2:0:{fp:016x}")),
-            to_hex(&format!("c2:0:{fp:016x}:x:key")),
-            to_hex(&format!("c2:0:{fp:016x}:0")),
-            to_hex(&format!("c2:{}:{fp:016x}:0:key", MAX_OFFSET + 1)),
-            to_hex(&format!("c3:0:{fp:016x}:0:key")),
+            to_hex(&format!("c2:{fp:016x}")),
+            to_hex(&format!("c2:{fp:016x}:x:{id}:sort")),
+            to_hex(&format!("c2:{fp:016x}:0:nothex:sort")),
+            to_hex(&format!("c2:{fp:016x}:0:{id}")),
+            to_hex(&format!("c2:nothex:0:{id}:sort")),
+            to_hex(&format!("c3:{fp:016x}:0:{id}:sort")),
             to_hex(&format!("c1:0:{fp:016x}:extra")),
             to_hex(&format!(
-                "c2:0:{fp:016x}:0:{}",
-                "k".repeat(MAX_KEY_BYTES + 1)
+                "c2:{fp:016x}:0:{id}:{}",
+                "k".repeat(MAX_SORT_BYTES + 1)
             )),
             "ab".repeat(MAX_CURSOR_CHARS),
         ] {
@@ -908,10 +991,9 @@ mod tests {
             assert!(e.message().contains("next_cursor exactly"), "{forged}: {e}");
         }
         let past_the_end = encode_position_cursor(
-            0,
             fp,
             &Position {
-                key: "0000".into(),
+                key: PositionKey::new("0000", "a"),
                 repeat: 0,
             },
         );
@@ -922,9 +1004,9 @@ mod tests {
 
     #[test]
     fn a_position_page_over_budget_stops_early_and_continues_where_it_stopped() {
-        let rows = || -> Vec<(String, String)> {
+        let rows = || -> Vec<(PositionKey, String)> {
             (0..50)
-                .map(|i| (format!("{i:04}"), format!("{i:0>90}")))
+                .map(|i| (PositionKey::new(format!("{i:04}"), ""), format!("{i:0>90}")))
                 .collect()
         };
         let r = PageRequest::new(&args(Some(50), None), &())
@@ -944,52 +1026,16 @@ mod tests {
         assert_eq!(next.items, [format!("{kept:0>90}")]);
     }
 
-    /// A tool that reads only `wanted()` rows, with rows arriving since the last page: the
-    /// extra row is gone, and the list must not end for that.
     #[test]
-    fn a_short_read_continues_when_upstream_has_more() {
-        let (_, cursor) = newest_page(&ledger(), None, 2);
-        let r = PageRequest::new(&args(Some(2), cursor.as_deref()), &()).unwrap();
-        assert_eq!(r.wanted(), 5);
-        // Two new rows above: the five read now end at where the page should start + 1.
-        let read = vec![
-            ("2026-03-07", "h"),
-            ("2026-03-06", "g"),
-            ("2026-03-05", "e"),
-            ("2026-03-04", "d"),
-            ("2026-03-03", "c"),
-        ];
-        let page = r
-            .page_by_position_with_more(keyed(&read), true, Order::Descending, "x")
-            .unwrap();
-        assert_eq!(page.items, ["2026-03-03/c"]);
-        let next = page.info.next_cursor.expect("the list goes on");
-        let r = PageRequest::new(&args(Some(2), Some(&next)), &()).unwrap();
-        assert_eq!(r.wanted(), 8);
-    }
-
-    /// Enough new rows that the read never reached the position: an empty page, and a
-    /// cursor that asks for a longer read, so the next call gets further.
-    #[test]
-    fn a_read_short_of_the_position_asks_for_more_next_time() {
-        let (_, cursor) = newest_page(&ledger(), None, 2);
-        let r = PageRequest::new(&args(Some(2), cursor.as_deref()), &()).unwrap();
-        let read = vec![
-            ("2026-03-11", "m"),
-            ("2026-03-10", "l"),
-            ("2026-03-09", "k"),
-            ("2026-03-08", "j"),
-            ("2026-03-07", "i"),
-        ];
-        let page = r
-            .page_by_position_with_more(keyed(&read), true, Order::Descending, "x")
-            .unwrap();
-        assert!(page.items.is_empty());
-        let next = page.info.next_cursor.expect("the list goes on");
-        let r = PageRequest::new(&args(Some(2), Some(&next)), &()).unwrap();
-        assert_eq!(r.wanted(), 8);
-        let (items, _) = newest_page(&ledger(), Some(&next), 2);
-        assert_eq!(items, ["2026-03-03/c", "2026-03-02/b"], "the position held");
+    fn one_row_over_budget_on_a_position_page_is_a_usage_error() {
+        let r = PageRequest::new(&args(None, None), &())
+            .unwrap()
+            .with_budget(ENVELOPE_RESERVE + 10);
+        let rows = vec![(PositionKey::new("2026-03-01", "a"), "x".repeat(100))];
+        let e = r
+            .page_by_position(rows, Order::Descending, "type")
+            .unwrap_err();
+        assert!(e.message().contains("response_format=concise"), "{e}");
     }
 
     #[test]

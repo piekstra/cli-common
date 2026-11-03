@@ -18,6 +18,8 @@ struct FakeProvider {
     /// Fail redeems with this instead of judging the code.
     outage: Cell<bool>,
     refuse_request: Cell<bool>,
+    /// Refuse a code with a typed cause and a remedy apart, instead of plain text.
+    typed_refusal: Cell<bool>,
 }
 
 impl FakeProvider {
@@ -28,6 +30,7 @@ impl FakeProvider {
             redeemed: RefCell::new(Vec::new()),
             outage: Cell::new(false),
             refuse_request: Cell::new(false),
+            typed_refusal: Cell::new(false),
         }
     }
 }
@@ -56,7 +59,14 @@ impl OtpTransport for FakeProvider {
         if code.expose() == self.good {
             Ok(format!("session-for-{in_flight}"))
         } else {
-            Err(CliError::Auth("the portal refused that code".into()))
+            let refused = CliError::Auth("the portal refused that code".into());
+            Err(if self.typed_refusal.get() {
+                refused
+                    .because(pk_cli_core::Reason::CredentialRefused)
+                    .with_remedy("ask for another")
+            } else {
+                refused
+            })
         }
     }
 }
@@ -287,6 +297,26 @@ fn a_refused_mailbox_code_falls_back_to_the_prompt_on_the_same_session() {
     let redeemed = provider.redeemed.borrow();
     assert_eq!(redeemed.len(), 2);
     assert!(redeemed.iter().all(|(s, _)| s == "sess-1"));
+}
+
+/// A provider that types its refusal still gets the count and the parked login, and
+/// the flow's own next step in place of the provider's remedy.
+#[test]
+fn a_rejected_code_with_a_typed_cause_counts_the_same() {
+    let provider = FakeProvider::new("482917");
+    provider.typed_refusal.set(true);
+    let slot = MemorySlot::holding(ParkedLogin::new("sess-9", T0));
+    let clock = FakeClock::at(T0 + 60);
+    let otp = OtpLogin::new(BIN, &provider, &slot)
+        .clock(&clock)
+        .quiet(true);
+    let err = otp.resume(&code("000000")).unwrap_err();
+    assert_eq!(err.exit_code(), 3);
+    let text = err.to_string();
+    assert!(text.starts_with("the portal refused that code"), "{text}");
+    assert!(text.contains("2 more attempts"), "{text}");
+    assert!(!text.contains("ask for another"), "{text}");
+    assert_eq!(slot.peek().unwrap().rejected, 1);
 }
 
 #[test]

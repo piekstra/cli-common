@@ -21,6 +21,6 @@ pub mod transport;
 
 pub use args::CommonArgs;
 pub use block_on::block_on;
-pub use error::CliError;
+pub use error::{CliError, Reason};
 pub use list::{Paged, RangeArgs};
 pub use money::Money;
