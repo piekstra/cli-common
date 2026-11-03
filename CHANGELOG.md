@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `DESIGN.md` §2.2 states the rule for verifying a window capture: a refusal
+  stores nothing, and an inconclusive read of a capture whose only local copy was
+  the page's stores the session with a warning that names the way out. A
+  finished sign-in is not lost to a 429 or an outage. No code changes.
+
 ## v0.19.0 — 2026-11-03
 
 - `pk-cli-browser`: `Launch::clear_site_storage(bool)`, default off, for a CLI
