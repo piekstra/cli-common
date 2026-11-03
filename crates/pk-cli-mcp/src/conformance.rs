@@ -28,11 +28,11 @@
 
 use serde_json::Value;
 
-use crate::block_on::block_on;
 use crate::result::CallToolResult;
 use crate::shape::SIZE_BUDGET;
 use crate::tool::NAME_MAX;
 use crate::toolset::{call_tool, instructions, tools_list, Toolset};
+use pk_cli_core::block_on;
 
 /// Characters of compact JSON all of a CLI's tool definitions may take together:
 /// they ride along in every prompt.

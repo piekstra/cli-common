@@ -1,6 +1,6 @@
 [package]
 name = "pk-cli-mcp"
-description = "MCP tools for the piekstra CLI family: a WASM-ready core (tool definitions, results, output shaping, error mapping) and a stdio server for `<bin> mcp`."
+description = "MCP tools for the piekstra CLI family: a WASM-ready core (tool definitions, results, output shaping, error mapping), a stdio server for `<bin> mcp`, and the same server on 127.0.0.1 for a tunnel (`<bin> mcp --http`)."
 version.workspace = true
 edition.workspace = true
 # rmcp 3.8 (the `stdio` feature) needs 1.88. The core alone builds on the
@@ -25,10 +25,44 @@ clap = { workspace = true, optional = true }
 rmcp = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 
+# `http`: `<bin> mcp --http`, the same server over Streamable HTTP on
+# 127.0.0.1 for a tunnel from the user's own Worker; its bearer token lives in
+# the OS keychain.
+pk-cli-secrets = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+
 [features]
 default = []
 # The rmcp stdio server and the clap `mcp` subcommand. Native only.
-stdio = ["dep:clap", "dep:rmcp", "dep:tokio"]
+stdio = ["dep:clap", "dep:rmcp", "dep:tokio", "tokio/time"]
+# `<bin> mcp --http`: stateless Streamable HTTP on 127.0.0.1 behind a bearer
+# token, read-only tools unless `--allow-writes`, for the connector's "home"
+# modules. Native only; adds the flags to `McpArgs`.
+http = [
+    "stdio",
+    "dep:pk-cli-secrets",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http",
+    "dep:http-body-util",
+    "dep:bytes",
+    "dep:getrandom",
+    "rmcp/transport-streamable-http-server",
+    "tokio/net",
+    "tokio/time",
+]
+# `wasm::*` and `export_wasm!`: the toolset as a WebAssembly module for the
+# deploy-your-own Worker, on a raw ABI with no JavaScript glue, and
+# `HostTransport`, the host's `fetch` and WebCrypto behind
+# `pk_cli_core::transport::Transport`. No dependencies: it builds natively too,
+# where the host is a stand-in a CLI's tests drive (`wasm::testing`, with
+# `test-util`).
+wasm = []
 # The conformance checks and call helpers a CLI's tests use. Declare it under
 # `[dev-dependencies]` only, so the shipped binary never carries it.
 test-util = []

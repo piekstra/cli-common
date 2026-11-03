@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pk-cli-connector",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-23",
+  // nodejs_compat: the agents SDK's MCP handler uses AsyncLocalStorage.
+  // global_fetch_strictly_public: workers-oauth-provider requires it before it
+  // fetches Client ID Metadata Documents (claude.ai prefers CIMD over dynamic
+  // registration when it is offered). Local `wrangler dev` still reaches the
+  // 127.0.0.1 mock.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // Download the tool modules and check them against modules.json's SHA-256
+  // pins before every build: `wrangler dev`, `wrangler deploy` and the Deploy
+  // to Cloudflare button all run it.
+  "build": { "command": "node scripts/fetch-modules.mjs" },
+  // OAuth clients, grants and tokens (hashed), and the passphrase lockout
+  // counter. No id: `wrangler deploy` and the Deploy button provision it.
+  "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  // The secrets are listed in .dev.vars.example, which the Deploy button
+  // reads. A missing one is reported at run time (the approval page, a tool's
+  // auth error), not by failing a deploy.
+  // Home modules (README, "Tools from your computer"): one Workers VPC
+  // service binding per CLI on your computer, named HOME_<NAME>, e.g.
+  //   "vpc_services": [{ "binding": "HOME_M1", "service_id": "<SERVICE_ID>" }],
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": true }],
+  "observability": { "enabled": true }
+}

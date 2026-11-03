@@ -84,15 +84,30 @@ pub trait Mailbox {
 /// How [`GroMailbox`] runs a program. A seam so the parsing and the argv can
 /// be tested offline without a `gro` on the machine.
 trait Runner {
-    fn run(&self, program: &str, args: &[String], timeout: Duration) -> Result<String, CliError>;
+    /// Run `program` with `args`, adding `env` to the child's environment
+    /// (the parent's environment is left alone).
+    fn run(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+    ) -> Result<String, CliError>;
 }
 
 struct ProcessRunner;
 
 impl Runner for ProcessRunner {
-    fn run(&self, program: &str, args: &[String], timeout: Duration) -> Result<String, CliError> {
+    fn run(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+    ) -> Result<String, CliError> {
         let mut child = Command::new(program)
             .args(args)
+            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -192,14 +207,35 @@ impl GroMailbox {
         self
     }
 
-    /// Read through a specific `gro` credential ref (`<service>/<profile>`),
-    /// for the account the provider mails rather than `gro`'s active one.
+    /// Read through a specific `gro` credential ref (`<service>/<profile>`,
+    /// e.g. `google-readonly/work`), for the account the provider mails
+    /// rather than `gro`'s active one.
+    ///
+    /// The ref reaches `gro` as `<SERVICE>_CREDENTIAL_REF` in the child's
+    /// environment (`GOOGLE_READONLY_CREDENTIAL_REF` for the ref above),
+    /// which gro 1.x and 2.x both read. A flag would not do: 1.x spells it
+    /// `--ref <service>/<profile>`, and 2.x replaced that with
+    /// `--profile <profile>` and rejects `--ref`.
     pub fn credential_ref(mut self, credential_ref: impl Into<String>) -> Result<Self, CliError> {
         let r = credential_ref.into();
-        if r.trim().is_empty() || r.starts_with('-') || r.chars().any(char::is_control) {
-            return Err(CliError::Usage(format!(
+        let bad = || {
+            CliError::Usage(format!(
                 "`{r}` is not a gro credential ref (expected <service>/<profile>)"
-            )));
+            ))
+        };
+        let (service, profile) = r.split_once('/').ok_or_else(bad)?;
+        let service_ok = service
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+            && service
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        let profile_ok = !profile.trim().is_empty()
+            && !profile.starts_with('-')
+            && !profile.chars().any(|c| c.is_control() || c.is_whitespace());
+        if !service_ok || !profile_ok {
+            return Err(bad());
         }
         self.credential_ref = Some(r);
         Ok(self)
@@ -219,13 +255,20 @@ impl GroMailbox {
     }
 
     fn args(&self, rest: &[&str]) -> Vec<String> {
-        let mut args = Vec::new();
-        if let Some(r) = &self.credential_ref {
-            args.push("--ref".to_string());
-            args.push(r.clone());
-        }
-        args.extend(rest.iter().map(|s| s.to_string()));
-        args
+        rest.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The child's extra environment: the credential ref, when one is set.
+    fn env(&self) -> Vec<(String, String)> {
+        let Some(r) = &self.credential_ref else {
+            return Vec::new();
+        };
+        let service = r.split_once('/').map(|(s, _)| s).unwrap_or(r);
+        let var = format!(
+            "{}_CREDENTIAL_REF",
+            service.to_ascii_uppercase().replace('-', "_")
+        );
+        vec![(var, r.clone())]
     }
 }
 
@@ -236,7 +279,10 @@ impl Mailbox for GroMailbox {
         // `--` ends gro's flags, so a query beginning with `-` (Gmail's
         // negation) is a query, never an option.
         let search = self.args(&["mail", "search", "--max", &max, "--", &q]);
-        let out = self.runner.run(&self.program, &search, self.timeout)?;
+        let env = self.env();
+        let out = self
+            .runner
+            .run(&self.program, &search, &env, self.timeout)?;
         let hits = parse_search(&out);
         let Some(newest) = hits.first() else {
             return Ok(None);
@@ -251,7 +297,7 @@ impl Mailbox for GroMailbox {
             return Ok(None);
         }
         let read = self.args(&["mail", "read", "--", &newest.id]);
-        let body = self.runner.run(&self.program, &read, self.timeout)?;
+        let body = self.runner.run(&self.program, &read, &env, self.timeout)?;
         Ok(extract_code(&message_text(&body), query.shape()))
     }
 }
@@ -316,11 +362,15 @@ mod tests {
     const READ: &str = include_str!("../../tests/fixtures/gro/read-code.txt");
     const NONE: &str = include_str!("../../tests/fixtures/gro/search-empty.txt");
 
+    /// One child's extra environment, as the runner received it.
+    type Env = Vec<(String, String)>;
+
     /// Answers each call with the next canned output and records the argv.
     #[derive(Clone)]
     struct Canned {
         outputs: Rc<RefCell<Vec<Result<String, CliError>>>>,
         calls: Rc<RefCell<Vec<Vec<String>>>>,
+        envs: Rc<RefCell<Vec<Env>>>,
     }
 
     impl Canned {
@@ -330,14 +380,22 @@ mod tests {
                     outputs.into_iter().map(|o| o.map(str::to_string)).collect(),
                 )),
                 calls: Rc::new(RefCell::new(Vec::new())),
+                envs: Rc::new(RefCell::new(Vec::new())),
             }
         }
     }
 
     impl Runner for Canned {
-        fn run(&self, program: &str, args: &[String], _t: Duration) -> Result<String, CliError> {
+        fn run(
+            &self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            _t: Duration,
+        ) -> Result<String, CliError> {
             assert_eq!(program, "gro");
             self.calls.borrow_mut().push(args.to_vec());
+            self.envs.borrow_mut().push(env.to_vec());
             self.outputs.borrow_mut().remove(0)
         }
     }
@@ -393,17 +451,66 @@ mod tests {
     }
 
     #[test]
-    fn the_credential_ref_leads_the_argv_and_is_validated() {
-        let runner = Canned::new(vec![Ok(NONE)]);
+    fn the_credential_ref_reaches_gro_through_its_env_var_never_a_flag() {
+        let runner = Canned::new(vec![Ok(SEARCH_NO_CODE), Ok(READ)]);
         let mb = GroMailbox::new()
-            .credential_ref("gro/work")
+            .credential_ref("google-readonly/work")
             .unwrap()
             .with_runner(runner.clone());
         mb.find_code(&query(), 1).unwrap();
-        assert_eq!(&runner.calls.borrow()[0][..2], ["--ref", "gro/work"]);
-        for bad in ["", "--max", "a\nb"] {
+        // gro 2.x rejects `--ref`; both versions read the variable.
+        for call in runner.calls.borrow().iter() {
+            assert!(
+                !call.iter().any(|a| a == "--ref" || a == "--profile"),
+                "{call:?}"
+            );
+        }
+        let want = vec![(
+            "GOOGLE_READONLY_CREDENTIAL_REF".to_string(),
+            "google-readonly/work".to_string(),
+        )];
+        assert_eq!(*runner.envs.borrow(), vec![want.clone(), want]);
+    }
+
+    #[test]
+    fn without_a_credential_ref_the_child_env_is_untouched() {
+        let runner = Canned::new(vec![Ok(NONE)]);
+        let mb = GroMailbox::new().with_runner(runner.clone());
+        mb.find_code(&query(), 1).unwrap();
+        assert_eq!(*runner.envs.borrow(), vec![Env::new()]);
+    }
+
+    #[test]
+    fn a_credential_ref_is_validated() {
+        assert!(GroMailbox::new().credential_ref("gro/work").is_ok());
+        for bad in [
+            "",
+            "work",
+            "/work",
+            "google-readonly/",
+            "--max/work",
+            "google readonly/work",
+            "google-readonly/--ref",
+            "google-readonly/a b",
+            "a\nb/work",
+        ] {
             assert!(GroMailbox::new().credential_ref(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_process_runner_adds_env_to_the_child() {
+        let out = ProcessRunner
+            .run(
+                "sh",
+                &["-c".into(), "printf %s \"$PK_CLI_AUTH_TEST_VAR\"".into()],
+                &[("PK_CLI_AUTH_TEST_VAR".into(), "set-for-child".into())],
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(out, "set-for-child");
+        assert!(std::env::var("PK_CLI_AUTH_TEST_VAR").is_err());
     }
 
     #[test]
@@ -429,7 +536,12 @@ mod tests {
     #[test]
     fn a_missing_program_is_an_upstream_error() {
         let err = ProcessRunner
-            .run("pk-cli-auth-no-such-program", &[], Duration::from_secs(1))
+            .run(
+                "pk-cli-auth-no-such-program",
+                &[],
+                &[],
+                Duration::from_secs(1),
+            )
             .unwrap_err();
         assert_eq!(err.exit_code(), 5);
         assert!(err.to_string().contains("not installed"), "{err}");
@@ -440,7 +552,7 @@ mod tests {
     fn a_hung_program_is_killed_at_the_timeout() {
         let started = Instant::now();
         let err = ProcessRunner
-            .run("sleep", &["5".into()], Duration::from_millis(200))
+            .run("sleep", &["5".into()], &[], Duration::from_millis(200))
             .unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(4));
         assert!(err.to_string().contains("did not answer"), "{err}");
@@ -453,6 +565,7 @@ mod tests {
             .run(
                 "sh",
                 &["-c".into(), "echo 'token expired' >&2; exit 1".into()],
+                &[],
                 Duration::from_secs(5),
             )
             .unwrap_err();

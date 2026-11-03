@@ -27,17 +27,44 @@ jobs:
           # pk-cli-mcp's core must build for WebAssembly (make wasm-check).
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      # wasm-host-check runs the ABI's reference host, TypeScript that Node
+      # 22.18+ runs without a build step.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Install Linux keyring build deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
       # The Makefile is the one definition of the gate; `make verify` runs
-      # these seven locally.
+      # these eight locally.
       - run: make fmt-check
       - run: make lint
       - run: make test
       - run: make test-util-check
       - run: make mcp-check
       - run: make wasm-check
+      - run: make wasm-host-check
       - run: make scripts-check
+
+  # The deploy-your-own connector: `make connector-check` fetches and
+  # verifies the pinned modules as a deploy does, then runs the OAuth and MCP
+  # flow under `wrangler dev --local` against the localhost mocks, with
+  # example-cli's `mcp --http` as a home module. No Cloudflare account, no
+  # tunnel, nothing deployed.
+  connector:
+    name: connector (typecheck, tests, local e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux keyring build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: connector/package-lock.json
+      - run: make connector-check
 
   # The platform-specific slivers are the apple-native keyring backend in
   # pk-cli-secrets and the codesign re-sign step in pk-cli-selfupdate

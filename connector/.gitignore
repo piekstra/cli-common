@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+.dev.vars
+dist/
+# Fetched and verified at build time (scripts/fetch-modules.mjs); never committed.
+modules/
+mock/.keys/
+.e2e/
+wrangler.e2e.jsonc

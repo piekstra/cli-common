@@ -1,9 +1,12 @@
 //! A minimal executor: poll a future to completion on the current thread.
 //!
-//! Native only (it parks the thread). The stdio server runs each tool call
-//! through it on a blocking thread, outside any Tokio context, so provider
-//! code that drives its own runtime (`reqwest::blocking`) works unchanged;
-//! tests use it to call a toolset synchronously.
+//! Native only in practice (it parks the thread while the future is
+//! pending). Two callers: a CLI's commands driving a provider client written
+//! against [`crate::transport::Transport`] with a blocking transport, whose
+//! futures are ready on their first poll; and `pk-cli-mcp`'s stdio server,
+//! which runs each tool call through it on a blocking thread outside any
+//! Tokio context, so provider code that drives its own runtime
+//! (`reqwest::blocking`) works unchanged.
 
 use std::future::Future;
 use std::sync::Arc;

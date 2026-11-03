@@ -19,18 +19,19 @@ self-update.
 
 | Crate | What it gives a CLI |
 |---|---|
-| `pk-cli-core` | error type + stable exit codes (0–6), `--json`/text output renderer (incl. `emit_list`/`emit_one`), common global flags, date & `Money` helpers, `cli-info/v1` DTO, shared list primitives (`Paged` envelope + `--limit/--since/--until` range flags), the §1.3 confirmation gate (`confirm`), and reference resolution (`resolve::pick`) |
+| `pk-cli-core` | error type + stable exit codes (0–6), `--json`/text output renderer (incl. `emit_list`/`emit_one`), common global flags, date & `Money` helpers, `cli-info/v1` DTO, shared list primitives (`Paged` envelope + `--limit/--since/--until` range flags), the §1.3 confirmation gate (`confirm`), reference resolution (`resolve::pick`), and the `transport` seam (`HttpRequest`, `HttpResponse`, the async `Transport` and `PlatformSigner` traits, `block_on`) a provider client is written against so it runs in the terminal binary and in a WebAssembly Worker alike |
 | `pk-cli-secrets` | redacting `Secret` type, OS-keychain `CredentialStore` (`piekstra.<bin>`) with one-item JSON credentials (`get_json`/`set_json`) and legacy-service `migrate_from`, `--stdin`/`--from-env`/`--op` ingestion (secrets never on argv), 1Password reads through `op`, and a configurable env/keychain/1Password precedence (`SecretResolver`) |
 | `pk-cli-config` | non-secret JSON config at `~/.config/<bin>/config.json` |
 | `pk-cli-selfupdate` | `self-update [--check] [-y]` from GitHub Releases, `self-update/v1` DTO |
 | `pk-cli-auth` | `auth login/status/logout/set-credential` arg structs, the canonical `auth-status/v1` DTO, `token` (bearer-token claim reads: expiry, `expires_at`), `reauth::with_reauth` (retry a read once after re-authenticating, with the retry-once/no-login-storm rails), and `otp` (the one-time-code login: request, park for a `--code` resume, read the code from the mailbox through `gro` or prompt) |
-| `pk-cli-http` | blocking client builder with family defaults, raw `api` passthrough command |
+| `pk-cli-http` | blocking client builder with family defaults, `BlockingTransport` (a blocking client behind the core's `Transport`, keeping its contract), raw `api` passthrough command |
 | `pk-cli-utility` | the `utility/v1` domain profile: `utility-summary/v1` + statement/payment/usage/transaction DTOs |
 | `pk-cli-documents` | the `documents/v1` domain profile: list & download a portal's published files (`document-list/v1`, `document-download/v1`, …) |
 | `pk-cli-scrape` | dependency-free HTML scanning for providers that answer in rendered pages rather than JSON |
 | `pk-cli-drive` | state in the owner's Drive: one backend over a mounted folder or an rclone remote, with a stale-while-revalidate read cache that never becomes a second source of truth (needs Rust 1.89) |
 | `pk-cli-browser` | `auth login --browser` for portals a CLI cannot sign in to itself: a Chrome the owner signs in through, in an owner-only profile the CLI keeps so the provider remembers the device and a re-login often needs no input (`--fresh-profile` for a scratch one, `forget_profile` for `auth logout`), the web session (a `localStorage` entry, `HttpOnly` cookies, or a domain's whole cookie jar) read back over the DevTools protocol from exact hosts only, optionally confirmed by the CLI's own provider read before the tab closes, with one watched request's headers or a log of the app's endpoints for a CLI that needs them; the tab closed at once and Chrome killed; a `test-util` feature, for a CLI's dev-dependencies only, builds what a capture hands over so the CLI's unit tests can run its confirm hook on it (needs Rust 1.85) |
-| `pk-cli-mcp` | MCP tools over the CLI's own commands, for Claude Code, Claude Desktop and a deploy-your-own Worker: tool definitions with schemars schemas and explicit annotations, structured results with matching text, paging with filter-bound cursors and a size budget, exit codes as actionable tool errors, the standard server instructions; a core that builds for WebAssembly, `<bin> mcp` over stdio (feature `stdio`, on rmcp) and a conformance check for the CLI's tests (feature `test-util`) (needs Rust 1.88) |
+| `pk-cli-mcp` | MCP tools over the CLI's own commands, for Claude Code, Claude Desktop and a deploy-your-own Worker: tool definitions with schemars schemas and explicit annotations, structured results with matching text, paging with filter-bound cursors and a size budget, exit codes as actionable tool errors, the standard server instructions; a core that builds for WebAssembly, `<bin> mcp` over stdio (feature `stdio`, on rmcp), the same server on 127.0.0.1 behind a bearer token for the Worker's tunnel to a portal CLI (`<bin> mcp --http`, feature `http`), the toolset as a self-contained WebAssembly module for the deploy-your-own Worker with `HostTransport` for its provider requests (feature `wasm`; reference host `js/pk-host.ts`) and a conformance check for the CLI's tests (feature `test-util`) (needs Rust 1.88) |
+| `pk-cli-mcp-wasm-demo` | a toolset exported as a WebAssembly module, which `make wasm-host-check` runs under the reference host; not published |
 | `example-cli` | a runnable template wiring it all together — copy it to start a new family CLI |
 
 ## Consuming
@@ -139,12 +140,28 @@ stopped 41234
 `make scripts-check` lints the scripts and runs `scripts/test/self-view.test.sh`,
 which stubs the window list and so needs no display.
 
+## Claude on the web and mobile: deploy your own connector
+
+[`connector/`](connector/) is a Cloudflare Worker each user deploys into their
+own Cloudflare account and adds to Claude as a custom connector. It serves
+official-API CLIs' MCP tools (today coinbase-cli's), each the CLI's own Rust
+compiled to a WebAssembly module and pinned by version and SHA-256. The
+provider keys are the Worker's secrets; only the owner's passphrase connects
+a client. No shared service holds anyone's credentials.
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/piekstra/cli-common/tree/main/connector)
+
+[connector/README.md](connector/README.md) has the walkthrough and the
+threat model.
+
 ## Development
 
 ```console
 cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo run -p example-cli -- --help
+make verify            # the whole Rust gate CI runs
+make connector-check   # connector/: typecheck, tests, local OAuth + MCP e2e (needs Node 22.18+)
 ```
 
 ## License

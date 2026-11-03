@@ -13,11 +13,12 @@ members = [
     "crates/pk-cli-drive",
     "crates/pk-cli-browser",
     "crates/pk-cli-mcp",
+    "crates/pk-cli-mcp-wasm-demo",
     "crates/example-cli",
 ]
 
 [workspace.package]
-version = "0.12.0"
+version = "0.15.1"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
@@ -26,18 +27,18 @@ homepage = "https://github.com/piekstra/cli-common"
 authors = ["piekstra"]
 
 [workspace.dependencies]
-pk-cli-core = { path = "crates/pk-cli-core", version = "0.12.0" }
-pk-cli-secrets = { path = "crates/pk-cli-secrets", version = "0.12.0" }
-pk-cli-config = { path = "crates/pk-cli-config", version = "0.12.0" }
-pk-cli-selfupdate = { path = "crates/pk-cli-selfupdate", version = "0.12.0" }
-pk-cli-auth = { path = "crates/pk-cli-auth", version = "0.12.0" }
-pk-cli-http = { path = "crates/pk-cli-http", version = "0.12.0" }
-pk-cli-utility = { path = "crates/pk-cli-utility", version = "0.12.0" }
-pk-cli-documents = { path = "crates/pk-cli-documents", version = "0.12.0" }
-pk-cli-scrape = { path = "crates/pk-cli-scrape", version = "0.12.0" }
-pk-cli-drive = { path = "crates/pk-cli-drive", version = "0.12.0" }
-pk-cli-browser = { path = "crates/pk-cli-browser", version = "0.12.0" }
-pk-cli-mcp = { path = "crates/pk-cli-mcp", version = "0.12.0" }
+pk-cli-core = { path = "crates/pk-cli-core", version = "0.15.1" }
+pk-cli-secrets = { path = "crates/pk-cli-secrets", version = "0.15.1" }
+pk-cli-config = { path = "crates/pk-cli-config", version = "0.15.1" }
+pk-cli-selfupdate = { path = "crates/pk-cli-selfupdate", version = "0.15.1" }
+pk-cli-auth = { path = "crates/pk-cli-auth", version = "0.15.1" }
+pk-cli-http = { path = "crates/pk-cli-http", version = "0.15.1" }
+pk-cli-utility = { path = "crates/pk-cli-utility", version = "0.15.1" }
+pk-cli-documents = { path = "crates/pk-cli-documents", version = "0.15.1" }
+pk-cli-scrape = { path = "crates/pk-cli-scrape", version = "0.15.1" }
+pk-cli-drive = { path = "crates/pk-cli-drive", version = "0.15.1" }
+pk-cli-browser = { path = "crates/pk-cli-browser", version = "0.15.1" }
+pk-cli-mcp = { path = "crates/pk-cli-mcp", version = "0.15.1" }
 
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
@@ -67,6 +68,15 @@ ctrlc = "3.5"
 schemars = "1"
 rmcp = { version = "3.8", default-features = false, features = ["server", "transport-io"] }
 tokio = { version = "1", default-features = false, features = ["rt"] }
+# pk-cli-mcp's `http` feature: rmcp's stateless Streamable HTTP service on a
+# hyper HTTP/1.1 listener bound to 127.0.0.1, and the OS CSPRNG for a new
+# bearer token. The same majors rmcp and reqwest already bring.
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+getrandom = "0.4"
 
 [profile.release]
 strip = true

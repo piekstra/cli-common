@@ -33,6 +33,20 @@ status here.
 - [ ] Tests call `pk_cli_mcp::conformance::assert_conforms` and run each tool through `assert_fits` on scrubbed fixtures, offline; all definitions together stay under 8,000 characters
 - [ ] Releases attach `<bin>-<version>.mcpb` (binary server type; macOS universal, Linux and Windows x86_64; credential as `sensitive` `user_config`), and a `claude-plugins` plugin's `.mcp.json` runs `<bin> mcp`
 
+For path B (the deploy-your-own Worker), an official-API CLI also:
+
+- [ ] Writes its provider client once against `pk_cli_core::transport::Transport` (and `PlatformSigner` if it signs ES256) (`pk_cli_http::BlockingTransport` natively, `pk_cli_mcp::wasm::HostTransport` in the Worker), behind a default `native` feature that gates the keychain, clap, self-update and blocking HTTP, and a `wasm` feature with `pk_cli_mcp::export_wasm!`
+- [ ] Takes randomness and time from `pk_cli_mcp::wasm::{fill_random, now_ms}` on wasm32, so no dependency pulls in `wasm-bindgen`; the module imports only `pk_host`
+- [ ] Builds clean with clippy for `wasm32-unknown-unknown` in CI, and tests its Worker toolset natively through `pk_cli_mcp::wasm::testing`
+- [ ] Releases attach `<bin>-mcp-<version>.wasm` and its `.sha256`
+- [ ] Is served by `connector/`: its asset pinned in `modules.json`, its module with the secrets and vars it reads (`config`) and the secrets that turn it on (`secrets`) in `src/modules.ts`, those secrets in `.dev.vars.example` (value `none`, so the module stays optional) and `package.json`'s `cloudflare.bindings`, and its tools in a mock, `scripts/smoke.sh` and `scripts/e2e.sh`
+
+For path B through the user's own computer (a "home" module), a portal CLI
+instead:
+
+- [ ] Pins cli-common v0.15.0 or later with pk-cli-mcp's `http` feature, so `<bin> mcp --http --port <PORT>` serves its read-only tools on 127.0.0.1 behind a bearer token (`<bin> mcp --new-token`), and its README's web and mobile section points at `connector/`'s home-module steps
+- [ ] Names its tools with one prefix (`m1_…`), which becomes the module's name in the Worker (`HOME_M1_TOKEN`, binding `HOME_M1`)
+
 ## Family status
 
 Drift notes are from the 2026-07-19 family audit.
@@ -108,13 +122,18 @@ Google Home's, replacing a hand-kept device→room table. Producers declare
 
 ## MCP profile (DESIGN.md §1.9)
 
-| CLI | Tools | Path A packaging |
-|---|---|---|
-| example-cli | demo: `example_devices` (paged read), `example_device_rename` (write) | `mcp` subcommand and a stdio end-to-end test; not released |
-| coinbase-cli (`cbase`) | pilot: `coinbase_accounts`, `coinbase_transactions` | `.mcpb` on each release from v0.2.0; `coinbase-cli` plugin in `claude-plugins` |
+| CLI | Tools | Path A packaging | Path B module |
+|---|---|---|---|
+| example-cli | demo: `example_devices` (paged read), `example_device_rename` (write) | `mcp` subcommand and a stdio end-to-end test; not released | none |
+| pk-cli-mcp-wasm-demo | ABI test tools | none | built and run under the reference host in CI; not released |
+| coinbase-cli (`cbase`) | pilot: `coinbase_accounts`, `coinbase_transactions` | `.mcpb` on each release from v0.2.0; `coinbase-cli` plugin in `claude-plugins` | `cbase-mcp-<version>.wasm` on each release from v0.3.0; served by `connector/` |
+| alpaca-cli (`alp`) | `alpaca_portfolio`, `alpaca_activities` | `.mcpb` on each release from v0.2.0 | `alp-mcp-<version>.wasm` on each release from v0.3.0; served by `connector/` |
+| m1-cli (`m1f`) | `m1_portfolio`, `m1_activity`, `m1_documents`, `m1_realized_gains` | `.mcpb` on each release from v0.4.0 | home module: `m1f mcp --http` from v0.5.0 |
+| robinhood-cli (`rhd`) | `robinhood_portfolio`, `robinhood_activity`, `robinhood_documents` | `.mcpb` on each release from v0.3.0 | home module: `rhd mcp --http` from v0.4.0 |
 
-Consumers: Claude Code, Claude Desktop, and (path B, in design) a
-deploy-your-own Cloudflare Worker reached from claude.ai. The `cli-mcp`
+Consumers: Claude Code, Claude Desktop, and (path B) a deploy-your-own
+Cloudflare Worker reached from claude.ai, which runs a portal CLI's tools on
+the user's computer through their own tunnel. The `cli-mcp`
 server's generic one-passthrough-tool-per-CLI registration stays for CLIs
 without a profile toolset.
 

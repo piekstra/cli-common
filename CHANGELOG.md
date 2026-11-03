@@ -67,6 +67,161 @@ sign-in. Additive API; no shape or exit code changes.
 - `example-cli`: `auth login --browser --fresh-profile` is passed to
   `Launch::fresh_profile`, and `auth logout` calls `forget_profile` through
   a seam its test fills with `forget_profile_in`.
+- `connector/` 0.2.0: every module is optional. A module is on when any of
+  its secrets is set (not empty, not `none`); the Deploy form offers each
+  module's secrets pre-filled with `none`, and a deployer who fills in only
+  Coinbase's gets only Coinbase's tools. With nothing set up, the
+  instructions say so.
+- `connector/`: alpaca-cli's `alpaca_portfolio` and `alpaca_activities`, from
+  its v0.3.0 module (`ALP_API_KEY_ID`, `ALP_API_SECRET_KEY`, optional
+  `ALP_ENV`), with a localhost Alpaca mock that checks the key headers and
+  pages the activity feed.
+- `connector/`: home modules. A portal CLI running `<bin> mcp --http` on the
+  owner's computer is reached through a Workers VPC service binding
+  (`HOME_<NAME>`) to the owner's Cloudflare Tunnel, or a tunnel hostname
+  behind an Access service token (`HOME_<NAME>_URL`), with the bearer token
+  in `HOME_<NAME>_TOKEN`; it serves the tools named `<name>_…`. The tool
+  list is kept in memory and KV, so the tools stay listed while the computer
+  sleeps, and a call pings first, so a sleeping computer answers `offline:`
+  at once. README: the owner's steps (tunnel, VPC service, launchd agent,
+  token) and the home path's threat model.
+- `make connector-check` builds example-cli and runs the e2e with it as a
+  home module behind a local stand-in for the VPC binding, stops it to check
+  the offline answer, and restarts the Worker with each module turned off.
+
+## v0.15.1 — 2026-11-02
+
+- `pk-cli-core`: `NO_COLOR` follows no-color.org — any non-empty value
+  disables color. `CommonArgs` read it through clap's `env`, which parses a
+  boolean, so the conventional `NO_COLOR=1` failed every command with a
+  usage error (exit 2). It is now the `--no-color` flag's default.
+  `example-cli`'s `tests/no_color.rs` runs the binary under each value.
+- `pk-cli-auth`: `GroMailbox::credential_ref` passes the ref to `gro` as
+  `<SERVICE>_CREDENTIAL_REF` in the child's environment
+  (`GOOGLE_READONLY_CREDENTIAL_REF` for `google-readonly/<profile>`), which
+  gro 1.x and 2.x both read. It passed `--ref`, which gro 2.x rejects, so a
+  named mailbox profile failed every look. The ref must now be
+  `<service>/<profile>`.
+- `pk-cli-auth`: the code extractor treats "one-time" as introducing a code,
+  so an email reading "your one-time password is: 123456" yields its code
+  even when it carries other code-length numbers.
+
+## v0.15.0 — 2026-11-02
+
+- **`pk-cli-mcp` feature `http`** (includes `stdio`): `<bin> mcp --http
+  --port <PORT>` serves the CLI's tools over stateless Streamable HTTP
+  (rmcp's service on a hyper HTTP/1.1 listener, JSON answers, no sessions)
+  for the connector's "home" modules, which reach a portal CLI on the
+  user's own computer through their Cloudflare Tunnel. It binds 127.0.0.1
+  only; refuses to start without a bearer token (32 or more visible ASCII
+  characters, from `<BIN>_MCP_TOKEN` or the keychain item `mcp-http-token`
+  under `piekstra.<bin>`); checks the token in constant time, `Host`
+  (127.0.0.1 or localhost, its own port if one is named) and refuses any
+  request with an `Origin`; answers only `POST /mcp`, with no CORS headers;
+  serves only read-only tools unless `--allow-writes`; and answers a call
+  still running after 120 s with an error (a read may be retried; a
+  write's outcome is reported as unknown, to be checked before any retry).
+  `<bin> mcp --new-token` saves 256 random bits as the token, reads them
+  back, and prints them once for the Worker's secret; it will not replace
+  a saved token without `--overwrite`. A CLI turns the feature on;
+  `McpArgs` and `run` carry the rest. `example-cli` serves it, and
+  `tests/mcp_http.rs` drives the binary over HTTP through every refusal.
+- `pk-cli-secrets`: `SecretSpec::remedy` names how to store a secret again,
+  for the error when its keychain item is empty (default `auth login
+  --overwrite`, right for a sign-in credential; `mcp --http`'s token names
+  `mcp --new-token --overwrite`).
+- `pk-cli-mcp`: `McpArgs` is `#[non_exhaustive]`, so its shape no longer
+  depends on a feature: build it with clap or `McpArgs::default()`, not a
+  struct literal. (Breaking for a struct literal; no family CLI uses one.)
+- `connector/`: the deploy-your-own Cloudflare Worker that serves
+  official-API CLIs' MCP tools to Claude on the web and mobile, replacing
+  the spike in #36. Each user deploys it into their own Cloudflare account
+  with the Deploy to Cloudflare button; their provider keys are the Worker's
+  secrets. It pins each CLI's released module by URL and SHA-256
+  (`modules.json`) and its build fetches and verifies them; no binary is
+  committed. Only the owner's passphrase (20 characters or more; ten wrong
+  tries an hour lock the page) connects a client, over OAuth with dynamic
+  registration and PKCE, and authorization codes go only to Claude's
+  callback, loopback, or `EXTRA_REDIRECT_URIS`. Each grant records which
+  passphrase approved it, so changing the passphrase ends every connection;
+  `/revoke` disconnects every client without changing it. Serves coinbase-cli's two tools from its v0.3.0 module. README:
+  walkthrough and threat model.
+- `make connector-check` and CI's `connector` job: the host copy matches
+  `js/pk-host.ts`, typecheck, unit tests, and the OAuth and MCP flow end to
+  end under `wrangler dev --local` against a JWT-checking mock, including a
+  passphrase change.
+
+## v0.14.0 — 2026-11-02
+
+Additive: new modules, a new feature and a new example crate. One move:
+`block_on` now lives in `pk-cli-core` (`pk_cli_core::block_on`);
+`pk_cli_mcp::block_on` (feature `test-util`) re-exports it, so existing
+callers are unchanged.
+
+- **`pk-cli-core::transport`** — the seam a provider client is written
+  against so the same client runs in the terminal binary and in the
+  deploy-your-own Worker: `HttpRequest` (builder; `query` percent-encodes
+  everything but RFC 3986's unreserved characters; `user_agent(bin,
+  version)` for the family's `User-Agent`; `origin()`, without userinfo),
+  `HttpResponse` (status, headers shaped as `fetch` gives them, and body
+  text; `new`, `header_value`),
+  both `#[non_exhaustive]` with a `Debug` that shows no header value, query
+  or body; the async `Transport` trait with no `Send` bound and one contract
+  for every implementation: no redirects followed (a 3xx comes back with its
+  `Location`), no state or default headers between sends, and a request
+  with no HTTP answer is
+  `CliError::Upstream` naming the origin only; and `PlatformSigner`
+  (`sign_es256`: ECDSA P-256 / SHA-256 by the platform's own crypto, `None`
+  where it has none), a separate trait so a wrapper around a transport
+  cannot drop it unnoticed. Both implemented for `&T`. Builds for
+  `wasm32-unknown-unknown`. `pk_cli_core::block_on` drives a blocking
+  transport's futures, which finish on their first poll.
+- **`pk-cli-http::BlockingTransport`** — the family's blocking `reqwest`
+  client behind `Transport` and `PlatformSigner` (always `None`). `new()`
+  keeps the transport contract (no redirects, cookie store or default
+  headers; a 60 s timeout); `with_client` takes a client that must do the
+  same. Repeated response headers are joined as `fetch` joins them.
+- **`pk-cli-mcp` feature `wasm`** (no dependencies) — a `Toolset` as a
+  self-contained WebAssembly module for the deploy-your-own Worker
+  (DESIGN.md §1.9 path B, §2.3):
+  - `export_wasm!(factory)` exports ABI version 1, documented in
+    `src/wasm/mod.rs`. A module imports only five `pk_host` functions
+    (`now_ms`, `random`, `fetch`, `sign_es256`, `log`) and exports
+    `pk_describe` (serverInfo, instructions, tools) and
+    `pk_call`/`pk_poll`/`pk_complete`/`pk_drop`, which run a `tools/call` as
+    a task the host polls while it settles the operations the task started,
+    with several calls in flight at once. No `wasm-bindgen`: a module is one
+    `.wasm` with no JavaScript glue, so a release ships one file pinned by
+    its SHA-256, and one host serves every module.
+  - The factory builds the toolset from the host's per-call config JSON;
+    every instruction and auth remedy the module sends has the Worker's
+    wording (`Server::hosted`: the credentials are Worker secrets).
+  - `HostTransport`: the host's `fetch` (redirects never followed; the
+    response headers come back framed ahead of the body) behind
+    `Transport`, and its WebCrypto ES256 behind `PlatformSigner`, `None`
+    where the host has no WebCrypto ECDSA. `fill_random` and `now_ms` replace
+    `getrandom` and `SystemTime`, which do not work on
+    `wasm32-unknown-unknown` without `wasm-bindgen`. `log` writes to the
+    Worker's logs; a panic is logged before the module traps.
+  - `js/pk-host.ts`, the reference host: checks a module's imports, exports
+    and ABI version, runs calls concurrently, caches imported keys per
+    isolate, and replaces an instance that traps with a fresh one. Plain
+    TypeScript that Node 22.18+ runs and wrangler bundles as is.
+  - With `test-util`, `wasm::testing::{call, describe}` run a Worker
+    toolset natively through the same ABI functions, the test answering
+    each `fetch` and signature.
+- `pk-cli-core`: `CliError` is `Clone`, `PartialEq` and `Eq`, so a
+  provider client that failed to build can hand every call the same error.
+- `pk-cli-mcp`: `impl Toolset for &T`.
+- **`pk-cli-mcp-wasm-demo`** (new, not published): a toolset exported as a
+  module. `make wasm-host-check` builds it for wasm32 the way a CLI's
+  release does and runs `js/pk-host.test.ts` over it in Node: fetch,
+  WebCrypto signatures verified against the public key, concurrent
+  operations and calls, the clock and random source, a panic survived, and
+  the error kinds.
+- `make wasm-check` also lints `pk-cli-core` and `pk-cli-mcp --features
+  wasm` for wasm32; `make mcp-check` lints the `wasm` feature natively; CI
+  sets up Node 24 and runs `make wasm-host-check`.
 
 ## v0.12.0 — 2026-11-02
 
