@@ -160,8 +160,8 @@ for `M1` (the module's name is its tools' prefix: `m1_…` is `M1`,
    it once. Keep it for step 7. To replace it later:
    `m1f mcp --new-token --overwrite`.
 3. **Run the server** and leave it running: `m1f mcp --http --port 8731`.
-   It prints one line when it is serving, and refuses to start without the
-   token. To start it at login on macOS, save this as
+   It prints one line when it is serving, naming its version, and refuses to
+   start without the token. To start it at login on macOS, save this as
    `~/Library/LaunchAgents/com.piekstra.m1f-mcp-http.plist` (put the output
    of `which m1f` in the first string, and your home folder in the log path):
 
@@ -248,6 +248,13 @@ made for you holds a copy of `modules.json`. Change that module's `url` to the
 new release's `<bin>-mcp-<version>.wasm` and its `sha256` to the value in the
 release's `<bin>-mcp-<version>.wasm.sha256`, then commit. Cloudflare rebuilds
 and redeploys.
+
+**A new release of a CLI with a home module.** `m1f self-update` replaces
+the binary on disk, but a running server keeps the old code, and launchd
+restarts it only when it exits. Restart it:
+`launchctl kickstart -k gui/$(id -u)/com.piekstra.m1f-mcp-http`. The new
+server's line in `~/Library/Logs/m1f-mcp-http.log` names its version. A new
+binary may ask once more to read its keychain items; choose **Always Allow**.
 
 **A new version of this connector.** Your repository is a copy of this
 folder, at its root, with no shared history, so an update is a copy rather

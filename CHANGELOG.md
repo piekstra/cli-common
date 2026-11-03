@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.17.0 — 2026-11-03
+
+- `pk-cli-auth`: `refresh_lock::RefreshLock`, for a provider that rotates
+  refresh tokens. All of a CLI's processes share one keychain item, so an
+  in-process mutex does not stop `<bin> mcp --http` and a terminal command
+  presenting the same token, and a provider may revoke the session for it.
+  `renew` reads the stored session under an exclusive advisory lock, asks the
+  caller's `due` whether it still needs renewing, and only then posts the
+  grant; `hold` wraps a login's or logout's keychain write. The lock is an
+  empty file, `~/.config/<bin>/token-refresh.lock`, whatever `--config` or
+  `XDG_CONFIG_HOME` say. The wait is bounded (75 s, then exit 5 naming the
+  lock). The crate now needs Rust 1.89 (`File::try_lock`).
+- `pk-cli-selfupdate`: `Updater::run_noting` prints a note after an install.
+  `run` is unchanged.
+- `pk-cli-mcp`: `<bin> mcp --http`'s start line names the version, and
+  `restart_note(bin)` is the note for `run_noting`: a running server keeps the
+  old code after `self-update`, with the `launchctl kickstart -k` line on macOS.
+  `example-cli` uses both; the connector's README has the step.
+- `conformance.md`: renewals under the lock; for a home module, the restart
+  note and what its `SECURITY.md` must say about the token, the Worker's copy,
+  what crosses Cloudflare, and revoking.
+- `DESIGN.md`: the `--no-color` row says how `NO_COLOR` is read.
+
 ## v0.16.0 — 2026-11-03
 
 Behaviour change in `pk-cli-browser`: a sign-in now runs in a profile each

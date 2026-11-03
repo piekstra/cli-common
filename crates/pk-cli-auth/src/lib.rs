@@ -5,6 +5,7 @@
 
 pub mod otp;
 pub mod reauth;
+pub mod refresh_lock;
 pub mod token;
 
 use pk_cli_core::output;
