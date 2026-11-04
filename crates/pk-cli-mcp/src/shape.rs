@@ -146,7 +146,7 @@ impl PositionKey {
     /// who tries candidates, and it does not need to: a cursor goes to the client that could
     /// ask for `detailed`. Rows with the same `sort` run in the order of those fingerprints, a
     /// fixed order and not a meaningful one. A timestamp in `sort` keeps a day's rows in time
-    /// order.
+    /// order, and belongs there only when some format of the tool shows it.
     pub fn new(sort: impl Into<String>, id: &str) -> Self {
         let mut sort = sort.into();
         cut_sort(&mut sort);

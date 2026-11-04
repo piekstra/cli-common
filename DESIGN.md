@@ -559,7 +559,8 @@ WebCrypto) in B, behind a provider seam the toolset awaits (§2.3).
 - **A queue gives up in time.** A server that takes calls one at a time holds its turn with
   `pk_cli_mcp::hold_within`, whose wait leaves room to answer inside 120 s, so a call behind a
   slow one says so instead of being answered at the limit with nobody told why. A plain
-  `Mutex::lock` has no such bound.
+  `Mutex::lock` has no such bound. A call that reads more than once holds one turn for the whole
+  call: a turn per read spends the wait once per read, and the call can pass the limit anyway.
 - **Stable.** `tools/list` returns the same tools in the same order every
   time (clients cache it and it is part of the prompt), and listing touches
   no credential, file or network: a client lists tools before anyone has
