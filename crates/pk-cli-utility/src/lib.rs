@@ -80,7 +80,8 @@ impl UtilitySummary {
 /// One bill/statement (`statement/v1`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Statement {
-    /// Provider identifier — used by `bills get <ID>`.
+    /// Provider identifier — used by `bills get <ID>`. A tool's cursor holds it, so it stays the
+    /// same while the bill exists: a provider with two ids for one bill builds one from the bill.
     pub id: String,
     /// Issue date, ISO `YYYY-MM-DD`.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -165,7 +165,6 @@ section names its port and connector secret, for the steps below:
 
 | CLI | Tools | Port | Connector secret |
 |---|---|---|---|
-| `fpl` | `fpl_…` | 8732 | `HOME_FPL_TOKEN` |
 | `xfin` | `xfinity_…` | 8733 | `HOME_XFINITY_TOKEN` |
 | `lrfl` | `loxahatchee_…` | 8734 | `HOME_LOXAHATCHEE_TOKEN` |
 | `tojfl` | `jupiter_…` | 8735 | `HOME_JUPITER_TOKEN` |
@@ -173,6 +172,7 @@ section names its port and connector secret, for the steps below:
 | `nlnt` | `nelnet_…` | 8737 | `HOME_NELNET_TOKEN` |
 | `chse` | `chase_…` | 8738 | `HOME_CHASE_TOKEN` |
 | `lofty` | `lofty_…` | 8739 | `HOME_LOFTY_TOKEN` |
+| `fpl` | `fpl_…` | 8740 | `HOME_FPL_TOKEN` |
 | `cpmfl` | `campbell_…` | 8750 | `HOME_CAMPBELL_TOKEN` |
 | `rpmfl` | `rpm_…` | 8751 | `HOME_RPM_TOKEN` |
 | `lofty-pm` | `loftypm_…` | 8752 | `HOME_LOFTYPM_TOKEN` |

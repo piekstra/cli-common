@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Docs: `auth logout --forget` attempts every step and owes `stop_note` even when another fails;
+  an error quotes no URL's query; a call that reads more than once holds one turn; `PositionKey`'s
+  sort holds a timestamp only when the tool shows one, and its id is required and stays the same
+  while the row exists; fpl's connector port is 8740; nelnet ships Windows; the status rows of
+  lofty, xfin, fpl, lrfl and tojfl.
+
 ## v0.28.0 — 2026-11-03
 
 - `pk-cli-mcp`: `ResumeRequest`, for a list the provider reads on from a position (an id or a
