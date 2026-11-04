@@ -338,6 +338,33 @@ fn stop_note_for(bin: &str, launchd: bool) -> String {
     )
 }
 
+/// The note for an `auth logout --forget` that got an answer about [`HTTP_TOKEN_ACCOUNT`], which
+/// every such logout owes whoever ran it. A removed item gets [`stop_note`]. With no item a server
+/// can still be running on `$<BIN>_MCP_TOKEN`, which the logout cannot see, so this claims no
+/// removal and says what would end that server.
+pub fn forget_note(bin: &str, token_removed: bool) -> String {
+    forget_note_for(bin, token_removed, cfg!(target_os = "macos"))
+}
+
+fn forget_note_for(bin: &str, token_removed: bool, launchd: bool) -> String {
+    if token_removed {
+        return stop_note_for(bin, launchd);
+    }
+    let var = token_env_var(bin);
+    let stop = if launchd {
+        format!(
+            " Under the launchd agent from cli-common's connector/ README:\n  \
+             launchctl bootout gui/$(id -u)/com.piekstra.{bin}-mcp-http"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "note: the keychain held no `{bin} mcp --http` token. A running `{bin} mcp --http` with \
+         one in ${var} keeps accepting it until it stops: stop it, and unset that variable.{stop}"
+    )
+}
+
 /// Serve on 127.0.0.1:`port` until the process is stopped.
 fn serve<T: Toolset + Send + Sync + 'static>(
     toolset: Scoped<T>,
@@ -606,6 +633,28 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../connector/README.md");
         let readme = std::fs::read_to_string(readme).unwrap();
         assert!(readme.contains(bootout));
+    }
+
+    #[test]
+    fn a_forget_that_removed_the_token_owes_the_stop_note() {
+        assert_eq!(
+            forget_note_for("m1f", true, false),
+            stop_note_for("m1f", false)
+        );
+    }
+
+    /// A server on the variable never touched the keychain item, so it is still running whatever
+    /// the delete found.
+    #[test]
+    fn a_forget_with_no_token_item_still_speaks_to_a_server_on_the_variable() {
+        let note = forget_note_for("m1f", false, false);
+        assert!(note.contains("held no `m1f mcp --http` token"), "{note}");
+        assert!(!note.contains("removed"), "{note}");
+        assert!(note.contains("$M1F_MCP_TOKEN"), "{note}");
+        assert!(note.contains("stop it, and unset"), "{note}");
+        assert!(!note.contains("launchctl"), "{note}");
+        let bootout = "launchctl bootout gui/$(id -u)/com.piekstra.m1f-mcp-http";
+        assert!(forget_note_for("m1f", false, true).contains(bootout));
     }
 
     #[test]
