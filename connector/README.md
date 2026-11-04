@@ -158,7 +158,9 @@ credential and reads the CSV files in a folder you name. So do `cpmfl`, `rpmfl` 
 whose portal session stays on your computer, and `lofty-pm`, which reads the local store
 its `scan` fills from your email. So do `govee`, whose API key stays on your computer, and
 `tplc` and `ghome`, whose session or credential stays on your computer, and `myq`, which works a
-door through the myQ app on an Android phone connected to your computer. Each README's "Use with Claude"
+door through the myQ app on an Android phone connected to your computer. So do `wx`, `pbca` and
+`tgt`, which read public data with no credential, and `discord` and `rhap`, whose bot token or
+session stays on your computer and whose tools only read. Each README's "Use with Claude"
 section names its port and connector secret, for the steps below:
 
 | CLI | Tools | Port | Connector secret |
@@ -179,6 +181,11 @@ section names its port and connector secret, for the steps below:
 | `tplc` | `tplink_…` | 8761 | `HOME_TPLINK_TOKEN` |
 | `ghome` | `ghome_…` | 8762 | `HOME_GHOME_TOKEN` |
 | `myq` | `myq_…` | 8763 | `HOME_MYQ_TOKEN` |
+| `wx` | `wx_…` | 8770 | `HOME_WX_TOKEN` |
+| `pbca` | `pbca_…` | 8771 | `HOME_PBCA_TOKEN` |
+| `discord` | `discord_…` | 8772 | `HOME_DISCORD_TOKEN` |
+| `rhap` | `rhap_…` | 8773 | `HOME_RHAP_TOKEN` |
+| `tgt` | `tgt_…` | 8774 | `HOME_TGT_TOKEN` |
 
 The tools work while the computer is awake, signed in to the CLI, and
 running both the CLI's server and `cloudflared`. When it is not, those tools
