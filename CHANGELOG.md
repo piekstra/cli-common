@@ -8,6 +8,19 @@
   while the row exists; fpl's connector port is 8740; nelnet ships Windows; the status rows of
   lofty, xfin, fpl, lrfl and tojfl.
 
+## v0.29.0 — 2026-11-04
+
+- `pk-cli-mcp`: `ReadBudget` and `READ_BUDGET`, one call's time to read a list a page at a time,
+  on both clocks. `check` answers `usage` naming the arguments that shorten the read, or `upstream`
+  if none can; `is_spent` is for a tool that reports `complete: false` instead. Moved from rpm-fl-cli
+  and schwab-cli, which each carried one.
+- `pk-cli-mcp`: `RowsSeen`, the rows an offset walk has returned, so a row a later page repeats is
+  met once. Moved from rpm-fl-cli. A row is the same when every field is, apart from any named with
+  `ignoring`.
+- `pk-cli-mcp`: `forget_note(bin, token_removed)`, what `auth logout --forget` owes with or without
+  a keychain item, since a server on `$<BIN>_MCP_TOKEN` never had one. With an item it is
+  `stop_note`. Moved from the `forget_line` in rpm-fl-cli and campbell-property-management-hoa-cli.
+
 ## v0.28.0 — 2026-11-03
 
 - `pk-cli-mcp`: `ResumeRequest`, for a list the provider reads on from a position (an id or a

@@ -94,6 +94,7 @@ pub mod result;
 pub mod shape;
 pub mod tool;
 pub mod toolset;
+pub mod walk;
 
 #[cfg(feature = "stdio")]
 mod adapter;
@@ -115,7 +116,7 @@ pub use deadline::{hold_within, SystemClock};
 pub use deadline::{Clock, SendDeadline, CALL_LIMIT};
 pub use error::{ErrorKind, ToolError};
 #[cfg(feature = "http")]
-pub use http::{restart_note, stop_note, HTTP_TOKEN_ACCOUNT};
+pub use http::{forget_note, restart_note, stop_note, HTTP_TOKEN_ACCOUNT};
 /// `pk_cli_core::block_on`, re-exported for a CLI's tests.
 #[cfg(feature = "test-util")]
 pub use pk_cli_core::block_on;
@@ -129,6 +130,7 @@ pub use toolset::{
     call_tool, call_tool_json, instructions, parse_args, tools_list, tools_list_json, Server,
     Toolset, UnknownTool,
 };
+pub use walk::{ReadBudget, RowsSeen, READ_BUDGET};
 
 /// `schemars`, re-exported for its traits. A CLI deriving `JsonSchema` on
 /// its argument and result structs also depends on `schemars = "1"` itself
