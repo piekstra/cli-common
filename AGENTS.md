@@ -108,6 +108,17 @@ with a fixed pidfile and launch command. Usage, exit codes and wiring are in
 README.md, "Self-view for family desktop apps". Its macOS effects live in
 `scripts/lib/*.swift`, and each has a test seam (`SELF_VIEW_*`).
 
+## Review agents
+
+`.codereview/agents/cli-family/contract` reviews changes against the rules
+above — frozen exit codes, `/v1` schema edits, secret ingestion, and behavior
+that belongs here rather than in a downstream CLI. It deliberately does not
+review Rust quality; the shared `rust:implementation` lane in
+`cr-reviewer-catalog` does that, for every Rust repo rather than only this one.
+
+Agent directories are not auto-discovered. A `cr` profile must list this path
+in `agent_sources`, alongside the catalog, or neither reviewer runs.
+
 ## Workflow
 
 - `make verify` (format check, clippy `-D warnings`, tests,
