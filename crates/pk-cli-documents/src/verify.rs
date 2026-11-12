@@ -9,9 +9,11 @@
 //! login page, an S3 XML error, or a DRF JSON error body — and "downloaded
 //! 1,204 bytes" of an error page is exactly the lie [`verify_download`]
 //! exists to prevent. Providers also ship more than PDFs: a brokerage's
-//! consolidated 1099 season produces a PDF *and* a CSV export, and older
-//! statements can be HTML, so the check keys off the provider's declared
-//! filetype rather than assuming `%PDF`.
+//! consolidated 1099 season produces a PDF *and* a CSV export, older
+//! statements can be HTML, and portals and scanners hand over PNG, JPEG,
+//! TIFF and HEIC images, so the check keys off the provider's declared
+//! filetype rather than assuming `%PDF`. A file that arrives with no
+//! declared type can be named from its head by [`sniff`].
 //!
 //! **Provider strings don't get to shape paths.** Anything a provider
 //! controls that ends up in a filename — a document type, a filetype, a
@@ -29,6 +31,13 @@ use pk_cli_core::CliError;
 /// - An **empty body fails** for every declared type; nothing is a document.
 /// - `None` or `"pdf"` → the strict [`verify_pdf`] magic check — the right
 ///   default for a document tool when the provider doesn't say.
+/// - An image type → that format's magic bytes at the start of the body:
+///   `"png"` the 8-byte PNG signature (`89 50 4E 47 0D 0A 1A 0A`);
+///   `"jpg"`/`"jpeg"` `FF D8 FF`; `"tif"`/`"tiff"` `II*\0` or `MM\0*`
+///   (`49 49 2A 00`, `4D 4D 00 2A`); `"heic"`/`"heif"` an ISO-BMFF `ftyp`
+///   box (bytes 4..8 `ftyp`) whose major brand (bytes 8..12) is one of
+///   `heic`, `heix`, `hevc`, `hevx`, `heim`, `heis`, `mif1`, `msf1`. A body
+///   shorter than its magic fails.
 /// - Any other declared type (`"csv"`, `"html"`, …) → the text check: the
 ///   inspected head must be valid UTF-8 (a binary blob under a text filetype
 ///   is some other lie; a multi-byte character cut by the inspection window
@@ -48,16 +57,87 @@ pub fn verify_download(bytes: &[u8], filetype: Option<&str>) -> Result<(), CliEr
     let label = filetype.map(str::to_ascii_lowercase);
     match label.as_deref() {
         None | Some("pdf") => verify_pdf(bytes),
+        Some("png") => verify_magic(bytes, is_png, "a PNG"),
+        Some("jpg" | "jpeg") => verify_magic(bytes, is_jpeg, "a JPEG"),
+        Some("tif" | "tiff") => verify_magic(bytes, is_tiff, "a TIFF"),
+        Some("heic" | "heif") => verify_magic(bytes, is_heic, "a HEIC/HEIF image"),
         Some(other) => verify_text(bytes, other),
     }
 }
 
-/// The `%PDF` magic check. Split out so it is testable without a server.
-pub fn verify_pdf(bytes: &[u8]) -> Result<(), CliError> {
-    if bytes.starts_with(b"%PDF") {
+/// Name a body's format from its head, for a file that arrives with no
+/// declared type: `"pdf"`, `"png"`, `"jpeg"`, `"tiff"`, `"heic"` by the
+/// magic bytes [`verify_download`] checks, or `"xml"` for UTF-8 text that
+/// opens with markup (an optional byte-order mark and whitespace, then `<`)
+/// and is not what the text check reads as an HTML page (`<html`, or any
+/// `<!doctype`). Anything else is `None`.
+///
+/// Every name it returns is a filetype [`verify_download`] accepts the same
+/// body under, so `sniff` then `verify_download` is the check for an
+/// undeclared file. A sniffed type is a guess from the first bytes, not a
+/// validation of the whole file.
+pub fn sniff(bytes: &[u8]) -> Option<&'static str> {
+    if let Some((_, name)) = SNIFFED.iter().find(|(is, _)| is(bytes)) {
+        return Some(name);
+    }
+    let head = text_head(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes))?;
+    (head.starts_with('<') && !looks_like_html(&head)).then_some("xml")
+}
+
+/// Whether a body starts with one format's magic bytes.
+type Magic = fn(&[u8]) -> bool;
+
+/// What [`sniff`] names, by magic, each under a filetype [`verify_download`]
+/// checks with the same function.
+const SNIFFED: [(Magic, &str); 5] = [
+    (is_pdf, "pdf"),
+    (is_png, "png"),
+    (is_jpeg, "jpeg"),
+    (is_tiff, "tiff"),
+    (is_heic, "heic"),
+];
+
+fn verify_magic(bytes: &[u8], matches: Magic, label: &str) -> Result<(), CliError> {
+    if matches(bytes) {
         return Ok(());
     }
-    Err(not_the_document(bytes, "a PDF"))
+    Err(not_the_document(bytes, label))
+}
+
+fn is_pdf(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"%PDF")
+}
+
+fn is_png(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+}
+
+fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\xFF\xD8\xFF")
+}
+
+/// Little-endian (`II`) or big-endian (`MM`) byte order, then 42.
+fn is_tiff(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*")
+}
+
+/// The brands HEIC and HEIF stills and sequences declare as their major
+/// brand (ISO/IEC 23008-12).
+const HEIF_BRANDS: [&[u8; 4]; 8] = [
+    b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1",
+];
+
+/// An ISO-BMFF file opens with its `ftyp` box: a 4-byte size, `ftyp`, then
+/// the major brand.
+fn is_heic(bytes: &[u8]) -> bool {
+    bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && HEIF_BRANDS.iter().any(|brand| &bytes[8..12] == *brand)
+}
+
+/// The `%PDF` magic check. Split out so it is testable without a server.
+pub fn verify_pdf(bytes: &[u8]) -> Result<(), CliError> {
+    verify_magic(bytes, is_pdf, "a PDF")
 }
 
 /// Text formats (CSV, HTML, …) have no magic bytes, so the check is the
@@ -69,6 +149,27 @@ pub fn verify_pdf(bytes: &[u8]) -> Result<(), CliError> {
 /// error body are indistinguishable by shape, and refusing everything would
 /// make the type undownloadable.
 fn verify_text(bytes: &[u8], label: &str) -> Result<(), CliError> {
+    let Some(head) = text_head(bytes) else {
+        return Err(not_the_document(bytes, label));
+    };
+    // Any JSON object head, not just one provider's `{"detail"` spelling —
+    // `{"error"`, `{"message"`, and friends are equally common ways for an
+    // expired link to answer. No legitimate CSV/HTML/TSV body starts `{"`.
+    let looks_like_json = head.starts_with('{') && head.contains('"');
+    let looks_like_xml = head.starts_with("<?xml");
+    // The label was lowercased at the dispatch boundary; exact compares here.
+    if (looks_like_json && label != "json")
+        || (looks_like_xml && label != "xml")
+        || (looks_like_html(&head) && label != "html")
+    {
+        return Err(not_the_document(bytes, label));
+    }
+    Ok(())
+}
+
+/// The first 256 bytes as text, leading whitespace trimmed, lowercased;
+/// `None` when they are not UTF-8.
+fn text_head(bytes: &[u8]) -> Option<String> {
     let head_bytes = &bytes[..bytes.len().min(256)];
     let head = match std::str::from_utf8(head_bytes) {
         Ok(h) => h,
@@ -77,23 +178,13 @@ fn verify_text(bytes: &[u8], label: &str) -> Result<(), CliError> {
         Err(e) if e.error_len().is_none() => {
             std::str::from_utf8(&head_bytes[..e.valid_up_to()]).unwrap_or_default()
         }
-        Err(_) => return Err(not_the_document(bytes, label)),
+        Err(_) => return None,
     };
-    let head = head.trim_start().to_lowercase();
-    // Any JSON object head, not just one provider's `{"detail"` spelling —
-    // `{"error"`, `{"message"`, and friends are equally common ways for an
-    // expired link to answer. No legitimate CSV/HTML/TSV body starts `{"`.
-    let looks_like_json = head.starts_with('{') && head.contains('"');
-    let looks_like_xml = head.starts_with("<?xml");
-    let looks_like_html = head.starts_with("<!doctype") || head.starts_with("<html");
-    // The label was lowercased at the dispatch boundary; exact compares here.
-    if (looks_like_json && label != "json")
-        || (looks_like_xml && label != "xml")
-        || (looks_like_html && label != "html")
-    {
-        return Err(not_the_document(bytes, label));
-    }
-    Ok(())
+    Some(head.trim_start().to_lowercase())
+}
+
+fn looks_like_html(head: &str) -> bool {
+    head.starts_with("<!doctype") || head.starts_with("<html")
 }
 
 fn not_the_document(bytes: &[u8], label: &str) -> CliError {
@@ -217,6 +308,143 @@ mod tests {
         let mut straddle = vec![b'a'; 255];
         straddle.extend_from_slice("é more,data".as_bytes());
         assert!(verify_download(&straddle, Some("csv")).is_ok());
+    }
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+    const JPEG: &[u8] = b"\xFF\xD8\xFF\xE0\0\x10JFIF\0";
+    const TIFF_LE: &[u8] = b"II*\0\x08\0\0\0";
+    const TIFF_BE: &[u8] = b"MM\0*\0\0\0\x08";
+    const HEIC: &[u8] = b"\0\0\0\x18ftypheic\0\0\0\0mif1heic";
+    const LOGIN_PAGE: &[u8] = b"<!DOCTYPE html><html><body>Sign in";
+
+    /// A body with `brand` as its ISO-BMFF major brand.
+    fn bmff(brand: &[u8; 4]) -> Vec<u8> {
+        let mut body = b"\0\0\0\x18ftyp".to_vec();
+        body.extend_from_slice(brand);
+        body.extend_from_slice(b"\0\0\0\0mif1");
+        body
+    }
+
+    /// A real PNG, JPEG, TIFF or HEIC used to fail as "binary under a text
+    /// filetype". Every spelling of each image type, in any case, now gets
+    /// that format's magic check.
+    #[test]
+    fn images_pass_under_their_declared_type_in_any_case() {
+        for (body, types) in [
+            (PNG, &["png", "PNG"][..]),
+            (JPEG, &["jpg", "jpeg", "JPG", "Jpeg"][..]),
+            (TIFF_LE, &["tif", "tiff", "TIFF"][..]),
+            (TIFF_BE, &["tif", "tiff", "Tif"][..]),
+            (HEIC, &["heic", "heif", "HEIC", "HEIF"][..]),
+        ] {
+            for ft in types {
+                assert!(verify_download(body, Some(ft)).is_ok(), "{ft} {body:?}");
+            }
+        }
+        for brand in [
+            b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1",
+        ] {
+            assert!(
+                verify_download(&bmff(brand), Some("heic")).is_ok(),
+                "{brand:?}"
+            );
+        }
+    }
+
+    /// Another format's bytes, an error page, or a near miss on the magic
+    /// all fail, with the declared type named.
+    #[test]
+    fn an_image_with_the_wrong_magic_fails() {
+        for (ft, body, label) in [
+            ("png", JPEG, "a PNG"),
+            ("png", b"\x89PNG\r\n\x1a\x0a"[..7].as_ref(), "a PNG"),
+            ("png", b"\x89PNG\n\r\x1a\n\0".as_ref(), "a PNG"),
+            ("jpeg", PNG, "a JPEG"),
+            ("jpg", b"\xFF\xD8\xFE\xE0".as_ref(), "a JPEG"),
+            ("tiff", b"II\0*\x08\0\0\0".as_ref(), "a TIFF"),
+            ("tif", b"MM*\0\0\0\0\x08".as_ref(), "a TIFF"),
+            ("tiff", JPEG, "a TIFF"),
+            ("heic", TIFF_LE, "a HEIC/HEIF image"),
+            ("heic", &bmff(b"avif"), "a HEIC/HEIF image"),
+            ("heif", &bmff(b"isom"), "a HEIC/HEIF image"),
+            ("heic", b"ftypheic\0\0\0\0".as_ref(), "a HEIC/HEIF image"),
+        ] {
+            let err = verify_download(body, Some(ft)).unwrap_err();
+            assert_eq!(err.exit_code(), 5, "{ft} {body:?}");
+            assert!(
+                err.to_string()
+                    .contains(&format!("the download was not {label} (")),
+                "{err}"
+            );
+        }
+        for ft in ["png", "jpeg", "tiff", "heic"] {
+            let err = verify_download(LOGIN_PAGE, Some(ft)).unwrap_err();
+            assert!(err.to_string().contains("looks like an HTML page"), "{err}");
+        }
+    }
+
+    /// A body cut off inside its magic fails rather than panicking on a
+    /// slice past its end.
+    #[test]
+    fn a_body_shorter_than_its_magic_fails() {
+        for (ft, body) in [
+            ("png", &PNG[..7]),
+            ("jpeg", &JPEG[..2]),
+            ("tiff", &TIFF_LE[..3]),
+            ("tiff", &TIFF_BE[..3]),
+            ("heic", &HEIC[..11]),
+            ("heic", &HEIC[..6]),
+        ] {
+            assert!(verify_download(body, Some(ft)).is_err(), "{ft} {body:?}");
+        }
+        for ft in ["png", "jpg", "tif", "heif"] {
+            assert!(verify_download(b"", Some(ft)).is_err(), "{ft}");
+        }
+    }
+
+    #[test]
+    fn sniff_names_each_format_from_its_head() {
+        for (body, name) in [
+            (&b"%PDF-1.7\n..."[..], "pdf"),
+            (PNG, "png"),
+            (JPEG, "jpeg"),
+            (TIFF_LE, "tiff"),
+            (TIFF_BE, "tiff"),
+            (HEIC, "heic"),
+            (&bmff(b"mif1")[..], "heic"),
+            (&b"<?xml version=\"1.0\"?><ClinicalDocument/>"[..], "xml"),
+            (&b"\xEF\xBB\xBF\r\n  <?xml version=\"1.0\"?>"[..], "xml"),
+            (&b"<ClinicalDocument xmlns=\"urn:hl7-org:v3\">"[..], "xml"),
+            (&b"\n\t<feed/>"[..], "xml"),
+        ] {
+            assert_eq!(sniff(body), Some(name), "{body:?}");
+            // What `sniff` names, `verify_download` accepts.
+            assert!(verify_download(body, Some(name)).is_ok(), "{name} {body:?}");
+        }
+    }
+
+    #[test]
+    fn sniff_names_nothing_it_does_not_recognize() {
+        for body in [
+            &b""[..],
+            b"   \n",
+            b"\xEF\xBB\xBF",
+            LOGIN_PAGE,
+            b"  <HTML><body>error</body>",
+            b"{\"detail\":\"Not found.\"}",
+            b"1099-DIV,ACCOUNT NUMBER\n",
+            &PNG[..7],
+            &HEIC[..11],
+            &bmff(b"avif"),
+            b"%PD",
+            // Markup that is not UTF-8, or that the text check reads as an
+            // HTML page (any doctype), is not named `xml`.
+            b"<a>\xFF\xFE\0\x01",
+            b"<!DOCTYPE note SYSTEM \"note.dtd\"><note/>",
+            b"\xEF\xBB\xBF <!doctype html><html>",
+        ] {
+            assert_eq!(sniff(body), None, "{body:?}");
+        }
     }
 
     #[test]

@@ -389,9 +389,13 @@ Old spellings stay as hidden aliases for one major version (`bills download`,
 
 Two invariants, mechanized in the crate's `verify` module: fetched bytes go
 through `verify_download(bytes, declared_filetype)` **before** anything is
-written or a byte count reported (`%PDF` magic for PDFs; for text filetypes,
+written or a byte count reported (`%PDF` magic for PDFs; the format's magic
+bytes for PNG, JPEG, TIFF and HEIC/HEIF images; for text filetypes,
 rejection of the shapes an expired pre-signed link actually serves — an HTML
-login page, an XML error, a JSON error object); and **every**
+login page, an XML error, a JSON error object), and a file that arrives with
+no declared type can be named from its head by `sniff(bytes)` (`pdf`, `png`,
+`jpeg`, `tiff`, `heic` or `xml`, each a type `verify_download` accepts the
+same body under); and **every**
 provider-controlled component of a filename — the portal's `file`, a type, a
 filetype, a date, an id — goes through `fs_safe` before it joins a path, so a
 crafted response can neither traverse out of the output directory nor fake

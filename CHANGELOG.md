@@ -7,6 +7,13 @@
   sort holds a timestamp only when the tool shows one, and its id is required and stays the same
   while the row exists; fpl's connector port is 8740; nelnet ships Windows; the status rows of
   lofty, xfin, fpl, lrfl and tojfl.
+- `pk-cli-documents`: `verify_download` checks images by their magic bytes: `png`, `jpg`/`jpeg`,
+  `tif`/`tiff` and `heic`/`heif` (an ISO-BMFF `ftyp` box with a HEIF major brand), in any case.
+  A real image under one of those types used to fail as binary under a text filetype. A body
+  shorter than its magic fails. `sniff(bytes)` names a body's format from its head (`pdf`, `png`,
+  `jpeg`, `tiff`, `heic`, or `xml` for UTF-8 text that opens with markup and is not an HTML page),
+  for a file with no declared type; `verify_download` accepts every body under the type `sniff`
+  gives it.
 
 ## v0.29.0 — 2026-11-04
 
