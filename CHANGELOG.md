@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.31.0 — 2026-11-12
 
 - `pk-cli-mcp`: requires rmcp 3.9, up from 3.8. v0.30.0 moved this repository's lockfile to
   rmcp 3.9.0 (RUSTSEC-2026-0462); with the requirement raised, a CLI's own lockfile moves too
@@ -13,6 +13,13 @@
   trailing `/`, `.` or `..`) is refused with exit 2 before anything runs, and a folder is never
   removed: a mount refuses one with exit 2, and rclone, which answers a folder as no file, gives
   `false`.
+- `pk-cli-documents`: `verify_download` checks images by their magic bytes: `png`, `jpg`/`jpeg`,
+  `tif`/`tiff` and `heic`/`heif` (an ISO-BMFF `ftyp` box with a HEIF major brand), in any case.
+  A real image under one of those types used to fail as binary under a text filetype. A body
+  shorter than its magic fails. `sniff(bytes)` names a body's format from its head (`pdf`, `png`,
+  `jpeg`, `tiff`, `heic`, or `xml` for UTF-8 text that opens with markup and is not an HTML page),
+  for a file with no declared type; `verify_download` accepts every body under the type `sniff`
+  gives it.
 
 ## v0.30.0 — 2026-11-12
 

@@ -36,7 +36,7 @@ use serde_json::Value;
 pub mod verify;
 
 pub use pk_cli_core::{Paged, RangeArgs};
-pub use verify::{fs_safe, verify_download, verify_pdf};
+pub use verify::{fs_safe, sniff, verify_download, verify_pdf};
 
 /// Profile identifier for `cli-info/v1` `profiles`.
 pub const PROFILE: &str = "documents/v1";
