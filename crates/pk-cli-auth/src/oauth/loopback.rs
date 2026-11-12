@@ -105,31 +105,44 @@ impl LoopbackListener {
     /// page saying whether to return to the terminal. The answer is checked as
     /// [`super::code_from_callback`] says. One that is not this sign-in's (no
     /// `state`, another one, a repeated parameter: a reloaded old tab, or a page
-    /// elsewhere sending the browser here) gets the failure page and the wait
-    /// goes on, with a line on stderr saying so (a provider that leaves `state`
-    /// off its error may be answering this sign-in, and its refusal is named).
-    /// Past `timeout` this is [`CliError::Auth`], naming the last such answer:
-    /// nobody finished signing in, and signing in again is the fix.
+    /// elsewhere sending the browser here) gets a page saying so and the wait
+    /// goes on. Past `timeout` this is [`CliError::Auth`], naming the last such
+    /// answer: nobody finished signing in, and signing in again is the fix.
+    ///
+    /// Nothing is printed; [`Self::wait_for_code_with`] lets a CLI say on its
+    /// own output that an answer was refused while the wait goes on.
     pub fn wait_for_code(
         &self,
         expected_state: &str,
         expected_issuer: Option<&str>,
         timeout: Duration,
     ) -> Result<Secret, CliError> {
+        self.wait_for_code_with(expected_state, expected_issuer, timeout, |_| {})
+    }
+
+    /// [`Self::wait_for_code`], calling `on_refused` with the reason (no
+    /// remedy: the wait is still going) each time an answer that is not this
+    /// sign-in's is refused. A provider that leaves `state` off its error may be
+    /// answering this sign-in, and its refusal is named, so a CLI that prints
+    /// this lets the person stop rather than wait out the timeout.
+    pub fn wait_for_code_with(
+        &self,
+        expected_state: &str,
+        expected_issuer: Option<&str>,
+        timeout: Duration,
+        mut on_refused: impl FnMut(&str),
+    ) -> Result<Secret, CliError> {
         let deadline = Instant::now() + timeout;
         let (sender, answers) = mpsc::channel::<Callback>();
-        let mut not_ours: Option<CliError> = None;
+        let mut not_ours: Option<String> = None;
         loop {
             loop {
                 match answers.try_recv() {
                     Ok(Callback::Code(code)) => return Ok(code),
                     Ok(Callback::Refused(err)) => return Err(err),
-                    Ok(Callback::NotThisSignIn(err)) => {
-                        eprintln!(
-                            "{err}\nStill waiting for this sign-in; press Ctrl-C to stop and \
-                             start again."
-                        );
-                        not_ours = Some(err);
+                    Ok(Callback::NotThisSignIn(reason)) => {
+                        on_refused(&reason);
+                        not_ours = Some(reason);
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -154,7 +167,7 @@ impl LoopbackListener {
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
                         let also = not_ours
-                            .map(|err| format!(" (the last answer was refused: {err})"))
+                            .map(|reason| format!(" (the last answer was refused: {reason})"))
                             .unwrap_or_default();
                         return Err(CliError::Auth(format!(
                             "no sign-in answer reached {} within {}{also}. Sign in again",
@@ -403,6 +416,30 @@ mod tests {
             "{forged}"
         );
         assert!(answer.contains("signed in"), "{answer}");
+    }
+
+    #[test]
+    fn a_refused_answer_is_reported_while_the_wait_goes_on() {
+        let listener = LoopbackListener::bind("pk-test").unwrap();
+        let port = listener.port();
+        let browser = std::thread::spawn(move || {
+            send(port, &get("/callback?error=access_denied"));
+            send(port, &get("/callback?code=new&state=S"))
+        });
+        let mut reported = Vec::new();
+        let code = listener
+            .wait_for_code_with("S", None, Duration::from_secs(20), |reason| {
+                reported.push(reason.to_string())
+            })
+            .unwrap();
+        assert_eq!(code.expose(), "new");
+        browser.join().unwrap();
+        assert_eq!(reported.len(), 1, "{reported:?}");
+        assert!(
+            reported[0].contains("refused a sign-in: access_denied"),
+            "{reported:?}"
+        );
+        assert!(!reported[0].contains("Sign in again"), "{reported:?}");
     }
 
     #[test]

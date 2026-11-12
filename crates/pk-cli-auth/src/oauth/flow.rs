@@ -126,8 +126,22 @@ impl PendingAuthorization {
 
     /// Wait for the code ([`LoopbackListener::wait_for_code`]).
     pub fn wait_for_code(&self, timeout: Duration) -> Result<Secret, CliError> {
-        self.listener
-            .wait_for_code(self.state.expose(), self.issuer.as_deref(), timeout)
+        self.wait_for_code_with(timeout, |_| {})
+    }
+
+    /// Wait for the code, told of each refused answer
+    /// ([`LoopbackListener::wait_for_code_with`]).
+    pub fn wait_for_code_with(
+        &self,
+        timeout: Duration,
+        on_refused: impl FnMut(&str),
+    ) -> Result<Secret, CliError> {
+        self.listener.wait_for_code_with(
+            self.state.expose(),
+            self.issuer.as_deref(),
+            timeout,
+            on_refused,
+        )
     }
 
     /// The exchange for `code`, with this sign-in's redirect and verifier.

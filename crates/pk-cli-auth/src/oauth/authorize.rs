@@ -138,7 +138,8 @@ pub fn code_from_callback(
 ) -> Result<Secret, CliError> {
     match check_callback(target, expected_state, expected_issuer) {
         Callback::Code(code) => Ok(code),
-        Callback::Refused(err) | Callback::NotThisSignIn(err) => Err(err),
+        Callback::Refused(err) => Err(err),
+        Callback::NotThisSignIn(reason) => Err(CliError::Auth(format!("{reason}. Sign in again"))),
     }
 }
 
@@ -150,8 +151,9 @@ pub(crate) enum Callback {
     /// issuer, no code.
     Refused(CliError),
     /// Not provably this sign-in's: no `state`, another one, or a repeated
-    /// parameter. The wait goes on.
-    NotThisSignIn(CliError),
+    /// parameter. The wait goes on; this says why, with no remedy, since the
+    /// remedy depends on whether the wait is still going.
+    NotThisSignIn(String),
 }
 
 pub(crate) fn check_callback(
@@ -168,10 +170,10 @@ pub(crate) fn check_callback(
     let params = parse_query(query);
     for (i, (name, _)) in params.iter().enumerate() {
         if params[..i].iter().any(|(earlier, _)| earlier == name) {
-            return Callback::NotThisSignIn(CliError::Auth(format!(
-                "the sign-in's answer carried `{}` more than once; refusing it. Sign in again",
+            return Callback::NotThisSignIn(format!(
+                "the sign-in's answer carried `{}` more than once; refusing it",
                 printable(name)
-            )));
+            ));
         }
     }
     let one = |name: &str| {
@@ -184,11 +186,11 @@ pub(crate) fn check_callback(
     match one("state") {
         Some(state) if constant_time_eq(state.as_bytes(), expected_state.as_bytes()) => {}
         Some(_) => {
-            return Callback::NotThisSignIn(CliError::Auth(
+            return Callback::NotThisSignIn(
                 "the sign-in's answer carried a different `state`; refusing it as a possible \
-                 cross-site request forgery. Sign in again"
+                 cross-site request forgery"
                     .into(),
-            ))
+            )
         }
         None => {
             // A server that leaves `state` off its error may be answering this
@@ -202,10 +204,10 @@ pub(crate) fn check_callback(
                     printable(error)
                 )
             });
-            return Callback::NotThisSignIn(CliError::Auth(format!(
-                "the sign-in's answer carried no `state`; refusing it{}. Sign in again",
+            return Callback::NotThisSignIn(format!(
+                "the sign-in's answer carried no `state`; refusing it{}",
                 error.unwrap_or_default()
-            )));
+            ));
         }
     }
     if let (Some(expected), Some(iss)) = (expected_issuer, one("iss")) {
