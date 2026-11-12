@@ -54,7 +54,7 @@ pub fn verify_download(bytes: &[u8], filetype: Option<&str>) -> Result<(), CliEr
         return Err(not_the_document(bytes, filetype.unwrap_or("a document")));
     }
     // Normalize once at the boundary; every comparison below is exact.
-    let label = filetype.map_or_else(|| "pdf".to_string(), str::to_ascii_lowercase);
+    let label = filetype.map_or_else(|| PDF.names[0].to_string(), str::to_ascii_lowercase);
     match BY_MAGIC.iter().find(|f| f.names.contains(&label.as_str())) {
         Some(format) => verify_magic(bytes, format.magic, format.label),
         None => verify_text(bytes, &label),
@@ -92,14 +92,18 @@ struct Format {
     label: &'static str,
 }
 
+/// PDF, also what [`verify_pdf`] checks and what [`verify_download`]
+/// assumes when no type is declared.
+const PDF: Format = Format {
+    names: &["pdf"],
+    magic: is_pdf,
+    label: "a PDF",
+};
+
 /// The one list both [`verify_download`] and [`sniff`] read, so a format
 /// `sniff` names is checked by the same magic under that name.
 const BY_MAGIC: [Format; 5] = [
-    Format {
-        names: &["pdf"],
-        magic: is_pdf,
-        label: "a PDF",
-    },
+    PDF,
     Format {
         names: &["png"],
         magic: is_png,
@@ -162,7 +166,7 @@ fn is_heic(bytes: &[u8]) -> bool {
 
 /// The `%PDF` magic check. Split out so it is testable without a server.
 pub fn verify_pdf(bytes: &[u8]) -> Result<(), CliError> {
-    verify_magic(bytes, is_pdf, "a PDF")
+    verify_magic(bytes, PDF.magic, PDF.label)
 }
 
 /// Text formats (CSV, HTML, …) have no magic bytes, so the check is the
