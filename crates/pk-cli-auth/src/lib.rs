@@ -1,8 +1,10 @@
 //! Standard auth surface (SPEC v1 §1.2/§1.4): the `auth-status/v1` DTO, the
-//! shared `auth login` / `auth set-credential` argument structs, and text
-//! rendering for status. Each CLI supplies its own credential verification;
-//! this crate owns the shapes so drivers can treat every CLI identically.
+//! shared `auth login` / `auth set-credential` argument structs, text
+//! rendering for status, and OAuth 2 sign-in ([`oauth`]). Each CLI supplies
+//! its own credential verification; this crate owns the shapes so drivers can
+//! treat every CLI identically.
 
+pub mod oauth;
 pub mod otp;
 pub mod reauth;
 pub mod refresh_lock;

@@ -1,0 +1,9 @@
+{
+  "access_token": "dummy-access-token-1",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "scope": "openid fhirUser offline_access launch/patient patient/Observation.rs",
+  "refresh_token": "dummy-refresh-token-1",
+  "patient": "example-patient-1",
+  "need_patient_banner": false
+}
