@@ -1,5 +1,5 @@
-//! The rclone backend: `cat`/`copyto`/`moveto`/`lsf`/`mkdir` against a
-//! remote spec (`<remote>:<path>`). Slower per call than a mount, but it
+//! The rclone backend: `cat`/`copyto`/`moveto`/`deletefile`/`lsf`/`mkdir`
+//! against a remote spec (`<remote>:<path>`). Slower per call than a mount, but it
 //! talks to the storage provider's API directly and is immune to mount
 //! health.
 
@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::backend::{occupied, FileEntry};
+use crate::backend::{check_deletable, occupied, FileEntry};
 use crate::private_file::{self, Replace};
 
 /// The reads the cache needs from its source of truth. A trait so the
@@ -197,6 +197,26 @@ impl Remote {
             return Err(occupied(&to));
         }
         Ok(())
+    }
+
+    /// Delete one file (`rclone deletefile`): `true` when it was deleted,
+    /// `false` when there was no file there. rclone never deletes a folder
+    /// this way and answers one as it answers a missing file (exit 4), so a
+    /// folder is `false` too: `false` means no file at `rel`, not that
+    /// nothing is there. A `rel` that does not name a file under the
+    /// root is refused with exit 2 before rclone runs (see
+    /// [`crate::Backend::delete_file`]).
+    pub fn delete_file(&self, rel: &str) -> Result<bool, CliError> {
+        check_deletable(rel)?;
+        let target = self.target(rel);
+        let out = self.run(&["deletefile", &target])?;
+        if out.status.success() {
+            Ok(true)
+        } else if missing(&out) {
+            Ok(false)
+        } else {
+            Err(upstream("deletefile", &target, &out))
+        }
     }
 
     pub fn exists(&self, rel: &str) -> Result<bool, CliError> {
@@ -566,6 +586,59 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(4));
         assert_eq!(err.exit_code(), 5);
         assert!(err.to_string().ends_with("rclone cat timed out"), "{err}");
+        // A delete runs under the same bound, already spent here.
+        let err = r.delete_file("a.json").unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert_eq!(err.exit_code(), 5);
+        assert!(
+            err.to_string().ends_with("rclone deletefile timed out"),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_delete_says_whether_a_file_was_there() {
+        let ok = Stub::new("exit 0");
+        assert!(ok.remote().delete_file("inbox/a.pdf").unwrap());
+        assert_eq!(
+            ok.calls(),
+            vec!["deletefile example:State/inbox/a.pdf --log-level=ERROR"]
+        );
+        // rclone answers a missing file, a missing folder and a folder alike.
+        for code in [3, 4] {
+            let gone = Stub::new(&format!("exit {code}"));
+            assert!(!gone.remote().delete_file("inbox/a.pdf").unwrap(), "{code}");
+        }
+        let down = Stub::new("echo 'Failed to delete: permission denied' >&2\nexit 1");
+        let err = down.remote().delete_file("inbox/a.pdf").unwrap_err();
+        assert_eq!(err.exit_code(), 5);
+        assert!(
+            err.to_string().ends_with(
+                "rclone deletefile example:State/inbox/a.pdf: Failed to delete: permission denied"
+            ),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_delete_naming_no_file_is_refused_before_rclone_runs() {
+        let stub = Stub::new("exit 0");
+        for rel in [
+            "",
+            "/",
+            "inbox/",
+            "/etc/hosts",
+            "./a.pdf",
+            "../Other/a.pdf",
+            "inbox/../../Other/a.pdf",
+        ] {
+            let err = stub.remote().delete_file(rel).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{rel:?}");
+            assert!(err.to_string().contains("nothing was deleted"), "{err}");
+        }
+        assert!(stub.calls().is_empty(), "{:?}", stub.calls());
     }
 
     #[test]

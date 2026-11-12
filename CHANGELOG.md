@@ -5,6 +5,14 @@
 - `pk-cli-mcp`: requires rmcp 3.9, up from 3.8. v0.30.0 moved this repository's lockfile to
   rmcp 3.9.0 (RUSTSEC-2026-0462); with the requirement raised, a CLI's own lockfile moves too
   when it bumps cli-common, so its `cargo deny` stops flagging rmcp 3.8.
+- `pk-cli-drive`: `Backend::delete_file(rel)` removes one file and answers whether one was there
+  (`false`: none), for a CLI that drains an inbox folder or replaces a stored file. On a remote it
+  is `rclone deletefile` (`Remote::delete_file`); behind the cache (`CachedRemote::delete_file`) it
+  is a write, so copies served stale are confirmed first and the file's cached copy and every
+  cached listing are dropped after. A `rel` naming no file under the root (empty, absolute, a
+  trailing `/`, `.` or `..`) is refused with exit 2 before anything runs, and a folder is never
+  removed: a mount refuses one with exit 2, and rclone, which answers a folder as no file, gives
+  `false`.
 
 ## v0.30.0 — 2026-11-12
 
