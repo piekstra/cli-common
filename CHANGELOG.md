@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `pk-cli-mcp`: rmcp 3.9 at least, for RUSTSEC-2026-0462 (unbounded response bodies in rmcp's
+  Streamable HTTP clients). The crate enables only rmcp's server transports, so the client code
+  was never built, but a CLI's `cargo deny` flags rmcp 3.8 by version; bumping cli-common now
+  moves its lockfile to 3.9.
 - Docs: `auth logout --forget` attempts every step and owes `stop_note` even when another fails;
   an error quotes no URL's query; a call that reads more than once holds one turn; `PositionKey`'s
   sort holds a timestamp only when the tool shows one, and its id is required and stays the same
