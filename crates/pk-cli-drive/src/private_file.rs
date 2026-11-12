@@ -13,9 +13,10 @@ pub enum Replace {
     /// Fail with `ErrorKind::AlreadyExists`. The create is exclusive, so an
     /// existing path (a symlink included) is never written through.
     Never,
-    /// Write a new file beside `path` and rename it over. A reader never
-    /// sees a torn file, the mtime moves atomically, and a symlink at
-    /// `path` is replaced rather than followed.
+    /// Write a new file beside `path`, sync it to disk, and rename it over.
+    /// A reader never sees a torn file, not even after a crash or a power
+    /// loss right after the rename; the mtime moves atomically; and a
+    /// symlink at `path` is replaced rather than followed.
     Always,
 }
 
@@ -51,8 +52,10 @@ pub fn write(path: &Path, bytes: &[u8], replace: Replace) -> io::Result<()> {
     })
 }
 
-/// Create `path` exclusively (0600) and fill it; if filling fails, remove
-/// the file this call created.
+/// Create `path` exclusively (0600), fill it and sync it to disk; if either
+/// fails, remove the file this call created. The sync comes before any
+/// rename, so the rename can never reach the disk ahead of the bytes it
+/// publishes (`File::sync_all` is `F_FULLFSYNC` on macOS).
 fn create_filled(
     path: &Path,
     fill: impl FnOnce(&mut dyn Write) -> io::Result<()>,
@@ -65,9 +68,11 @@ fn create_filled(
         opts.mode(0o600);
     }
     let mut file = opts.open(path)?;
-    fill(&mut file).inspect_err(|_| {
-        let _ = fs::remove_file(path);
-    })
+    fill(&mut file)
+        .and_then(|()| file.sync_all())
+        .inspect_err(|_| {
+            let _ = fs::remove_file(path);
+        })
 }
 
 #[cfg(test)]
