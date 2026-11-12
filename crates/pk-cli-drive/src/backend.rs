@@ -250,7 +250,8 @@ impl Backend {
     /// component) is refused with exit 2 before anything runs, since the
     /// other methods take `rel` on trust and a wrong one here destroys
     /// something. A folder is never deleted: a mount refuses one with exit 2,
-    /// and rclone, which answers a folder as no file, gives `false`.
+    /// and rclone, which answers a folder as no file, gives `false`. So on a
+    /// remote `false` means no file at `rel`, not that nothing is there.
     pub fn delete_file(&self, rel: &str) -> Result<bool, CliError> {
         match self {
             Backend::Mount(root) => {

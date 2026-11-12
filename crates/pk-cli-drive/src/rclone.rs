@@ -202,7 +202,8 @@ impl Remote {
     /// Delete one file (`rclone deletefile`): `true` when it was deleted,
     /// `false` when there was no file there. rclone never deletes a folder
     /// this way and answers one as it answers a missing file (exit 4), so a
-    /// folder is `false` too. A `rel` that does not name a file under the
+    /// folder is `false` too: `false` means no file at `rel`, not that
+    /// nothing is there. A `rel` that does not name a file under the
     /// root is refused with exit 2 before rclone runs (see
     /// [`crate::Backend::delete_file`]).
     pub fn delete_file(&self, rel: &str) -> Result<bool, CliError> {
