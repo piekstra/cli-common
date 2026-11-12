@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.31.0 — 2026-11-12
 
 - `pk-cli-mcp`: requires rmcp 3.9, up from 3.8. v0.30.0 moved this repository's lockfile to
   rmcp 3.9.0 (RUSTSEC-2026-0462); with the requirement raised, a CLI's own lockfile moves too
