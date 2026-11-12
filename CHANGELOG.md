@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `pk-cli-drive`: `Backend::delete_file(rel)` removes one file and answers whether one was there
+  (`false`: none), for a CLI that drains an inbox folder or replaces a stored file. On a remote it
+  is `rclone deletefile` (`Remote::delete_file`); behind the cache (`CachedRemote::delete_file`) it
+  is a write, so copies served stale are confirmed first and the file's cached copy and every
+  cached listing are dropped after. A `rel` naming no file under the root (empty, absolute, a
+  trailing `/`, `.` or `..`) is refused with exit 2 before anything runs, and a folder is never
+  removed: a mount refuses one with exit 2, and rclone, which answers a folder as no file, gives
+  `false`.
 - Docs: `auth logout --forget` attempts every step and owes `stop_note` even when another fails;
   an error quotes no URL's query; a call that reads more than once holds one turn; `PositionKey`'s
   sort holds a timestamp only when the tool shows one, and its id is required and stays the same

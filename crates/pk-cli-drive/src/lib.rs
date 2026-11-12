@@ -11,8 +11,8 @@
 //!   "no such file" for a folder the remote has. Certify a mount (write a
 //!   marker through it, confirm it over rclone) before trusting it.
 //! - [`Backend::Remote`] / [`Backend::Cached`]: rclone ([`Remote`]) as the
-//!   transactional path (`cat`/`copyto`/`moveto`/`lsf`/`mkdir`). Slower
-//!   per call but authoritative: it talks to the provider's API directly and
+//!   transactional path (`cat`/`copyto`/`moveto`/`deletefile`/`lsf`/
+//!   `mkdir`). Slower per call but authoritative: it talks to the provider's API directly and
 //!   is immune to mount health. Normally fronted by the read cache
 //!   ([`CachedRemote`]), which serves reads locally and keeps the remote the
 //!   single source of truth (see [`cache`] for its invariants).
@@ -60,7 +60,10 @@
 //! `rel` paths are store-relative and come from the CLI itself (its layout,
 //! a listing it just read). The mount backend joins them onto the root as
 //! given, so a CLI that builds one from outside text (a user-typed name, a
-//! provider's filename) sanitizes it first.
+//! provider's filename) sanitizes it first. [`Backend::delete_file`] is the
+//! one call that checks: it refuses a `rel` naming no file under the root
+//! (empty, absolute, a trailing `/`, `.` or `..`) with exit 2, and never
+//! removes a folder.
 //!
 //! The crate needs Rust 1.89 (`File::lock`), above the workspace's 1.75
 //! floor; adopting it raises the CLI's own minimum to match.

@@ -4,7 +4,8 @@
 use pk_cli_core::CliError;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 
 use crate::cache::CachedRemote;
 use crate::rclone::Remote;
@@ -240,6 +241,52 @@ impl Backend {
         }
     }
 
+    /// Delete the file at `rel`: `true` when it was deleted, `false` when
+    /// there was no file there. For a CLI that drains an inbox folder once
+    /// each file is stored elsewhere, or replaces a stored file with another.
+    ///
+    /// Files only, on every backend. A `rel` that does not name a file under
+    /// the store root (empty, ending in `/`, absolute, or with a `.` or `..`
+    /// component) is refused with exit 2 before anything runs, since the
+    /// other methods take `rel` on trust and a wrong one here destroys
+    /// something. A folder is never deleted: a mount refuses one with exit 2,
+    /// and rclone, which answers a folder as no file, gives `false`.
+    pub fn delete_file(&self, rel: &str) -> Result<bool, CliError> {
+        match self {
+            Backend::Mount(root) => {
+                check_deletable(rel)?;
+                let path = root.join(rel);
+                let gone = |e: &std::io::Error| {
+                    matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
+                };
+                let failed = |e: std::io::Error| {
+                    CliError::Other(format!("deleting {}: {e}", path.display()))
+                };
+                // `symlink_metadata`: a link to a folder is removed as the
+                // link it is, never followed.
+                match fs::symlink_metadata(&path) {
+                    Err(e) if gone(&e) => return Ok(false),
+                    Err(e) => return Err(failed(e)),
+                    Ok(meta) if meta.is_dir() => {
+                        return Err(CliError::Usage(format!(
+                            "refusing to delete {} — it is a folder, and only files are \
+                             deleted; nothing was deleted",
+                            path.display()
+                        )))
+                    }
+                    Ok(_) => {}
+                }
+                match fs::remove_file(&path) {
+                    Ok(()) => Ok(true),
+                    Err(e) if gone(&e) => Ok(false),
+                    Err(e) => Err(failed(e)),
+                }
+            }
+            Backend::Remote(r) => r.delete_file(rel),
+            Backend::Cached(c) => c.delete_file(rel),
+        }
+    }
+
     pub fn exists(&self, rel: &str) -> Result<bool, CliError> {
         match self {
             Backend::Mount(root) => Ok(root.join(rel).exists()),
@@ -310,6 +357,28 @@ pub(crate) fn occupied(target: &str) -> CliError {
     CliError::Usage(format!(
         "refusing to overwrite {target} — a document is already there; nothing was moved"
     ))
+}
+
+/// The check every backend's delete makes before anything runs: `rel` names
+/// a file under the store root. Empty is the root itself and a trailing `/`
+/// a folder; an absolute path, `.` or `..` can name something outside it.
+pub(crate) fn check_deletable(rel: &str) -> Result<(), CliError> {
+    let names_a_file = !rel.is_empty()
+        && !rel.ends_with('/')
+        && Path::new(rel)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)));
+    if names_a_file {
+        return Ok(());
+    }
+    Err(CliError::Usage(if rel.is_empty() {
+        "refusing to delete the store root — name a file under it; nothing was deleted".into()
+    } else {
+        format!(
+            "refusing to delete {rel:?} — name a file under the store root, with no `.` or `..` \
+             and no leading or trailing `/`; nothing was deleted"
+        )
+    }))
 }
 
 fn create_parent(path: &Path) -> Result<(), CliError> {
@@ -394,6 +463,76 @@ mod tests {
         let copy = b.local_copy("state/a.json").unwrap();
         assert_eq!(copy.path, tmp.path().join("state/a.json"));
         assert_eq!(b.local_copy("state/b.json").err().unwrap().exit_code(), 4);
+    }
+
+    #[test]
+    fn a_mount_deletes_files_only_and_a_missing_one_is_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store");
+        fs::create_dir_all(root.join("inbox")).unwrap();
+        fs::write(root.join("inbox/a.pdf"), b"1").unwrap();
+        fs::write(root.join("notes.md"), b"n").unwrap();
+        fs::write(tmp.path().join("outside.pdf"), b"x").unwrap();
+        let b = Backend::Mount(root.clone());
+
+        assert!(b.delete_file("inbox/a.pdf").unwrap());
+        assert!(!root.join("inbox/a.pdf").exists());
+        assert!(!b.delete_file("inbox/a.pdf").unwrap(), "already gone");
+        assert!(!b.delete_file("missing/b.pdf").unwrap(), "no such folder");
+        assert!(
+            !b.delete_file("notes.md/b.pdf").unwrap(),
+            "a file as folder"
+        );
+
+        let err = b.delete_file("inbox").unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("it is a folder"), "{err}");
+        assert!(root.join("inbox").is_dir());
+
+        let outside = tmp.path().join("outside.pdf").display().to_string();
+        for rel in [
+            "",
+            "/",
+            "inbox/",
+            "./notes.md",
+            "../outside.pdf",
+            outside.as_str(),
+        ] {
+            let err = b.delete_file(rel).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{rel:?}");
+            assert!(err.to_string().contains("nothing was deleted"), "{err}");
+        }
+        assert!(tmp.path().join("outside.pdf").exists());
+        assert!(root.join("notes.md").exists());
+        assert!(root.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_folder_is_deleted_as_a_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("store");
+        fs::create_dir_all(root.join("kept")).unwrap();
+        fs::write(root.join("kept/a.pdf"), b"1").unwrap();
+        std::os::unix::fs::symlink(root.join("kept"), root.join("link")).unwrap();
+        let b = Backend::Mount(root.clone());
+        assert!(b.delete_file("link").unwrap());
+        assert!(fs::symlink_metadata(root.join("link")).is_err());
+        assert!(root.join("kept/a.pdf").exists());
+    }
+
+    /// The remote backends answer the same way through `Backend`.
+    #[cfg(unix)]
+    #[test]
+    fn a_remote_delete_goes_through_the_backend() {
+        let stub = crate::stub::Stub::backed();
+        fs::create_dir_all(stub.file("inbox")).unwrap();
+        fs::write(stub.file("inbox/a.pdf"), b"1").unwrap();
+        let b = Backend::Remote(stub.remote());
+        assert!(b.delete_file("inbox/a.pdf").unwrap());
+        assert!(!stub.file("inbox/a.pdf").exists());
+        assert!(!b.delete_file("inbox/a.pdf").unwrap());
+        assert_eq!(b.delete_file("").unwrap_err().exit_code(), 2);
     }
 
     #[test]
