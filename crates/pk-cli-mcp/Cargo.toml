@@ -3,7 +3,7 @@ name = "pk-cli-mcp"
 description = "MCP tools for the piekstra CLI family: a WASM-ready core (tool definitions, results, output shaping, error mapping), a stdio server for `<bin> mcp`, and the same server on 127.0.0.1 for a tunnel (`<bin> mcp --http`)."
 version.workspace = true
 edition.workspace = true
-# rmcp 3.8 (the `stdio` feature) needs 1.88. The core alone builds on the
+# rmcp 3.9 (the `stdio` feature) needs 1.88. The core alone builds on the
 # workspace floor, but one crate carries one floor.
 rust-version = "1.88"
 license.workspace = true
