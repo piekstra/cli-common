@@ -116,21 +116,49 @@ impl AuthorizationRequest {
 /// The authorization code from the redirect's request target
 /// (`/callback?code=…&state=…`) or a whole redirect URL.
 ///
-/// - `state` must equal `expected_state`, or the answer is refused as a
-///   possible cross-site request forgery.
+/// - `state` must equal `expected_state` (compared in constant time), or the
+///   answer is refused as a possible cross-site request forgery. An answer
+///   with no `state` is refused too, an `error` answer included: RFC 6749
+///   §4.1.2.1 requires a server to return the `state` it was sent.
+/// - A parameter given twice is refused (RFC 6749 §3.1).
 /// - With `expected_issuer`, an `iss` in the answer (RFC 9207) must equal it, so
 ///   a code minted by another server is refused. An answer without `iss` passes:
 ///   most servers do not send one yet.
 /// - An `error` answer is [`CliError::Auth`] quoting the provider's slug and
 ///   description, cut to printable text.
-/// - A parameter given twice is refused (RFC 6749 §3.1).
 ///
 /// Every refusal is [`CliError::Auth`] (exit 3): signing in again is the fix.
+/// [`super::LoopbackListener`] goes on waiting past an answer that is not this
+/// sign-in's (the first two rules), so a reloaded old tab or a page elsewhere
+/// cannot end it.
 pub fn code_from_callback(
     target: &str,
     expected_state: &str,
     expected_issuer: Option<&str>,
 ) -> Result<Secret, CliError> {
+    match check_callback(target, expected_state, expected_issuer) {
+        Callback::Code(code) => Ok(code),
+        Callback::Refused(err) | Callback::NotThisSignIn(err) => Err(err),
+    }
+}
+
+/// What one request to the callback says about this sign-in.
+pub(crate) enum Callback {
+    /// This sign-in's code.
+    Code(Secret),
+    /// This sign-in's answer, and a refusal: the provider's `error`, another
+    /// issuer, no code.
+    Refused(CliError),
+    /// Not provably this sign-in's: no `state`, another one, or a repeated
+    /// parameter. The wait goes on.
+    NotThisSignIn(CliError),
+}
+
+pub(crate) fn check_callback(
+    target: &str,
+    expected_state: &str,
+    expected_issuer: Option<&str>,
+) -> Callback {
     let query = target
         .split_once('?')
         .map_or("", |(_, query)| query)
@@ -138,56 +166,57 @@ pub fn code_from_callback(
         .next()
         .unwrap_or_default();
     let params = parse_query(query);
-    let one = |name: &str| -> Result<Option<&str>, CliError> {
-        let mut found = params.iter().filter(|(n, _)| n == name).map(|(_, v)| v);
-        match (found.next(), found.next()) {
-            (first, None) => Ok(first.map(String::as_str)),
-            (Some(_), Some(_)) => Err(CliError::Auth(format!(
-                "the sign-in's answer carried `{name}` more than once; refusing it. Sign in again"
-            ))),
-            (None, Some(_)) => unreachable!("a second item implies a first"),
+    for (i, (name, _)) in params.iter().enumerate() {
+        if params[..i].iter().any(|(earlier, _)| earlier == name) {
+            return Callback::NotThisSignIn(CliError::Auth(format!(
+                "the sign-in's answer carried `{}` more than once; refusing it. Sign in again",
+                printable(name)
+            )));
         }
+    }
+    let one = |name: &str| {
+        params
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
     };
 
-    let error = one("error")?;
-    match one("state")? {
+    match one("state") {
         Some(state) if constant_time_eq(state.as_bytes(), expected_state.as_bytes()) => {}
         Some(_) => {
-            return Err(CliError::Auth(
+            return Callback::NotThisSignIn(CliError::Auth(
                 "the sign-in's answer carried a different `state`; refusing it as a possible \
                  cross-site request forgery. Sign in again"
                     .into(),
             ))
         }
-        // Some servers leave `state` off an error; the error is the answer then.
-        None if error.is_some() => {}
         None => {
-            return Err(CliError::Auth(
+            return Callback::NotThisSignIn(CliError::Auth(
                 "the sign-in's answer carried no `state`; refusing it. Sign in again".into(),
             ))
         }
     }
-    if let (Some(expected), Some(iss)) = (expected_issuer, one("iss")?) {
+    if let (Some(expected), Some(iss)) = (expected_issuer, one("iss")) {
         if iss != expected {
-            return Err(CliError::Auth(format!(
+            return Callback::Refused(CliError::Auth(format!(
                 "the sign-in's answer came from issuer {}, not {}; refusing it. Sign in again",
                 printable(iss),
                 printable(expected)
             )));
         }
     }
-    if let Some(error) = error {
-        let description = one("error_description")?
+    if let Some(error) = one("error") {
+        let description = one("error_description")
             .map(|d| format!(": {}", printable(d)))
             .unwrap_or_default();
-        return Err(CliError::Auth(format!(
+        return Callback::Refused(CliError::Auth(format!(
             "the provider refused the sign-in ({}{description})",
             printable(error)
         )));
     }
-    match one("code")? {
-        Some(code) if !code.is_empty() => Ok(Secret::new(code)),
-        _ => Err(CliError::Auth(
+    match one("code") {
+        Some(code) if !code.is_empty() => Callback::Code(Secret::new(code)),
+        _ => Callback::Refused(CliError::Auth(
             "the sign-in's answer carried no authorization code. Sign in again".into(),
         )),
     }
@@ -400,12 +429,47 @@ mod tests {
             "{message}"
         );
         assert!(!message.contains('\u{1b}'), "{message}");
-        // Without a state, the error is still the answer.
+        // Without a state, an error is not provably this sign-in's.
         let err = code_from_callback("/callback?error=server_error", "XYZ", None).unwrap_err();
-        assert!(err.to_string().contains("server_error"));
+        assert!(err.to_string().contains("no `state`"), "{err}");
+        assert!(matches!(
+            check_callback("/callback?error=server_error", "XYZ", None),
+            Callback::NotThisSignIn(_)
+        ));
         // With the wrong state, it is refused as forgery rather than quoted.
         let err = code_from_callback("/callback?error=x&state=NO", "XYZ", None).unwrap_err();
         assert!(err.to_string().contains("forgery"));
+    }
+
+    #[test]
+    fn only_an_answer_with_this_state_is_this_sign_ins() {
+        for target in [
+            "/callback?code=abc&state=WRONG",
+            "/callback?code=abc",
+            "/callback?error=access_denied",
+            "/callback?code=abc&state=XYZ&state=XYZ",
+        ] {
+            assert!(
+                matches!(
+                    check_callback(target, "XYZ", None),
+                    Callback::NotThisSignIn(_)
+                ),
+                "{target}"
+            );
+        }
+        for target in [
+            "/callback?error=access_denied&state=XYZ",
+            "/callback?state=XYZ",
+            "/callback?code=c&state=XYZ&iss=https%3A%2F%2Fother.example.test",
+        ] {
+            assert!(
+                matches!(
+                    check_callback(target, "XYZ", Some("https://auth.example.test")),
+                    Callback::Refused(_)
+                ),
+                "{target}"
+            );
+        }
     }
 
     #[test]

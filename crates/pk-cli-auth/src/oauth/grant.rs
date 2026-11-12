@@ -199,6 +199,16 @@ pub(crate) fn form_encode(pairs: &[(&str, &str)]) -> String {
         .join("&")
 }
 
+/// `expires_in` in seconds from a number or a string of one.
+fn lifetime(value: &Value) -> Option<u64> {
+    let seconds = match value {
+        Value::Number(n) => n.as_f64()?,
+        Value::String(s) => s.trim().parse::<f64>().ok()?,
+        _ => return None,
+    };
+    seconds.is_finite().then(|| seconds.max(0.0) as u64)
+}
+
 /// A successful token endpoint answer (RFC 6749 §5.1).
 pub struct TokenResponse {
     pub access_token: Secret,
@@ -217,13 +227,32 @@ pub struct TokenResponse {
 
 impl TokenResponse {
     /// Parse a 2xx body. One with no `access_token` is
-    /// [`CliError::Upstream`]: the server answered something else.
+    /// [`CliError::Upstream`]: the server answered something else. One that
+    /// carries an OAuth `error` instead, which some servers send with a 200, is
+    /// classified as [`refusal`] classifies it.
+    ///
+    /// `expires_in` may be a number or a string of one; a fraction is cut, a
+    /// negative one is `0` (already expired), and one that does not read as a
+    /// number is left out, so [`TokenSet::is_expired`] leaves the server to
+    /// decide.
     pub fn parse(body: &str) -> Result<Self, CliError> {
         let Ok(Value::Object(mut fields)) = serde_json::from_str::<Value>(body) else {
             return Err(CliError::Upstream(
                 "the token endpoint's answer is not a JSON object".into(),
             ));
         };
+        if !fields.contains_key("access_token") {
+            if let Some(slug) = fields.get("error").and_then(Value::as_str) {
+                let description = fields.get("error_description").and_then(Value::as_str);
+                return Err(classify(
+                    "token",
+                    "the token endpoint",
+                    200,
+                    slug,
+                    description,
+                ));
+            }
+        }
         let mut take_string = |name: &str| match fields.remove(name) {
             Some(Value::String(s)) if !s.is_empty() => Some(s),
             _ => None,
@@ -235,12 +264,7 @@ impl TokenResponse {
         let refresh_token = take_string("refresh_token");
         let scope = take_string("scope");
         let id_token = take_string("id_token");
-        let expires_in = match fields.remove("expires_in") {
-            Some(Value::Number(n)) => n.as_u64(),
-            // Some servers send it as a string.
-            Some(Value::String(s)) => s.trim().parse().ok(),
-            _ => None,
-        };
+        let expires_in = fields.remove("expires_in").and_then(|v| lifetime(&v));
         Ok(TokenResponse {
             access_token: Secret::new(access_token),
             token_type,
@@ -378,7 +402,7 @@ impl Drop for TokenSet {
 /// | Answer | Error |
 /// |---|---|
 /// | 429, 5xx, a 403 page, `temporarily_unavailable` | `Upstream` (exit 5), with any `Retry-After` |
-/// | `invalid_grant`, `invalid_client`, `unauthorized_client`, `invalid_token`, a bare 401 | `Auth` (exit 3), `Reason::CredentialRefused` |
+/// | `invalid_grant`, `invalid_client`, `unauthorized_client`, `invalid_token`, a bare 401 | `Auth` (exit 3), `Reason::CredentialRefused`; "sign in again" only at the token endpoint |
 /// | `access_denied`, `invalid_scope`, a bare 403 | `Auth` (exit 3), `Reason::Forbidden` |
 /// | any other 4xx (`invalid_request`, `unsupported_grant_type`, RFC 7591's `invalid_redirect_uri` and `invalid_client_metadata`) | `Upstream` (exit 5), `Reason::BadRequest` |
 /// | a 3xx | `Upstream`: the transport follows no redirects, and a credential is not re-sent |
@@ -390,42 +414,71 @@ pub fn refusal(what: &str, origin: &str, response: &HttpResponse, now: i64) -> C
             .as_ref()
             .and_then(|v| v.get(name))
             .and_then(Value::as_str)
-            .map(printable)
+            .map(str::to_string)
     };
     let slug = field("error").unwrap_or_default();
-    let detail = match (slug.is_empty(), field("error_description")) {
-        (false, Some(d)) => format!(" ({slug}: {d})"),
-        (false, None) => format!(" ({slug})"),
-        (true, Some(d)) => format!(" ({d})"),
-        (true, None) => String::new(),
-    };
-    let said = format!("the {what} endpoint at {origin} answered HTTP {status}{detail}");
+    let description = field("error_description");
+    let at = format!("the {what} endpoint at {origin}");
     if (300..400).contains(&status) {
+        let said = said(&at, status, &slug, description.as_deref());
         return CliError::Upstream(format!("{said}: a redirect, which is not followed"));
     }
-    if response.inconclusive(now).is_some() || slug == "temporarily_unavailable" {
+    if response.inconclusive(now).is_some() {
+        let said = said(&at, status, &slug, description.as_deref());
         let wait = response
             .retry_after(now)
             .map(|d| format!("; it asked to wait {} s", d.as_secs()))
             .unwrap_or_default();
         return CliError::Upstream(format!("{said}{wait}. Try again later"));
     }
-    match slug.as_str() {
-        "invalid_grant" | "invalid_client" | "unauthorized_client" | "invalid_token" => {
+    classify(what, &at, status, &slug, description.as_deref())
+}
+
+/// `the token endpoint at https://h answered HTTP 400 (invalid_grant: text)`.
+fn said(at: &str, status: u16, slug: &str, description: Option<&str>) -> String {
+    let slug = printable(slug);
+    let detail = match (slug.is_empty(), description.map(printable)) {
+        (false, Some(d)) => format!(" ({slug}: {d})"),
+        (false, None) => format!(" ({slug})"),
+        (true, Some(d)) => format!(" ({d})"),
+        (true, None) => String::new(),
+    };
+    format!("{at} answered HTTP {status}{detail}")
+}
+
+/// The slug table of [`refusal`], for any status that is not a redirect or an
+/// inconclusive answer. A sign-in again is the remedy only at the token
+/// endpoint: at the registration endpoint a refused token is the initial
+/// access token, or the metadata is wrong.
+fn classify(what: &str, at: &str, status: u16, slug: &str, description: Option<&str>) -> CliError {
+    let said = said(at, status, slug, description);
+    let token = what == "token";
+    match slug {
+        "temporarily_unavailable" => CliError::Upstream(format!("{said}. Try again later")),
+        "invalid_grant" | "invalid_client" | "unauthorized_client" | "invalid_token" if token => {
             CliError::Auth(format!(
                 "{said}: the grant or this client was refused. Sign in again"
             ))
             .because(Reason::CredentialRefused)
         }
+        "invalid_token" => CliError::Auth(format!("{said}: the initial access token was refused"))
+            .because(Reason::CredentialRefused),
+        "invalid_client" | "unauthorized_client" => {
+            CliError::Auth(format!("{said}: this client was refused"))
+                .because(Reason::CredentialRefused)
+        }
         "access_denied" | "invalid_scope" => {
             CliError::Auth(format!("{said}: the access asked for was refused"))
                 .because(Reason::Forbidden)
         }
-        "" if status == 401 => {
+        "" if status == 401 && token => {
             CliError::Auth(format!("{said}. Sign in again")).because(Reason::CredentialRefused)
         }
+        "" if status == 401 => CliError::Auth(said).because(Reason::CredentialRefused),
         "" if status == 403 => CliError::Auth(said).because(Reason::Forbidden),
-        _ if (400..500).contains(&status) => CliError::Upstream(said).because(Reason::BadRequest),
+        _ if (200..300).contains(&status) || (400..500).contains(&status) => {
+            CliError::Upstream(said).because(Reason::BadRequest)
+        }
         _ => CliError::Upstream(said),
     }
 }
@@ -594,6 +647,60 @@ mod tests {
             set(Some(0)).expires_at_rfc3339().as_deref(),
             Some("1970-01-01T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn expires_in_reads_numbers_strings_and_fractions() {
+        for (raw, expected) in [
+            ("3600", Some(3600)),
+            ("\"3600\"", Some(3600)),
+            ("3600.9", Some(3600)),
+            ("\" 59.5 \"", Some(59)),
+            ("-5", Some(0)),
+            ("\"soon\"", None),
+            ("true", None),
+            ("null", None),
+        ] {
+            let body = format!(r#"{{"access_token":"a","expires_in":{raw}}}"#);
+            assert_eq!(
+                TokenResponse::parse(&body).unwrap().expires_in,
+                expected,
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_200_carrying_an_oauth_error_is_classified_by_its_slug() {
+        let err = TokenResponse::parse(r#"{"error":"invalid_grant","error_description":"spent"}"#)
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 3);
+        assert_eq!(err.reason(), Some(Reason::CredentialRefused));
+        assert!(err.to_string().contains("(invalid_grant: spent)"), "{err}");
+        let err = TokenResponse::parse(r#"{"error":"authorization_pending"}"#).unwrap_err();
+        assert_eq!(err.exit_code(), 5);
+        let err = TokenResponse::parse(r#"{"error":"temporarily_unavailable"}"#).unwrap_err();
+        assert_eq!(err.exit_code(), 5);
+    }
+
+    #[test]
+    fn a_registration_refusal_does_not_say_to_sign_in_again() {
+        for body in [
+            r#"{"error":"invalid_token"}"#,
+            r#"{"error":"invalid_client"}"#,
+            "",
+        ] {
+            let err = refusal("registration", "https://a.test", &answer(401, body), 0);
+            assert_eq!(err.exit_code(), 3, "{body}");
+            assert!(!err.to_string().contains("Sign in again"), "{err}");
+        }
+        let err = refusal(
+            "token",
+            "https://a.test",
+            &answer(400, r#"{"error":"invalid_token"}"#),
+            0,
+        );
+        assert!(err.to_string().contains("Sign in again"), "{err}");
     }
 
     #[test]

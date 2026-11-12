@@ -1034,7 +1034,7 @@ client, and the keychain account are the CLI's or a profile crate's
 |---|---|
 | `AuthorizationCodeFlow` → `PendingAuthorization` | binds the listener, draws a 32-byte verifier and `state`, builds the address; `wait_for_code`, then `token_request(&code)` with the same redirect and verifier |
 | `LoopbackListener` | `127.0.0.1`, a port the system picks (or the first free one of the ports a provider registered, `bind_first`), path `/callback`, redirect `http://127.0.0.1:<port>/callback` (the IP literal, RFC 8252 §8.3). Answers only `GET /callback` whose `Host` is its own; a favicon or a probe gets a 404 or 400 and the wait goes on, each connection on its own thread so a browser's idle speculative connection holds nothing up. A request head over 16 KiB is refused. The page holds nothing from the request, under `Cache-Control: no-store`, `Referrer-Policy: no-referrer` and `Content-Security-Policy: default-src 'none'`. Past the wait (5 minutes by default) it is exit 3 |
-| `code_from_callback` | `state` compared in constant time; a missing or different one is refused as forgery, as is a parameter given twice; an `error` answer quotes the slug and description cut to printable text (no escape sequences), 200 characters at most |
+| `code_from_callback` | `state` compared in constant time; a missing or different one is refused as forgery, as is a parameter given twice, and the listener answers such a request with a page saying so and goes on waiting, so a reloaded old tab or a page elsewhere cannot end the sign-in. An `error` answer with this sign-in's `state` ends it, quoting the slug and description cut to printable text (no escape sequences), 200 characters at most |
 | `OAuthClient<T: Transport>` | `token(endpoint, &ClientAuth, &TokenRequest)` and `register(endpoint, &ClientMetadata, initial_access_token)`, each one POST with `User-Agent: <bin>/<version>` |
 | `ClientAuth` | `Public` (`client_id` in the body), `SecretBasic`, `SecretPost`, `PrivateKeyJwt` (an assertion the CLI signed) |
 | `TokenRequest` | `authorization_code`, `refresh`, or any extension `grant` (RFC 7523's JWT bearer); a parameter that would replace the request's own is exit 2 |
@@ -1045,14 +1045,14 @@ client, and the keychain account are the CLI's or a profile crate's
 Every endpoint must be `https`, or `http` to this machine for a test server;
 anything else is refused before a request is built, as exit 5, since the
 address comes from a provider. A token or registration refusal maps onto the
-exit codes through `oauth::refusal`:
+exit codes through `oauth::refusal`, and a 200 that carries an `error` instead of a token through the same table:
 
 | Answer | Exit |
 |---|---|
-| `invalid_grant`, `invalid_client`, `unauthorized_client`, `invalid_token`, a bare 401 | 3, `Reason::CredentialRefused`: sign in again |
+| `invalid_grant`, `invalid_client`, `unauthorized_client`, `invalid_token`, a bare 401 | 3, `Reason::CredentialRefused`: sign in again (at the registration endpoint, the initial access token or the client was refused) |
 | `access_denied`, `invalid_scope`, a bare 403 | 3, `Reason::Forbidden` |
 | 429, 5xx, a 403 page, `temporarily_unavailable` | 5, naming any `Retry-After` |
-| any other 4xx (`invalid_request`, `unsupported_grant_type`, `invalid_redirect_uri`) | 5, `Reason::BadRequest` |
+| any other 4xx (`invalid_request`, `unsupported_grant_type`, `invalid_redirect_uri`), or a 200 carrying an unknown `error` | 5, `Reason::BadRequest` |
 | a 3xx | 5: no redirect is followed with a credential in the body |
 
 A message quotes the OAuth slug and description, never the body otherwise

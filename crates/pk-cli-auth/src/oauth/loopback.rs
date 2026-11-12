@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use pk_cli_core::CliError;
 use pk_cli_secrets::Secret;
 
-use super::authorize::code_from_callback;
+use super::authorize::{check_callback, Callback};
 
 /// The redirect's path: `http://127.0.0.1:<port>/callback`.
 pub const CALLBACK_PATH: &str = "/callback";
@@ -102,9 +102,12 @@ impl LoopbackListener {
     }
 
     /// Wait for the browser to bring the code back, and answer it with a short
-    /// page saying whether to return to the terminal. The code is checked with
-    /// [`code_from_callback`]. Past `timeout` this is [`CliError::Auth`]: nobody
-    /// finished signing in, and signing in again is the fix.
+    /// page saying whether to return to the terminal. The answer is checked as
+    /// [`super::code_from_callback`] says. One that is not this sign-in's (no
+    /// `state`, another one, a repeated parameter: a reloaded old tab, or a page
+    /// elsewhere sending the browser here) gets the failure page and the wait
+    /// goes on. Past `timeout` this is [`CliError::Auth`]: nobody finished
+    /// signing in, and signing in again is the fix.
     pub fn wait_for_code(
         &self,
         expected_state: &str,
@@ -112,12 +115,19 @@ impl LoopbackListener {
         timeout: Duration,
     ) -> Result<Secret, CliError> {
         let deadline = Instant::now() + timeout;
-        let (sender, answers) = mpsc::channel::<Result<Secret, CliError>>();
+        let (sender, answers) = mpsc::channel::<Callback>();
+        let mut not_ours: Option<CliError> = None;
         loop {
-            match answers.try_recv() {
-                Ok(answer) => return answer,
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => unreachable!("this loop holds a sender"),
+            loop {
+                match answers.try_recv() {
+                    Ok(Callback::Code(code)) => return Ok(code),
+                    Ok(Callback::Refused(err)) => return Err(err),
+                    Ok(Callback::NotThisSignIn(err)) => not_ours = Some(err),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        unreachable!("this loop holds a sender")
+                    }
+                }
             }
             match self.listener.accept() {
                 Ok((stream, _)) => {
@@ -135,10 +145,13 @@ impl LoopbackListener {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
+                        let also = not_ours
+                            .map(|err| format!(" (the last answer was refused: {err})"))
+                            .unwrap_or_default();
                         return Err(CliError::Auth(format!(
-                            "no sign-in answer reached {} within {} s. Sign in again",
+                            "no sign-in answer reached {} within {}{also}. Sign in again",
                             self.redirect_uri(),
-                            timeout.as_secs()
+                            spoken(timeout)
                         )));
                     }
                     std::thread::sleep(POLL);
@@ -153,14 +166,24 @@ impl LoopbackListener {
     }
 }
 
-/// Serve one connection. `Some` when it was the redirect.
+/// `5 min`, `90 s`, `250 ms`.
+fn spoken(wait: Duration) -> String {
+    match (wait.as_secs(), wait.subsec_millis()) {
+        (0, ms) => format!("{ms} ms"),
+        (s, 0) if s % 60 == 0 => format!("{} min", s / 60),
+        (s, 0) => format!("{s} s"),
+        _ => format!("{} ms", wait.as_millis()),
+    }
+}
+
+/// Serve one connection. `Some` when it was a request to the callback.
 fn serve(
     mut stream: TcpStream,
     app: &str,
     port: u16,
     expected_state: &str,
     expected_issuer: Option<&str>,
-) -> Option<Result<Secret, CliError>> {
+) -> Option<Callback> {
     if stream.set_nonblocking(false).is_err()
         || stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
     {
@@ -209,11 +232,11 @@ fn serve(
         respond(&mut stream, 404, "Not Found", &page(app, Outcome::NotHere));
         return None;
     }
-    let answer = code_from_callback(target, expected_state, expected_issuer);
-    let outcome = if answer.is_ok() {
-        Outcome::SignedIn
-    } else {
-        Outcome::Failed
+    let answer = check_callback(target, expected_state, expected_issuer);
+    let outcome = match answer {
+        Callback::Code(_) => Outcome::SignedIn,
+        Callback::Refused(_) => Outcome::Failed,
+        Callback::NotThisSignIn(_) => Outcome::NotThisSignIn,
     };
     respond(&mut stream, 200, "OK", &page(app, outcome));
     Some(answer)
@@ -237,6 +260,7 @@ fn read_head(stream: &mut TcpStream) -> Option<String> {
 enum Outcome {
     SignedIn,
     Failed,
+    NotThisSignIn,
     NotHere,
 }
 
@@ -245,6 +269,10 @@ fn page(app: &str, outcome: Outcome) -> String {
     let message = match outcome {
         Outcome::SignedIn => "signed in. You can close this tab and return to the terminal.",
         Outcome::Failed => "the sign-in did not complete. Return to the terminal for details.",
+        Outcome::NotThisSignIn => {
+            "this is not the sign-in the terminal is waiting for. Finish that one, or start again \
+             from the terminal."
+        }
         Outcome::NotHere => "nothing here.",
     };
     format!("<!doctype html><meta charset=utf-8><title>{app}</title><p>{app}: {message}</p>")
@@ -344,15 +372,56 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_state_ends_the_wait_with_an_auth_error_and_a_failure_page() {
+    fn an_answer_that_is_not_this_sign_ins_leaves_the_wait_open() {
         let listener = LoopbackListener::bind("pk-test").unwrap();
         let port = listener.port();
-        let browser = std::thread::spawn(move || send(port, &get("/callback?code=c&state=NOPE")));
+        let browser = std::thread::spawn(move || {
+            let stale = send(port, &get("/callback?code=old&state=OLD"));
+            let forged = send(port, &get("/callback?error=access_denied"));
+            let answer = send(port, &get("/callback?code=new&state=S"));
+            (stale, forged, answer)
+        });
+        let code = listener
+            .wait_for_code("S", None, Duration::from_secs(20))
+            .unwrap();
+        assert_eq!(code.expose(), "new");
+        let (stale, forged, answer) = browser.join().unwrap();
+        assert!(
+            stale.contains("not the sign-in the terminal is waiting for"),
+            "{stale}"
+        );
+        assert!(
+            forged.contains("not the sign-in the terminal is waiting for"),
+            "{forged}"
+        );
+        assert!(answer.contains("signed in"), "{answer}");
+    }
+
+    #[test]
+    fn this_sign_ins_refusal_ends_the_wait_with_an_auth_error() {
+        let listener = LoopbackListener::bind("pk-test").unwrap();
+        let port = listener.port();
+        let browser =
+            std::thread::spawn(move || send(port, &get("/callback?error=access_denied&state=S")));
         let err = listener
             .wait_for_code("S", None, Duration::from_secs(20))
             .unwrap_err();
         assert_eq!(err.exit_code(), 3);
+        assert!(err.to_string().contains("access_denied"), "{err}");
         assert!(browser.join().unwrap().contains("did not complete"));
+    }
+
+    #[test]
+    fn a_timeout_names_the_last_refused_answer() {
+        let listener = LoopbackListener::bind("pk-test").unwrap();
+        let port = listener.port();
+        let stale = std::thread::spawn(move || send(port, &get("/callback?code=old&state=OLD")));
+        let err = listener
+            .wait_for_code("S", None, Duration::from_millis(1500))
+            .unwrap_err();
+        assert!(stale.join().unwrap().contains("not the sign-in"));
+        assert_eq!(err.exit_code(), 3);
+        assert!(err.to_string().contains("different `state`"), "{err}");
     }
 
     #[test]
@@ -363,7 +432,7 @@ mod tests {
             .wait_for_code("S", None, Duration::from_millis(100))
             .unwrap_err();
         assert_eq!(err.exit_code(), 3);
-        assert!(err.to_string().contains("within 0 s"), "{err}");
+        assert!(err.to_string().contains("within 100 ms"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
@@ -406,6 +475,14 @@ mod tests {
             LoopbackListener::bind_first("pk-test", &[]).unwrap().port(),
             0
         );
+    }
+
+    #[test]
+    fn a_wait_is_spoken_in_its_own_unit() {
+        assert_eq!(spoken(Duration::from_secs(300)), "5 min");
+        assert_eq!(spoken(Duration::from_secs(90)), "90 s");
+        assert_eq!(spoken(Duration::from_millis(250)), "250 ms");
+        assert_eq!(spoken(Duration::from_millis(1500)), "1500 ms");
     }
 
     #[test]
