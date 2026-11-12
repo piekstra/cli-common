@@ -7,6 +7,18 @@
   sort holds a timestamp only when the tool shows one, and its id is required and stays the same
   while the row exists; fpl's connector port is 8740; nelnet ships Windows; the status rows of
   lofty, xfin, fpl, lrfl and tojfl.
+- `pk-cli-mcp`: rmcp 3.9 at least, for RUSTSEC-2026-0462 (unbounded response bodies in rmcp's
+  Streamable HTTP clients). The crate enables only rmcp's server transports, so the client code
+  was never built, but a CLI's `cargo deny` flags rmcp 3.8 by version; bumping cli-common now
+  moves its lockfile to 3.9.
+- `pk-cli-drive`: `Backend::delete_file(rel)` removes one file and answers whether one was there
+  (`false`: none), for a CLI that drains an inbox folder or replaces a stored file. On a remote it
+  is `rclone deletefile` (`Remote::delete_file`); behind the cache (`CachedRemote::delete_file`) it
+  is a write, so copies served stale are confirmed first and the file's cached copy and every
+  cached listing are dropped after. A `rel` naming no file under the root (empty, absolute, a
+  trailing `/`, `.` or `..`) is refused with exit 2 before anything runs, and a folder is never
+  removed: a mount refuses one with exit 2, and rclone, which answers a folder as no file, gives
+  `false`.
 - `pk-cli-documents`: `verify_download` checks images by their magic bytes: `png`, `jpg`/`jpeg`,
   `tif`/`tiff` and `heic`/`heif` (an ISO-BMFF `ftyp` box with a HEIF major brand), in any case.
   A real image under one of those types used to fail as binary under a text filetype. A body

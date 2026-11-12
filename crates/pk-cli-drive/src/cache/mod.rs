@@ -10,9 +10,10 @@
 //! - **Remote is authoritative.** The cache only accelerates reads; it can
 //!   never contradict a write this process completed.
 //! - **Write-through.** Every write hits the REMOTE first ([`Remote::write`],
-//!   `copy_in`, `move_to`, `mkdir`). Only on remote success do we touch the
-//!   cache — write the new content in, and invalidate cached listings the write
-//!   changes. On remote error we propagate and leave the cache untouched.
+//!   `copy_in`, `move_to`, `delete_file`, `mkdir`). Only on remote success do
+//!   we touch the cache — write the new content in (a delete drops the file's
+//!   copy instead), and invalidate cached listings the write changes. On
+//!   remote error we propagate and leave the cache untouched.
 //!   A `--no-cache` run bypasses reads only ([`CachePolicy::bypass_reads`]);
 //!   its writes still update the cache, so a later cached read never serves
 //!   the pre-write copy.
@@ -480,6 +481,19 @@ impl CachedRemote<Remote> {
         self.remote.move_no_clobber(rel_from, rel_to)?;
         self.written([(rel_from, None), (rel_to, None)]);
         Ok(())
+    }
+
+    /// Delete one file ([`Remote::delete_file`]). A delete is a write: a
+    /// `rel` naming no file is refused before any remote call, the copies
+    /// served stale are confirmed, and once the remote has answered (deleted,
+    /// or no file there) the file's cached copy and every cached listing are
+    /// dropped, so neither a read nor a listing serves the file again.
+    pub fn delete_file(&self, rel: &str) -> Result<bool, CliError> {
+        crate::backend::check_deletable(rel)?;
+        self.confirm_stale_reads()?;
+        let deleted = self.remote.delete_file(rel)?;
+        self.written([(rel, None)]);
+        Ok(deleted)
     }
 
     pub fn mkdir(&self, rel: &str) -> Result<(), CliError> {
@@ -1003,8 +1017,56 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let c = CachedRemote::new(stub.remote(), cache.path().to_path_buf(), POLICY);
         assert_eq!(c.write("notes.md", "one").unwrap_err().exit_code(), 5);
+        assert_eq!(c.delete_file("notes.md").unwrap_err().exit_code(), 5);
         assert!(!cache.path().join("notes.md").exists());
         assert!(!cache.path().join(".swr/generation").exists());
+    }
+
+    /// A delete is a write: the remote first, then the file's cached copy
+    /// and every cached listing go, so neither serves the file again.
+    #[cfg(unix)]
+    #[test]
+    fn a_delete_drops_the_cached_copy_and_the_listings() {
+        let stub = crate::stub::Stub::backed();
+        let cache = tempfile::tempdir().unwrap();
+        let c = CachedRemote::new(stub.remote(), cache.path().to_path_buf(), POLICY);
+        c.write("inbox/a.json", "one").unwrap();
+        c.write("inbox/b.json", "two").unwrap();
+        let names = |c: &CachedRemote| -> Vec<String> {
+            c.list_entries("inbox")
+                .unwrap()
+                .into_iter()
+                .map(|e| e.rel)
+                .collect()
+        };
+        assert_eq!(names(&c), vec!["a.json", "b.json"]);
+        let calls = stub.calls().len();
+        assert_eq!(c.cat("inbox/a.json").unwrap().as_deref(), Some("one"));
+        assert_eq!(names(&c), vec!["a.json", "b.json"]);
+        assert_eq!(stub.calls().len(), calls, "both served from the cache");
+
+        assert!(c.delete_file("inbox/a.json").unwrap());
+        assert!(!stub.file("inbox/a.json").exists());
+        assert!(!cache.path().join("inbox/a.json").exists());
+        assert!(!cache.path().join(".listings-v2").exists());
+        let calls = stub.calls().len();
+        assert_eq!(c.cat("inbox/a.json").unwrap(), None);
+        assert_eq!(stub.calls().len(), calls + 1, "the read went to the remote");
+        assert_eq!(names(&c), vec!["b.json"]);
+        assert_eq!(stub.calls().len(), calls + 2, "the listing was fetched");
+
+        // Gone from the remote already (another machine deleted it): `false`,
+        // and the copy this machine still holds is dropped all the same.
+        fs::remove_file(stub.file("inbox/b.json")).unwrap();
+        assert_eq!(c.cat("inbox/b.json").unwrap().as_deref(), Some("two"));
+        assert!(!c.delete_file("inbox/b.json").unwrap());
+        assert_eq!(c.cat("inbox/b.json").unwrap(), None);
+
+        // Naming no file is refused before any rclone call.
+        let calls = stub.calls().len();
+        assert_eq!(c.delete_file("").unwrap_err().exit_code(), 2);
+        assert_eq!(c.delete_file("../x.json").unwrap_err().exit_code(), 2);
+        assert_eq!(stub.calls().len(), calls);
     }
 
     /// The read-modify-write guard end to end: a copy served stale, another
@@ -1031,6 +1093,11 @@ mod tests {
         // This command stays refused: the remedy is a rerun, which is a new
         // command with a new cache handle. Its read is current and fresh.
         assert_eq!(c.write("notes.md", "x").unwrap_err().exit_code(), 1);
+        assert_eq!(c.delete_file("notes.md").unwrap_err().exit_code(), 1);
+        assert!(
+            stub.file("notes.md").exists(),
+            "a refused delete deletes nothing"
+        );
         let rerun = CachedRemote::new(stub.remote(), cache.path().to_path_buf(), POLICY);
         let calls = stub.calls().len();
         assert_eq!(rerun.cat("notes.md").unwrap().as_deref(), Some("one\ntwo"));

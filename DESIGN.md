@@ -707,20 +707,25 @@ Drive-for-desktop mount or any folder. It is fast but can go stale without
 saying so (a plain directory left where a mount used to be accepts writes and
 syncs nothing; a lazily-materialized mount answers "no such file" for folders
 the remote has), so a CLI certifies a mount before trusting it.
-`Remote` is rclone (`cat`/`copyto`/`moveto`/`lsf`/`mkdir`) against a spec
+`Remote` is rclone (`cat`/`copyto`/`moveto`/`deletefile`/`lsf`/`mkdir`) against a spec
 `<remote>:<folder>`: slower, but it talks to the provider's API and is immune
 to mount health. When both are configured, the remote is used for every
 state operation. rclone's exit codes 3 and 4 read as "missing" (a missing file
 is `None`, a missing folder lists empty); every other failure is exit 5,
 never an empty result. A move to a computed name uses `move_no_clobber`,
 which refuses an occupied destination with exit 2 and both files untouched.
+`delete_file` removes one file and answers whether one was there (`false`:
+none). It refuses a `rel` that names no file under the root (empty,
+absolute, a trailing `/`, `.` or `..`) with exit 2 before anything runs, and
+never removes a folder: a mount refuses one with exit 2, and rclone, which
+answers a folder as no file, gives `false`.
 
 **The read cache** (`CachedRemote`, the default in front of a remote) is a
 per-machine accelerator, never a second source of truth:
 
 | Rule | |
 |---|---|
-| Write-through | every write hits the remote first; only on success is the cache updated (content stored, listings dropped). A `--no-cache` run bypasses reads only; its writes still update the cache |
+| Write-through | every write hits the remote first; only on success is the cache updated (content stored, or for a delete the file's copy dropped; listings dropped). A `--no-cache` run bypasses reads only; its writes still update the cache |
 | Freshness tiers | a copy within the TTL (900 s) is served; past it but within the staleness bound (24 h) it is served at once with a `note:` on stderr and refreshed in the background; past the bound, or with nothing cached, the read fetches before the command continues |
 | A write is never undone by a refresh | each write bumps a generation counter under a lock; a fetch stores its result only if the generation is unchanged since before it read |
 | A write never derives from an unconfirmed stale copy | before a write, every copy the command was served stale is re-read; if one changed, the write is refused, nothing written, the cache now current |

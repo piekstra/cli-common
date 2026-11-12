@@ -28,12 +28,15 @@ impl Stub {
         Stub { dir }
     }
 
-    /// A stub backed by a plain directory: `cat`, `copyto` (both ways) and
-    /// `lsf` act on `<stub dir>/remote/<path after the colon>`.
+    /// A stub backed by a plain directory: `cat`, `copyto` (both ways),
+    /// `deletefile` and `lsf` (an existence check, or `-R` for a listing
+    /// whose times and sizes are 0) act on `<stub dir>/remote/<path after
+    /// the colon>`.
     pub fn backed() -> Stub {
         Stub::new(
             r#"root="$(dirname "$0")/remote"
 path() { printf '%s/%s' "$root" "${1#*:}"; }
+for arg; do case "$arg" in *:*) target="$arg";; esac; done
 case "$1" in
   cat) [ -f "$(path "$2")" ] || exit 3; cat "$(path "$2")";;
   copyto)
@@ -41,7 +44,13 @@ case "$1" in
       *:*) [ -f "$(path "$2")" ] || exit 3; cp "$(path "$2")" "$3";;
       *) mkdir -p "$(dirname "$(path "$3")")"; cp "$2" "$(path "$3")";;
     esac;;
-  lsf) [ -e "$(path "$2")" ] || exit 3;;
+  deletefile) [ -f "$(path "$2")" ] || exit 4; rm "$(path "$2")";;
+  lsf)
+    case "$2" in
+      -R) [ -d "$(path "$target")" ] || exit 3
+          cd "$(path "$target")" && find . -type f | sed 's|^\./|0;0;|';;
+      *) [ -e "$(path "$2")" ] || exit 3;;
+    esac;;
   *) exit 1;;
 esac"#,
         )
