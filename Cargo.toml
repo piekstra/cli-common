@@ -68,7 +68,7 @@ ctrlc = "3.5"
 # CLI's derives serve both), and behind its `stdio` feature the official MCP
 # Rust SDK plus the runtime its stdio transport needs.
 schemars = "1"
-rmcp = { version = "3.8", default-features = false, features = ["server", "transport-io"] }
+rmcp = { version = "3.9", default-features = false, features = ["server", "transport-io"] }
 tokio = { version = "1", default-features = false, features = ["rt"] }
 # pk-cli-mcp's `http` feature: rmcp's stateless Streamable HTTP service on a
 # hyper HTTP/1.1 listener bound to 127.0.0.1, and the OS CSPRNG for a new

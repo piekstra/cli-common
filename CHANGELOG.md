@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `pk-cli-mcp`: requires rmcp 3.9, up from 3.8. v0.30.0 moved this repository's lockfile to
+  rmcp 3.9.0 (RUSTSEC-2026-0462); with the requirement raised, a CLI's own lockfile moves too
+  when it bumps cli-common, so its `cargo deny` stops flagging rmcp 3.8.
+
 ## v0.30.0 — 2026-11-12
 
 - `pk-cli-auth`: `oauth`, OAuth 2 sign-in for a native CLI (DESIGN.md §2.4), moved from rhap's
