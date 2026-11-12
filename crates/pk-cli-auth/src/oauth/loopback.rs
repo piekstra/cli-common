@@ -106,8 +106,10 @@ impl LoopbackListener {
     /// [`super::code_from_callback`] says. One that is not this sign-in's (no
     /// `state`, another one, a repeated parameter: a reloaded old tab, or a page
     /// elsewhere sending the browser here) gets the failure page and the wait
-    /// goes on. Past `timeout` this is [`CliError::Auth`]: nobody finished
-    /// signing in, and signing in again is the fix.
+    /// goes on, with a line on stderr saying so (a provider that leaves `state`
+    /// off its error may be answering this sign-in, and its refusal is named).
+    /// Past `timeout` this is [`CliError::Auth`], naming the last such answer:
+    /// nobody finished signing in, and signing in again is the fix.
     pub fn wait_for_code(
         &self,
         expected_state: &str,
@@ -122,7 +124,13 @@ impl LoopbackListener {
                 match answers.try_recv() {
                     Ok(Callback::Code(code)) => return Ok(code),
                     Ok(Callback::Refused(err)) => return Err(err),
-                    Ok(Callback::NotThisSignIn(err)) => not_ours = Some(err),
+                    Ok(Callback::NotThisSignIn(err)) => {
+                        eprintln!(
+                            "{err}\nStill waiting for this sign-in; press Ctrl-C to stop and \
+                             start again."
+                        );
+                        not_ours = Some(err);
+                    }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
                         unreachable!("this loop holds a sender")
@@ -270,8 +278,8 @@ fn page(app: &str, outcome: Outcome) -> String {
         Outcome::SignedIn => "signed in. You can close this tab and return to the terminal.",
         Outcome::Failed => "the sign-in did not complete. Return to the terminal for details.",
         Outcome::NotThisSignIn => {
-            "this is not the sign-in the terminal is waiting for. Finish that one, or start again \
-             from the terminal."
+            "this answer is not the sign-in the terminal is waiting for, so it is still waiting. \
+             If you declined or the sign-in failed, return to the terminal and start again."
         }
         Outcome::NotHere => "nothing here.",
     };

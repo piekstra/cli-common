@@ -191,9 +191,21 @@ pub(crate) fn check_callback(
             ))
         }
         None => {
-            return Callback::NotThisSignIn(CliError::Auth(
-                "the sign-in's answer carried no `state`; refusing it. Sign in again".into(),
-            ))
+            // A server that leaves `state` off its error may be answering this
+            // sign-in, so its refusal is named, though it cannot end the wait.
+            let error = one("error").map(|error| {
+                let description = one("error_description")
+                    .map(|d| format!(": {}", printable(d)))
+                    .unwrap_or_default();
+                format!(
+                    " (the provider refused a sign-in: {}{description})",
+                    printable(error)
+                )
+            });
+            return Callback::NotThisSignIn(CliError::Auth(format!(
+                "the sign-in's answer carried no `state`; refusing it{}. Sign in again",
+                error.unwrap_or_default()
+            )));
         }
     }
     if let (Some(expected), Some(iss)) = (expected_issuer, one("iss")) {
@@ -432,6 +444,10 @@ mod tests {
         // Without a state, an error is not provably this sign-in's.
         let err = code_from_callback("/callback?error=server_error", "XYZ", None).unwrap_err();
         assert!(err.to_string().contains("no `state`"), "{err}");
+        assert!(
+            err.to_string().contains("refused a sign-in: server_error"),
+            "{err}"
+        );
         assert!(matches!(
             check_callback("/callback?error=server_error", "XYZ", None),
             Callback::NotThisSignIn(_)

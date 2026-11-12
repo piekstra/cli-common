@@ -33,8 +33,8 @@ impl<T: Transport> OAuthClient<T> {
     }
 
     /// Post `request` to the token endpoint. A refusal maps through
-    /// [`super::refusal`]; a 2xx body without an access token is
-    /// [`CliError::Upstream`].
+    /// [`super::refusal`], and so does a 2xx body that carries an OAuth `error`
+    /// instead of a token; a 2xx body with neither is [`CliError::Upstream`].
     pub async fn token(
         &self,
         endpoint: &str,
