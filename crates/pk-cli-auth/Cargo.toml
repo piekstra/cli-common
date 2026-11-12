@@ -1,6 +1,6 @@
 [package]
 name = "pk-cli-auth"
-description = "Standard auth surface for the piekstra CLI family: auth-status/v1 DTO, login/set-credential arg structs, logout semantics."
+description = "Standard auth surface for the piekstra CLI family: auth-status/v1 DTO, login/set-credential arg structs, logout semantics, OAuth 2 sign-in with PKCE and a loopback redirect."
 version.workspace = true
 edition.workspace = true
 # std::fs::File::try_lock (refresh_lock) needs 1.89.
@@ -16,6 +16,13 @@ pk-cli-secrets = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# oauth: the S256 PKCE challenge, the verifier and `state` from the system's
+# random source, tokens zeroed on drop.
+sha2 = { workspace = true }
+getrandom = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# The doc examples drive the oauth client over the native transport.
+pk-cli-http = { workspace = true }
