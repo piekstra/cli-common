@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.31.1 — 2026-11-12
+
+- `pk-cli-drive`: `private_file::write` syncs the file to disk (`File::sync_all`, `F_FULLFSYNC` on
+  macOS) before it returns or renames. A crash or power loss right after a `Replace::Always` write
+  could otherwise leave the rename on disk ahead of the bytes: a zero-length or partial file where
+  a complete earlier copy had been. No change to the API.
+
 ## v0.31.0 — 2026-11-12
 
 - `pk-cli-mcp`: requires rmcp 3.9, up from 3.8. v0.30.0 moved this repository's lockfile to
