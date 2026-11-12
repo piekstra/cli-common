@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · `Confirm::Undecided`, when a window capture's read cannot decide (§2.2) · 2026-11-03 · `pk-cli-arcgis`, read-only ArcGIS REST layer queries (Part 2) · 2026-11-03 · `SendDeadline`, a late write's check in one place (§1.9, §2.3) · 2026-11-03 · `CliError::because`, a typed cause and a remedy apart from the message (§1.5, §1.9) · 2026-11-03 · a position cursor for lists whose rows move (§1.9) · 2026-11-03 · an item over Windows's credential limit, split and put back together (§1.7) · 2026-11-03 · `hold_within`, `stop_note` (§1.9) · 2026-11-03 · `ReadBudget`, `RowsSeen`, `forget_note` (§1.9) · 2026-11-04
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · `Confirm::Undecided`, when a window capture's read cannot decide (§2.2) · 2026-11-03 · `pk-cli-arcgis`, read-only ArcGIS REST layer queries (Part 2) · 2026-11-03 · `SendDeadline`, a late write's check in one place (§1.9, §2.3) · 2026-11-03 · `CliError::because`, a typed cause and a remedy apart from the message (§1.5, §1.9) · 2026-11-03 · a position cursor for lists whose rows move (§1.9) · 2026-11-03 · an item over Windows's credential limit, split and put back together (§1.7) · 2026-11-03 · `hold_within`, `stop_note` (§1.9) · 2026-11-03 · `ReadBudget`, `RowsSeen`, `forget_note` (§1.9) · 2026-11-04 · OAuth 2 sign-in with PKCE and a loopback redirect, `pk_cli_auth::oauth` (§2.4) · 2026-11-12
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -671,7 +671,7 @@ AGENTS.md, same house style as the CLIs.
 | `pk-cli-secrets` | keychain read/write/delete under `piekstra.<bin>`; typed one-item JSON credentials (`get_json`/`set_json`) and legacy-service migration (`migrate_from`); secret ingestion (`--stdin`/`--from-env`/`--op` args + logic); 1Password reads through `op` (`OpRef`, `OnePassword`); runtime source precedence (`SecretResolver`, `SourceOrder`); `auth set-credential` command impl | fpl/xfin `secrets.rs`, lrfl `auth/secrets.rs`; ghome `session.rs`/tplc `keychain.rs` item consolidation |
 | `pk-cli-config` | `~/.config/<bin>/config.toml` load/save, typed get/set, `config` subcommand impl, `--config` override | four `config.rs` variants |
 | `pk-cli-selfupdate` | GitHub-release check + in-place replace, `--check`/`-y`/`--json`, `self-update/v1` DTO, release-asset naming convention, a note after an install (`run_noting`) | ~580 duplicated lines across 4 repos |
-| `pk-cli-auth` | `AuthCmd` clap enum + driver trait: CLI supplies `verify()`/`login()`, crate supplies status DTO (`auth-status/v1`), logout, prompting rules; `otp`, the one-time-code login (request, park for `--code`, mailbox read or prompt); `refresh_lock`, the cross-process lock around a rotating refresh token's renewal (§1.7) | four auth command modules; the per-CLI park-and-resume code loops; rhap's `token_refresh.rs` |
+| `pk-cli-auth` | `AuthCmd` clap enum + driver trait: CLI supplies `verify()`/`login()`, crate supplies status DTO (`auth-status/v1`), logout, prompting rules; `otp`, the one-time-code login (request, park for `--code`, mailbox read or prompt); `refresh_lock`, the cross-process lock around a rotating refresh token's renewal (§1.7); `oauth`, OAuth 2 sign-in for a native CLI: the authorization code with PKCE S256 and `state`, the loopback redirect, the code exchange, the refresh grant and dynamic client registration, over `Transport` (§2.4) | four auth command modules; the per-CLI park-and-resume code loops; rhap's `token_refresh.rs` and `oauth.rs` |
 | `pk-cli-http` | reqwest client builder (UA, cookie store, timeouts, retry-with-backoff), `BlockingTransport` (a blocking client behind core's `Transport`: no redirects, cookies or default headers), `api` passthrough command impl, error→exit-code-5 mapping | per-CLI `client.rs` boilerplate (session logic stays per-CLI) |
 | `pk-cli-core` (transport) | the seam a provider client is written against so it runs natively and in a WebAssembly Worker: `HttpRequest` (query parameters percent-encoded), `HttpResponse` (status, headers and body text), the async `Transport` trait with no `Send` bound and one contract for every implementation (no redirects followed, no state between sends, a request with no HTTP answer is `Upstream` naming the origin only), the separate `PlatformSigner` trait for platform ECDSA (so a transport wrapper cannot silently drop it), and `block_on` to drive a blocking transport's futures | a per-CLI `http.rs` seam, and a second copy of every provider client for the Worker |
 | `pk-cli-core` (list) | profile-agnostic list primitives — `Paged<T>` envelope + `RangeArgs` (`--limit`/`--since`/`--until`) — shared by every domain profile | duplicated paging/range structs, and non-utility CLIs depending on `pk-cli-utility` just to page |
@@ -1023,6 +1023,50 @@ a write (`example_device_rename`), its unit tests run the conformance check,
 `tests/mcp_stdio.rs` drives the real binary over stdio as a client
 would, and `tests/mcp_http.rs` drives `mcp --http` the way the Worker
 does, including every refusal. `pk-cli-mcp-wasm-demo` is the worked example for path B's module.
+
+### 2.4 OAuth sign-in (`pk_cli_auth::oauth`)
+
+For a CLI whose provider offers OAuth 2 to a native app: a person signs in
+in the system browser, the provider redirects to a listener on this machine,
+and the CLI trades the code for tokens. RFC 8252's pattern, with PKCE (RFC
+7636), `state`, and RFC 9207's `iss` when a server sends one. The crate owns
+the mechanism; the endpoints (from the provider's metadata), the scopes, the
+extra parameters (SMART's `aud`, RFC 8707's `resource`), whether to register a
+client, and the keychain account are the CLI's or a profile crate's
+(`pk-med-smart` in `piekstra/medical-common` builds SMART App Launch on it).
+
+| Piece | What it does |
+|---|---|
+| `AuthorizationCodeFlow` → `PendingAuthorization` | binds the listener, draws a 32-byte verifier and `state`, builds the address; `wait_for_code` (or `wait_for_code_with`, which hands each refused stray answer's reason to the CLI to print, since the library prints nothing), then `token_request(&code)` with the same redirect and verifier |
+| `LoopbackListener` | `127.0.0.1`, a port the system picks (or the first free one of the ports a provider registered, `bind_first`), path `/callback`, redirect `http://127.0.0.1:<port>/callback` (the IP literal, RFC 8252 §8.3). Answers only `GET /callback` whose `Host` is its own; a favicon or a probe gets a 404 or 400 and the wait goes on, each connection on its own thread so a browser's idle speculative connection holds nothing up. A request head over 16 KiB is refused. The page holds nothing from the request, under `Cache-Control: no-store`, `Referrer-Policy: no-referrer` and `Content-Security-Policy: default-src 'none'`. Past the wait (5 minutes by default) it is exit 3 |
+| `code_from_callback` | `state` compared in constant time; a missing or different one is refused as forgery, as is a parameter given twice, and the listener answers such a request with a page saying so and goes on waiting, so a reloaded old tab or a page elsewhere cannot end the sign-in. An `error` answer with this sign-in's `state` ends it, quoting the slug and description cut to printable text (no escape sequences), 200 characters at most |
+| `OAuthClient<T: Transport>` | `token(endpoint, &ClientAuth, &TokenRequest)` and `register(endpoint, &ClientMetadata, initial_access_token)`, each one POST with `User-Agent: <bin>/<version>` |
+| `ClientAuth` | `Public` (`client_id` in the body), `SecretBasic`, `SecretPost`, `PrivateKeyJwt` (an assertion the CLI signed) |
+| `TokenRequest` | `authorization_code`, `refresh`, or any extension `grant` (RFC 7523's JWT bearer); a parameter that would replace the request's own is exit 2 |
+| `TokenSet` | the one keychain item (`get_json`/`set_json`): tokens, `expires_at`, scope, ID token, `obtained_at` and the answer's other members. A renewal keeps what its answer leaves out: an unrotated refresh token, the scope, the ID token, SMART's `patient`. `Debug` shows no token; dropped strings are zeroed |
+| `ClientMetadata`, `RegisteredClient` | RFC 7591: `native_public` (no secret, code and refresh grants), `jwks` for a key-bound registration; the issued client serializes into the same item as the tokens |
+| `open_browser` | `open` or `xdg-open`, only for an `https` address or `http` to this machine. Print the address too |
+
+Every endpoint must be `https`, or `http` to this machine for a test server;
+anything else is refused before a request is built, as exit 5, since the
+address comes from a provider. A token or registration refusal maps onto the
+exit codes through `oauth::refusal`, and a 200 that carries an `error` instead of a token through the same table:
+
+| Answer | Exit |
+|---|---|
+| `invalid_grant`, `invalid_client`, `unauthorized_client`, `invalid_token`, a bare 401 | 3, `Reason::CredentialRefused`: sign in again (at the registration endpoint, the initial access token or the client was refused) |
+| `access_denied`, `invalid_scope`, a bare 403 | 3, `Reason::Forbidden` |
+| 429, 5xx, a 403 page, `temporarily_unavailable` | 5, naming any `Retry-After` |
+| any other 4xx (`invalid_request`, `unsupported_grant_type`, `invalid_redirect_uri`), or a 200 carrying an unknown `error` | 5, `Reason::BadRequest` |
+| a 3xx | 5: no redirect is followed with a credential in the body |
+
+A message quotes the OAuth slug and description, never the body otherwise
+and never a URL past its origin. A renewal holds `RefreshLock` as §1.7 says
+(the module docs show `renew` around `TokenRequest::refresh`); a sign-in calls
+`before_signin` before the browser opens and stores through `store_signin`.
+`auth status` reports `method: "browser-session"`: a person must be at a
+browser, as for a captured session. The tests run the whole flow offline: a
+browser stand-in on the listener and a token endpoint behind `Transport`.
 
 ### Versioning & consumption
 

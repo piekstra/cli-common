@@ -1,0 +1,10 @@
+{
+  "client_id": "dummy-registered-client-1",
+  "client_id_issued_at": 1767225600,
+  "client_secret_expires_at": 0,
+  "redirect_uris": ["http://127.0.0.1/callback"],
+  "token_endpoint_auth_method": "none",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "client_name": "example-cli"
+}

@@ -2,15 +2,9 @@
 
 ## Unreleased
 
-- Docs: `auth logout --forget` attempts every step and owes `stop_note` even when another fails;
-  an error quotes no URL's query; a call that reads more than once holds one turn; `PositionKey`'s
-  sort holds a timestamp only when the tool shows one, and its id is required and stays the same
-  while the row exists; fpl's connector port is 8740; nelnet ships Windows; the status rows of
-  lofty, xfin, fpl, lrfl and tojfl.
-- `pk-cli-mcp`: rmcp 3.9 at least, for RUSTSEC-2026-0462 (unbounded response bodies in rmcp's
-  Streamable HTTP clients). The crate enables only rmcp's server transports, so the client code
-  was never built, but a CLI's `cargo deny` flags rmcp 3.8 by version; bumping cli-common now
-  moves its lockfile to 3.9.
+- `pk-cli-mcp`: requires rmcp 3.9, up from 3.8. v0.30.0 moved this repository's lockfile to
+  rmcp 3.9.0 (RUSTSEC-2026-0462); with the requirement raised, a CLI's own lockfile moves too
+  when it bumps cli-common, so its `cargo deny` stops flagging rmcp 3.8.
 - `pk-cli-drive`: `Backend::delete_file(rel)` removes one file and answers whether one was there
   (`false`: none), for a CLI that drains an inbox folder or replaces a stored file. On a remote it
   is `rclone deletefile` (`Remote::delete_file`); behind the cache (`CachedRemote::delete_file`) it
@@ -19,6 +13,33 @@
   trailing `/`, `.` or `..`) is refused with exit 2 before anything runs, and a folder is never
   removed: a mount refuses one with exit 2, and rclone, which answers a folder as no file, gives
   `false`.
+
+## v0.30.0 — 2026-11-12
+
+- `pk-cli-auth`: `oauth`, OAuth 2 sign-in for a native CLI (DESIGN.md §2.4), moved from rhap's
+  `oauth.rs` and made generic. `AuthorizationCodeFlow` binds `LoopbackListener` on `127.0.0.1`
+  (`/callback`, a port the system picks), draws the PKCE S256 verifier and `state`, and builds the
+  address; `PendingAuthorization` waits for the code and builds the exchange. The listener answers
+  only `GET /callback` with its own `Host`, serves each connection on its own thread so an idle
+  speculative connection holds nothing up, and shows a page that holds nothing from the request.
+  `code_from_callback` refuses a missing or different `state`, a repeated parameter and, when the
+  CLI names one, another issuer's `iss` (RFC 9207). `OAuthClient` posts token and registration
+  requests over `Transport`; `ClientAuth` covers a public client, `client_secret_basic`,
+  `client_secret_post` and `private_key_jwt`; `TokenRequest` the code, refresh and any extension
+  grant. `TokenSet` is the one keychain item, and a renewal keeps what its answer leaves out (an
+  unrotated refresh token, the scope, SMART's `patient`). `refusal` maps a spent grant or a
+  refused client to exit 3 and a 429, a 5xx or an unavailable server to exit 5. RFC 7591
+  registration through `ClientMetadata` and `RegisteredClient`. Every endpoint must be `https` or
+  `http` to this machine. New dependencies: `sha2` 0.11 (rmcp's), and `getrandom` and `zeroize` from the
+  workspace.
+- `Cargo.lock`: rmcp 3.9.0, which bounds its Streamable HTTP clients' response bodies
+  (RUSTSEC-2026-0462). The family serves MCP and uses none of those clients; cargo-deny refused the
+  lock until now.
+- Docs: `auth logout --forget` attempts every step and owes `stop_note` even when another fails;
+  an error quotes no URL's query; a call that reads more than once holds one turn; `PositionKey`'s
+  sort holds a timestamp only when the tool shows one, and its id is required and stays the same
+  while the row exists; fpl's connector port is 8740; nelnet ships Windows; the status rows of
+  lofty, xfin, fpl, lrfl and tojfl.
 
 ## v0.29.0 — 2026-11-04
 
