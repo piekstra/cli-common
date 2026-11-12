@@ -54,14 +54,10 @@ pub fn verify_download(bytes: &[u8], filetype: Option<&str>) -> Result<(), CliEr
         return Err(not_the_document(bytes, filetype.unwrap_or("a document")));
     }
     // Normalize once at the boundary; every comparison below is exact.
-    let label = filetype.map(str::to_ascii_lowercase);
-    match label.as_deref() {
-        None | Some("pdf") => verify_pdf(bytes),
-        Some("png") => verify_magic(bytes, is_png, "a PNG"),
-        Some("jpg" | "jpeg") => verify_magic(bytes, is_jpeg, "a JPEG"),
-        Some("tif" | "tiff") => verify_magic(bytes, is_tiff, "a TIFF"),
-        Some("heic" | "heif") => verify_magic(bytes, is_heic, "a HEIC/HEIF image"),
-        Some(other) => verify_text(bytes, other),
+    let label = filetype.map_or_else(|| "pdf".to_string(), str::to_ascii_lowercase);
+    match BY_MAGIC.iter().find(|f| f.names.contains(&label.as_str())) {
+        Some(format) => verify_magic(bytes, format.magic, format.label),
+        None => verify_text(bytes, &label),
     }
 }
 
@@ -77,8 +73,8 @@ pub fn verify_download(bytes: &[u8], filetype: Option<&str>) -> Result<(), CliEr
 /// undeclared file. A sniffed type is a guess from the first bytes, not a
 /// validation of the whole file.
 pub fn sniff(bytes: &[u8]) -> Option<&'static str> {
-    if let Some((_, name)) = SNIFFED.iter().find(|(is, _)| is(bytes)) {
-        return Some(name);
+    if let Some(format) = BY_MAGIC.iter().find(|f| (f.magic)(bytes)) {
+        return Some(format.names[0]);
     }
     let head = text_head(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes))?;
     (head.starts_with('<') && !looks_like_html(&head)).then_some("xml")
@@ -87,14 +83,43 @@ pub fn sniff(bytes: &[u8]) -> Option<&'static str> {
 /// Whether a body starts with one format's magic bytes.
 type Magic = fn(&[u8]) -> bool;
 
-/// What [`sniff`] names, by magic, each under a filetype [`verify_download`]
-/// checks with the same function.
-const SNIFFED: [(Magic, &str); 5] = [
-    (is_pdf, "pdf"),
-    (is_png, "png"),
-    (is_jpeg, "jpeg"),
-    (is_tiff, "tiff"),
-    (is_heic, "heic"),
+/// A format known by its magic bytes: the declared filetypes that mean it
+/// (the first is the name [`sniff`] gives it), its check, and the label a
+/// failure names.
+struct Format {
+    names: &'static [&'static str],
+    magic: Magic,
+    label: &'static str,
+}
+
+/// The one list both [`verify_download`] and [`sniff`] read, so a format
+/// `sniff` names is checked by the same magic under that name.
+const BY_MAGIC: [Format; 5] = [
+    Format {
+        names: &["pdf"],
+        magic: is_pdf,
+        label: "a PDF",
+    },
+    Format {
+        names: &["png"],
+        magic: is_png,
+        label: "a PNG",
+    },
+    Format {
+        names: &["jpeg", "jpg"],
+        magic: is_jpeg,
+        label: "a JPEG",
+    },
+    Format {
+        names: &["tiff", "tif"],
+        magic: is_tiff,
+        label: "a TIFF",
+    },
+    Format {
+        names: &["heic", "heif"],
+        magic: is_heic,
+        label: "a HEIC/HEIF image",
+    },
 ];
 
 fn verify_magic(bytes: &[u8], matches: Magic, label: &str) -> Result<(), CliError> {
@@ -399,6 +424,20 @@ mod tests {
         }
         for ft in ["png", "jpg", "tif", "heif"] {
             assert!(verify_download(b"", Some(ft)).is_err(), "{ft}");
+        }
+    }
+
+    /// Each declared name means one format, and the name `sniff` gives a
+    /// format leads back to that same format.
+    #[test]
+    fn every_name_in_the_format_table_means_one_format() {
+        let mut seen = std::collections::HashSet::new();
+        for format in &BY_MAGIC {
+            assert!(!format.names.is_empty(), "{}", format.label);
+            for name in format.names {
+                assert_eq!(*name, name.to_ascii_lowercase());
+                assert!(seen.insert(*name), "{name} is in two formats");
+            }
         }
     }
 
