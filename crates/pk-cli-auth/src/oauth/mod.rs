@@ -43,7 +43,11 @@
 //!     .start()?;
 //! eprintln!("Sign in at: {}", pending.url());
 //! oauth::open_browser(pending.url());
-//! let code = pending.wait_for_code(oauth::DEFAULT_TIMEOUT)?;
+//! // Say on the CLI's own output when a stray answer is refused, so a person
+//! // who declined is not left waiting out the timeout.
+//! let code = pending.wait_for_code_with(oauth::DEFAULT_TIMEOUT, |reason| {
+//!     eprintln!("{reason}. Still waiting; press Ctrl-C to start again.")
+//! })?;
 //! let client = OAuthClient::new(pk_cli_http::BlockingTransport::new()?, "example", "0.1.0");
 //! let answer = block_on(client.token(
 //!     "https://auth.example.test/token",

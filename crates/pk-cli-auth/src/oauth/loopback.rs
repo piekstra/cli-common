@@ -420,16 +420,29 @@ mod tests {
 
     #[test]
     fn a_refused_answer_is_reported_while_the_wait_goes_on() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
         let listener = LoopbackListener::bind("pk-test").unwrap();
         let port = listener.port();
-        let browser = std::thread::spawn(move || {
-            send(port, &get("/callback?error=access_denied"));
-            send(port, &get("/callback?code=new&state=S"))
-        });
+        let heard = Arc::new(AtomicBool::new(false));
+        let browser = {
+            let heard = Arc::clone(&heard);
+            std::thread::spawn(move || {
+                send(port, &get("/callback?error=access_denied"));
+                // The refusal reaches the wait from the serving thread, after
+                // this answer: send the code only once it has been reported.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !heard.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                send(port, &get("/callback?code=new&state=S"))
+            })
+        };
         let mut reported = Vec::new();
         let code = listener
             .wait_for_code_with("S", None, Duration::from_secs(20), |reason| {
-                reported.push(reason.to_string())
+                reported.push(reason.to_string());
+                heard.store(true, Ordering::SeqCst);
             })
             .unwrap();
         assert_eq!(code.expose(), "new");
