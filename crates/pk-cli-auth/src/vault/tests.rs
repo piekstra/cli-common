@@ -366,6 +366,32 @@ fn the_directory_and_entries_are_the_owners_alone() {
     assert!(leftovers.is_empty(), "no temporary file is left behind");
 }
 
+/// After a clear the directory holds the lock and the key id, both the
+/// owner's alone, and nothing that names or holds a secret.
+#[cfg(unix)]
+#[test]
+fn a_clear_leaves_only_the_lock_and_the_key_id_both_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new();
+    let keys = Arc::new(MemoryKeys::new());
+    let vault = tmp.vault_with(&keys);
+    vault.put("a", &secret("x")).unwrap();
+    // A lock file an earlier release created at the umask's mode.
+    let lock = vault.dir().join(LOCK_FILE);
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(vault.clear().unwrap(), 1);
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let mut left: Vec<String> = fs::read_dir(vault.dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, [ID_FILE, LOCK_FILE]);
+    assert_eq!(mode(&lock), 0o600);
+    assert_eq!(mode(&vault.dir().join(ID_FILE)), 0o600);
+    assert_eq!(fs::metadata(&lock).unwrap().len(), 0);
+}
+
 #[test]
 fn json_round_trips_and_a_bad_entry_names_no_value() {
     #[derive(Serialize, Deserialize, PartialEq, Debug)]
