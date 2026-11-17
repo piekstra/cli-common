@@ -13,7 +13,10 @@
 //!   port the system picks, path `/callback`), draws the PKCE verifier and the
 //!   `state`, and builds the address; [`PendingAuthorization`] waits for the
 //!   code and builds the exchange. The listener answers only `GET /callback`
-//!   with its own `Host`, on a page that holds nothing from the request.
+//!   with its own `Host`, on a page that holds nothing from the request. For a
+//!   provider that takes only `https` redirects,
+//!   [`AuthorizationCodeFlow::redirect_uri`] sends a registered page that
+//!   forwards the answer to the listener on a fixed port.
 //! - [`OAuthClient`] posts the grants and registrations over
 //!   `pk_cli_core::transport::Transport`, and maps a refusal onto the family's
 //!   exit codes ([`refusal`]): a spent grant or a refused client is 3, a 429,

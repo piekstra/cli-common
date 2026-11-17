@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.32.0 — 2026-11-16
+
+- `pk-cli-auth`: `AuthorizationCodeFlow::redirect_uri(uri)` sends a registered `https` page as
+  the redirect instead of the listener's `http://127.0.0.1:<port>/callback`, for a provider that
+  accepts only `https` redirects in production. Epic, for one, says "An https protocol is required
+  for use in a production environment". The page sends the browser on to the listener with the
+  query unchanged. The listener checks `state` and `iss` as for a direct redirect, and the
+  exchange names `uri` with the PKCE verifier, which never leaves the machine.
+  `PendingAuthorization::redirect_uri` is the one the address sent, and `listener_uri` is where
+  the answer must arrive. `start` refuses, as exit 2, a `uri` that is not `https`, has no host or
+  carries a fragment (RFC 6749 §3.1.2), and a flow with no fixed port, since the page forwards to
+  one it knows. A flow without `redirect_uri` is unchanged.
+
 ## v0.31.1 — 2026-11-12
 
 - `pk-cli-drive`: `private_file::write` syncs the file to disk (`File::sync_all`, `F_FULLFSYNC` on
