@@ -2,7 +2,8 @@
 //!
 //! Provides the shared error/exit-code contract, the text/JSON output
 //! renderer, common global flags, small date/money helpers, the §1.3
-//! confirmation gate, reference resolution, and the [`transport`] seam a
+//! confirmation gate, reference resolution, owner-only atomic file output
+//! ([`private_file`]), and the [`transport`] seam a
 //! provider client is written against so it runs natively and in a
 //! WebAssembly host alike. See the repository's `DESIGN.md` for the full
 //! specification.
@@ -16,6 +17,7 @@ pub mod info;
 pub mod list;
 pub mod money;
 pub mod output;
+pub mod private_file;
 pub mod resolve;
 pub mod transport;
 

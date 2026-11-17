@@ -52,13 +52,14 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use pk_cli_core::private_file::{self, Replace};
 use pk_cli_core::CliError;
 use pk_cli_secrets::{CredentialStore, Secret};
 use serde::de::DeserializeOwned;
@@ -321,7 +322,7 @@ impl Vault {
             .map_err(|e| CliError::Other(format!("encoding a vault entry: {e}")))?,
         );
         let sealed = seal(&key, &file_stem(&path), &plain)?;
-        write_atomically(&self.dir, &path, &sealed)
+        write_atomically(&path, &sealed)
     }
 
     /// Delete the entry `name`. `true` when one was there. Needs no key.
@@ -596,7 +597,7 @@ impl Vault {
         getrandom::fill(&mut raw)
             .map_err(|e| CliError::Other(format!("drawing a key id from the system: {e}")))?;
         let id = hex(&raw);
-        write_atomically(&self.dir, &self.dir.join(ID_FILE), id.as_bytes())?;
+        write_atomically(&self.dir.join(ID_FILE), id.as_bytes())?;
         Ok(id)
     }
 
@@ -729,36 +730,10 @@ fn open(key: &Key, stem: &str, sealed: &[u8]) -> Option<Plain> {
     serde_json::from_slice(&plain).ok()
 }
 
-fn write_atomically(dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), CliError> {
-    let mut suffix = [0u8; 8];
-    getrandom::fill(&mut suffix)
-        .map_err(|e| CliError::Other(format!("drawing a file name from the system: {e}")))?;
-    let temp = dir.join(format!(".{}.{}.tmp", file_stem(path), hex(&suffix)));
-    let result = (|| {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temp)
-            .map_err(|e| io_error("creating", &temp, &e))?;
-        file.write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|e| io_error("writing", &temp, &e))?;
-        fs::rename(&temp, path).map_err(|e| io_error("replacing", path, &e))?;
-        #[cfg(unix)]
-        File::open(dir)
-            .and_then(|d| d.sync_all())
-            .map_err(|e| io_error("syncing", dir, &e))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
+/// Through the family's one owner-only writer: a `0600` temporary file,
+/// synced, renamed over `path`, the directory synced.
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
+    private_file::write(path, bytes, Replace::Always).map_err(|e| io_error("writing", path, &e))
 }
 
 fn file_stem(path: &Path) -> String {

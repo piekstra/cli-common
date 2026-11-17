@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.33.1 — 2026-11-17
+
+- `pk-cli-config`: `ConfigStore::save` writes `config.json` owner-only and atomically: a `0600`
+  temporary file beside it, synced, renamed over it, the directory synced. It wrote with
+  `fs::write` before, so the file took the umask's mode (`0644` as a rule) and a crash mid-write
+  could leave it truncated. Under profiles the file holds each login's grants, so another local
+  account could read them and a torn write lost every profile. A file left at a wider mode is
+  replaced by a `0600` one on its next save. A directory `save` creates is `0700`; an existing one
+  keeps its mode. A `config.json` that is a symlink is written through to its final target, which
+  is created, with its directory, when the link dangles.
+- `pk-cli-core`: `private_file`, the one owner-only writer: `write(path, bytes, Replace)`,
+  `create_dir_all` (missing directories `0700`) and `resolve_links`. It is `pk-cli-drive`'s
+  `private_file` moved down, with a directory sync after the rename. That sync is best effort: the
+  new file is in place once the rename succeeds, so a filesystem that refuses to sync a directory
+  no longer fails a completed write. `ConfigStore::save` and the vault write through it.
+  `pk_cli_drive::private_file` re-exports it, so `write` and `Replace` keep their paths.
+- `pk-cli-auth`: the vault's entries and key id file are written through `private_file`. An I/O
+  error now reads `writing <path>: …`, and a refused directory sync after the rename is no longer
+  an error.
+
+No API is removed. A CLI gets these by moving every `pk-cli-*` to v0.33.1.
+
 ## v0.33.0 — 2026-11-17
 
 - `pk-cli-auth`: `vault::Vault` keeps every secret a CLI holds under one keychain item, so a newly
