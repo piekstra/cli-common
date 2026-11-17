@@ -79,9 +79,11 @@ impl AuthorizationCodeFlow {
     /// the listener with the answer's query unchanged. The listener checks
     /// `state` and `iss` as for a direct redirect, and the exchange names `uri`
     /// with the PKCE verifier, which never leaves this machine. The page knows
-    /// one port, so [`ports`](Self::ports) must name it. `start` refuses, as
-    /// exit 2, a `uri` that is not `https`, one with a fragment (RFC 6749
-    /// §3.1.2), or no fixed port.
+    /// one port, so [`port`](Self::port) must name it: with a list to choose
+    /// from, the listener could bind one the page does not forward to. `start`
+    /// refuses, as exit 2, a `uri` that is not `https`, has no host, names a
+    /// user or carries a fragment (RFC 6749 §3.1.2), and any number of ports
+    /// but one.
     pub fn redirect_uri(mut self, uri: impl Into<String>) -> Self {
         self.redirect_uri = Some(uri.into());
         self
@@ -125,17 +127,18 @@ impl AuthorizationCodeFlow {
     }
 }
 
-/// A redirect a page forwards to the listener: `https`, with a host, no
-/// fragment, and a fixed port to forward to. The message names no part of
-/// `uri`, which the CLI's configuration holds.
+/// A redirect a page forwards to the listener: `https`, with a host and no
+/// user, no fragment, and the one port the page forwards to. The message
+/// names no part of `uri`, which the CLI's configuration holds.
 fn check_forwarded(uri: &str, ports: &[u16]) -> Result<(), CliError> {
-    let host = uri
+    let authority = uri
         .split_once("://")
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
         .map(|(_, rest)| rest.split(['/', '?', '#', '\\']).next().unwrap_or_default());
-    if !host.is_some_and(|h| !h.is_empty()) {
+    if !authority.is_some_and(|a| !a.is_empty() && !a.contains('@')) {
         return Err(CliError::Usage(
-            "a redirect URI other than the listener's must be https, with a host".into(),
+            "a redirect URI other than the listener's must be https, with a host and no user"
+                .into(),
         ));
     }
     if uri.contains('#') {
@@ -143,9 +146,9 @@ fn check_forwarded(uri: &str, ports: &[u16]) -> Result<(), CliError> {
             "the redirect URI carries a fragment, which RFC 6749 §3.1.2 forbids".into(),
         ));
     }
-    if ports.is_empty() {
+    if ports.len() != 1 {
         return Err(CliError::Usage(
-            "a forwarded redirect needs the fixed port its page forwards to".into(),
+            "a forwarded redirect needs the one fixed port its page forwards to".into(),
         ));
     }
     Ok(())

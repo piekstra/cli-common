@@ -9,9 +9,12 @@
   query unchanged. The listener checks `state` and `iss` as for a direct redirect, and the
   exchange names `uri` with the PKCE verifier, which never leaves the machine.
   `PendingAuthorization::redirect_uri` is the one the address sent, and `listener_uri` is where
-  the answer must arrive. `start` refuses, as exit 2, a `uri` that is not `https`, has no host or
-  carries a fragment (RFC 6749 §3.1.2), and a flow with no fixed port, since the page forwards to
-  one it knows. A flow without `redirect_uri` is unchanged.
+  the answer must arrive. `start` refuses, as exit 2, a `uri` that is not `https`, has no host,
+  names a user or carries a fragment (RFC 6749 §3.1.2), and a flow with no port or several: the
+  page forwards to one port, and given a list the listener could bind another. A flow without
+  `redirect_uri` is unchanged.
+- `Cargo.lock`: quinn-udp 0.5.16 (RUSTSEC-2026-0538, which failed `cargo audit`) and rustix 1.1.6
+  (RUSTSEC-2026-0486, unsound).
 
 ## v0.31.1 — 2026-11-12
 

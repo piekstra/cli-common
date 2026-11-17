@@ -279,7 +279,7 @@ fn a_forwarded_sign_in_sends_the_https_redirect_and_hears_the_answer_on_the_port
 }
 
 #[test]
-fn a_forwarded_redirect_must_be_https_without_a_fragment_and_name_a_port() {
+fn a_forwarded_redirect_must_be_https_with_a_host_no_fragment_and_one_port() {
     let flow = |uri: &str, ports: &[u16]| {
         AuthorizationCodeFlow::new(
             "example-cli",
@@ -300,7 +300,26 @@ fn a_forwarded_redirect_must_be_https_without_a_fragment_and_name_a_port() {
             &[port][..],
             "fragment",
         ),
-        ("https://pages.example.test/callback", &[][..], "fixed port"),
+        (
+            "https://user@pages.example.test/callback",
+            &[port][..],
+            "no user",
+        ),
+        (
+            "https://@pages.example.test/callback",
+            &[port][..],
+            "no user",
+        ),
+        (
+            "https://pages.example.test/callback",
+            &[][..],
+            "one fixed port",
+        ),
+        (
+            "https://pages.example.test/callback",
+            &[port, port + 1][..],
+            "one fixed port",
+        ),
     ] {
         let err = flow(uri, ports).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)), "{uri}: {err:?}");
