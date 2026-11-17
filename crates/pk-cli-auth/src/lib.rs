@@ -9,6 +9,7 @@ pub mod otp;
 pub mod reauth;
 pub mod refresh_lock;
 pub mod token;
+pub mod vault;
 
 use pk_cli_core::output;
 use serde::{Deserialize, Serialize};
