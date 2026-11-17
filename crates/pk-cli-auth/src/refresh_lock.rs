@@ -391,7 +391,7 @@ fn path_under(home: &Path, bin: &str) -> PathBuf {
 }
 
 /// The first of `HOME` and `USERPROFILE` that is set and not empty.
-fn home_from<V: AsRef<OsStr>>(var: impl Fn(&str) -> Option<V>) -> Option<PathBuf> {
+pub(crate) fn home_from<V: AsRef<OsStr>>(var: impl Fn(&str) -> Option<V>) -> Option<PathBuf> {
     ["HOME", "USERPROFILE"].iter().find_map(|name| {
         var(name)
             .filter(|value| !value.as_ref().is_empty())

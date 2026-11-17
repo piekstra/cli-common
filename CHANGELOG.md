@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.33.0 — 2026-11-17
+
+- `pk-cli-auth`: `vault::Vault` keeps every secret a CLI holds under one keychain item, so a newly
+  built or upgraded binary asks macOS once instead of once per item. The item, `vault-key` in
+  `piekstra.<bin>`, is a random 256-bit key. Each secret is a file of its own under
+  `~/.config/<bin>/vault/` (`0700`, files `0600`), XChaCha20-Poly1305-sealed with the name inside the
+  ciphertext and the file named by its hash, written by temporary file and rename. The key is read
+  only when an entry exists or is written, so a logged-out run reads nothing; the first write creates
+  it under a lock, and a key missing while entries exist is an error rather than a new key.
+  `get`, `put`, `delete`, `names`, `get_json`, `put_json`; `MemoryKeys` for tests. New dependency:
+  `chacha20poly1305` 0.10 (RustCrypto, MIT or Apache-2.0). DESIGN.md §2.5.
+- `pk-cli-config`: `profile`, for a CLI with one profile per login. `ProfileName` (1 to 32 lowercase
+  letters, digits, `-` or `_`), `Profiles` (a field of the CLI's config: name to the CLI's settings),
+  `resolve(flag, "<PREFIX>_PROFILE", &profiles, bin)`, which never picks a default or a lone profile:
+  missing, malformed or unknown is exit 2 listing the configured names, or naming
+  `<bin> profiles add <NAME>` when there are none. `ProfileList` is `profile-list/v1`. SPEC v1 is
+  unchanged.
+- `pk-cli-browser`: `Launch::url` also takes an `http` page on `127.0.0.1` or `localhost`, for a
+  start page the CLI serves itself. Other `http` URLs are still refused.
+- `deny.toml`: RUSTSEC-2026-0543 (chrono unmaintained, no fixed release) is ignored with its
+  reason: chrono reaches the workspace only through rmcp 3.9 and schemars, and `cargo deny` failed
+  on it from the day it was published.
+
 ## v0.32.0 — 2026-11-16
 
 - `pk-cli-auth`: `AuthorizationCodeFlow::redirect_uri(uri)` sends a registered `https` page as

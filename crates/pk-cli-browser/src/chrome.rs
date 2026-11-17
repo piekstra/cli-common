@@ -116,10 +116,17 @@ pub(crate) fn parse_active_port(text: &str) -> Option<(u16, String)> {
 }
 
 /// Whether `url` may be handed to Chrome as a start page: `https` with a
-/// host. Anything else, notably a string Chrome would parse as a switch
-/// (`--…`), is refused.
+/// host, or `http` on the loopback (`127.0.0.1` or `localhost`), for a page
+/// the CLI serves itself, such as a sign-in's start page. Anything else,
+/// notably a string Chrome would parse as a switch (`--…`), is refused.
 pub(crate) fn start_url_ok(url: &str) -> bool {
-    url.starts_with("https://") && parse_url(url).is_some_and(|u| u.scheme == "https")
+    if url.starts_with("https://") {
+        return parse_url(url).is_some_and(|u| u.scheme == "https");
+    }
+    url.starts_with("http://")
+        && parse_url(url).is_some_and(|u| {
+            u.scheme == "http" && matches!(u.host.as_str(), "127.0.0.1" | "localhost")
+        })
 }
 
 /// The arguments Chrome is launched with: a debug port Chrome picks itself
@@ -188,8 +195,9 @@ impl Launch {
         }
     }
 
-    /// Open `url` (an `https` URL) as a tab. Call once per tab; at least
-    /// one is required.
+    /// Open `url` as a tab: an `https` URL, or an `http` page on
+    /// `127.0.0.1` or `localhost` the CLI serves itself. Call once per tab,
+    /// in the order the tabs open; at least one is required.
     pub fn url(mut self, url: impl Into<String>) -> Self {
         self.urls.push(url.into());
         self
@@ -323,7 +331,7 @@ impl Launch {
         }
         if let Some(bad) = self.urls.iter().find(|u| !start_url_ok(u)) {
             return Err(BrowserError::Invalid(format!(
-                "start URL `{bad}` is not an https URL"
+                "start URL `{bad}` is neither an https URL nor an http page on the loopback"
             )));
         }
         if let Some(name) = self.profile_name.as_deref().filter(|n| !profile_name_ok(n)) {
@@ -625,11 +633,23 @@ mod tests {
     }
 
     #[test]
-    fn only_https_start_urls_are_handed_to_chrome() {
-        assert!(start_url_ok("https://example.com"));
-        assert!(start_url_ok("https://app.example.com/login?next=/"));
+    fn only_https_and_loopback_start_urls_are_handed_to_chrome() {
+        for ok in [
+            "https://example.com",
+            "https://app.example.com/login?next=/",
+            "http://127.0.0.1:47816/",
+            "http://localhost:8080/start?x=1",
+        ] {
+            assert!(start_url_ok(ok), "{ok:?}");
+        }
         for bad in [
             "http://example.com/",
+            "http://127.0.0.1.example/",
+            "http://localhost.example:80/",
+            "http://user@127.0.0.1:80/",
+            "http://[::1]:80/",
+            "http://10.0.0.1/",
+            "ftp://127.0.0.1/",
             "--remote-allow-origins=*",
             "--user-data-dir=/tmp/x",
             "-v",
@@ -680,7 +700,7 @@ mod tests {
             .ctrl_c(false)
             .spawn()
             .unwrap_err();
-        assert!(err.to_string().contains("not an https URL"), "{err}");
+        assert!(err.to_string().contains("neither an https URL"), "{err}");
         // A profile name that would need rewriting is refused, not mapped.
         for bad in ["", "a b", "../x", "a.b", &"x".repeat(65)] {
             let err = Launch::new("t")

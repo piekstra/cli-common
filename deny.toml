@@ -2,6 +2,12 @@
 # carry the same lists). Run: cargo deny check
 [advisories]
 yanked = "deny"
+ignore = [
+    # chrono is unmaintained, with no fixed release. rmcp 3.9 depends on it
+    # unconditionally (and through schemars' `chrono04`); nothing here calls
+    # it. Drop this once rmcp moves off chrono.
+    { id = "RUSTSEC-2026-0543", reason = "chrono reaches us only through rmcp and schemars; no release without it" },
+]
 
 [licenses]
 # Permissive licenses accepted for dependencies.

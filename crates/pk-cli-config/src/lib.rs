@@ -4,6 +4,8 @@
 //! `${XDG_CONFIG_HOME:-~/.config}/<app>/config.json`. Secrets never land
 //! here — they live in the OS keychain (see `pk-cli-secrets`).
 
+pub mod profile;
+
 use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
