@@ -181,6 +181,153 @@ fn a_sign_in_runs_from_the_authorization_url_to_a_stored_token_set() {
     assert_eq!(id_claims["fhirUser"], "Patient/example-patient-1");
 }
 
+/// A port free a moment ago, for a flow that must listen on a fixed one.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// The forwarding page's part: what the browser sends the listener, one
+/// answer after another, once the page at the registered https redirect has
+/// passed each query on. Each answer's page comes back in order.
+fn forwarded(port: u16, queries: Vec<String>) -> std::thread::JoinHandle<Vec<String>> {
+    std::thread::spawn(move || {
+        queries
+            .into_iter()
+            .map(|query| {
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                write!(
+                    stream,
+                    "GET /callback?{query} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                )
+                .unwrap();
+                let mut page = String::new();
+                stream.read_to_string(&mut page).unwrap();
+                page
+            })
+            .collect()
+    })
+}
+
+#[test]
+fn a_forwarded_sign_in_sends_the_https_redirect_and_hears_the_answer_on_the_port() {
+    let port = free_port();
+    let pending = AuthorizationCodeFlow::new(
+        "example-cli",
+        "https://auth.example.test/authorize",
+        "client-1",
+    )
+    .port(port)
+    .redirect_uri("https://pages.example.test/app/callback")
+    .start()
+    .unwrap();
+    let url = pending.url().to_string();
+    let pairs = form(url.split_once('?').unwrap().1);
+    assert_eq!(
+        param(&pairs, "redirect_uri"),
+        Some("https%3A%2F%2Fpages.example.test%2Fapp%2Fcallback")
+    );
+    assert_eq!(
+        pending.redirect_uri(),
+        "https://pages.example.test/app/callback"
+    );
+    assert_eq!(
+        pending.listener_uri(),
+        format!("http://127.0.0.1:{port}/callback")
+    );
+
+    let state = param(&pairs, "state").unwrap().to_string();
+    let browser = forwarded(
+        port,
+        vec![
+            "code=other&state=not-this-one".into(),
+            format!("code=dummy-code-1&state={state}"),
+        ],
+    );
+    let mut refused = Vec::new();
+    let code = pending
+        .wait_for_code_with(Duration::from_secs(20), |why| refused.push(why.to_string()))
+        .unwrap();
+    let pages = browser.join().unwrap();
+    assert!(!pages[0].contains("signed in"), "{}", pages[0]);
+    assert!(pages[1].contains("example-cli: signed in"));
+    assert_eq!(refused.len(), 1, "the stray answer is refused, not taken");
+
+    let request = pending.token_request(&code);
+    let client = OAuthClient::new(
+        Canned::new(vec![json(200, &token_code())]),
+        "example-cli",
+        "0.1.0",
+    );
+    block_on(client.token(
+        "https://auth.example.test/token",
+        &ClientAuth::public("client-1"),
+        &request,
+    ))
+    .unwrap();
+    let seen = client.transport().seen.borrow();
+    let body = form(seen[0].body.as_deref().unwrap());
+    assert_eq!(
+        param(&body, "redirect_uri"),
+        Some("https%3A%2F%2Fpages.example.test%2Fapp%2Fcallback"),
+        "the exchange names the redirect the address sent, not the listener"
+    );
+    assert_eq!(param(&body, "code"), Some("dummy-code-1"));
+}
+
+#[test]
+fn a_forwarded_redirect_must_be_https_with_a_host_no_fragment_and_one_port() {
+    let flow = |uri: &str, ports: &[u16]| {
+        AuthorizationCodeFlow::new(
+            "example-cli",
+            "https://auth.example.test/authorize",
+            "client-1",
+        )
+        .ports(ports)
+        .redirect_uri(uri)
+        .start()
+    };
+    let port = free_port();
+    for (uri, ports, says) in [
+        ("http://pages.example.test/callback", &[port][..], "https"),
+        ("http://127.0.0.1:9/callback", &[port][..], "https"),
+        ("https:///callback", &[port][..], "host"),
+        (
+            "https://pages.example.test/callback#x",
+            &[port][..],
+            "fragment",
+        ),
+        (
+            "https://user@pages.example.test/callback",
+            &[port][..],
+            "no user",
+        ),
+        (
+            "https://@pages.example.test/callback",
+            &[port][..],
+            "no user",
+        ),
+        (
+            "https://pages.example.test/callback",
+            &[][..],
+            "one fixed port",
+        ),
+        (
+            "https://pages.example.test/callback",
+            &[port, port + 1][..],
+            "one fixed port",
+        ),
+    ] {
+        let err = flow(uri, ports).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{uri}: {err:?}");
+        assert!(err.to_string().contains(says), "{uri}: {err}");
+        assert!(!err.to_string().contains("pages.example.test"), "{err}");
+    }
+}
+
 #[test]
 fn a_renewal_keeps_the_unrotated_refresh_token_and_the_launch_context() {
     let first = TokenSet::from_response(

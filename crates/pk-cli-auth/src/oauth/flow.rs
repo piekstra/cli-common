@@ -22,6 +22,7 @@ pub struct AuthorizationCodeFlow {
     params: Vec<(String, String)>,
     ports: Vec<u16>,
     issuer: Option<String>,
+    redirect_uri: Option<String>,
 }
 
 impl AuthorizationCodeFlow {
@@ -39,6 +40,7 @@ impl AuthorizationCodeFlow {
             params: Vec::new(),
             ports: Vec::new(),
             issuer: None,
+            redirect_uri: None,
         }
     }
 
@@ -71,13 +73,35 @@ impl AuthorizationCodeFlow {
         self
     }
 
+    /// Send `uri` as the redirect instead of the listener's
+    /// `http://127.0.0.1:<port>/callback`, for a provider that accepts only
+    /// `https` redirects in production. A page at `uri` sends the browser on to
+    /// the listener with the answer's query unchanged. The listener checks
+    /// `state` and `iss` as for a direct redirect, and the exchange names `uri`
+    /// with the PKCE verifier, which never leaves this machine. The page knows
+    /// one port, so [`port`](Self::port) must name it: with a list to choose
+    /// from, the listener could bind one the page does not forward to. `start`
+    /// refuses, as exit 2, a `uri` that is not `https`, has no host, names a
+    /// user or carries a fragment (RFC 6749 §3.1.2), and any number of ports
+    /// but one.
+    pub fn redirect_uri(mut self, uri: impl Into<String>) -> Self {
+        self.redirect_uri = Some(uri.into());
+        self
+    }
+
     /// Bind the listener and build the address to open. Nothing has been sent
     /// anywhere yet.
     pub fn start(&self) -> Result<PendingAuthorization, CliError> {
+        if let Some(uri) = &self.redirect_uri {
+            check_forwarded(uri, &self.ports)?;
+        }
         let listener = LoopbackListener::bind_first(&self.app, &self.ports)?;
         let pkce = Pkce::generate()?;
         let state = random_token(32)?;
-        let redirect_uri = listener.redirect_uri();
+        let redirect_uri = self
+            .redirect_uri
+            .clone()
+            .unwrap_or_else(|| listener.redirect_uri());
         let mut request = AuthorizationRequest::new(
             &self.authorization_endpoint,
             &self.client_id,
@@ -103,6 +127,33 @@ impl AuthorizationCodeFlow {
     }
 }
 
+/// A redirect a page forwards to the listener: `https`, with a host and no
+/// user, no fragment, and the one port the page forwards to. The message
+/// names no part of `uri`, which the CLI's configuration holds.
+fn check_forwarded(uri: &str, ports: &[u16]) -> Result<(), CliError> {
+    let authority = uri
+        .split_once("://")
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
+        .map(|(_, rest)| rest.split(['/', '?', '#', '\\']).next().unwrap_or_default());
+    if !authority.is_some_and(|a| !a.is_empty() && !a.contains('@')) {
+        return Err(CliError::Usage(
+            "a redirect URI other than the listener's must be https, with a host and no user"
+                .into(),
+        ));
+    }
+    if uri.contains('#') {
+        return Err(CliError::Usage(
+            "the redirect URI carries a fragment, which RFC 6749 §3.1.2 forbids".into(),
+        ));
+    }
+    if ports.len() != 1 {
+        return Err(CliError::Usage(
+            "a forwarded redirect needs the one fixed port its page forwards to".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// A sign-in under way: the browser has somewhere to come back to.
 pub struct PendingAuthorization {
     listener: LoopbackListener,
@@ -120,8 +171,15 @@ impl PendingAuthorization {
         &self.url
     }
 
+    /// The redirect the address sent and the exchange names: the listener's,
+    /// or the page [`AuthorizationCodeFlow::redirect_uri`] set.
     pub fn redirect_uri(&self) -> &str {
         &self.redirect_uri
+    }
+
+    /// Where the answer must arrive: `http://127.0.0.1:<port>/callback`.
+    pub fn listener_uri(&self) -> String {
+        self.listener.redirect_uri()
     }
 
     /// Wait for the code ([`LoopbackListener::wait_for_code`]).
