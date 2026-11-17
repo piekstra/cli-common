@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.33.2 — 2026-11-17
+
+- `pk-cli-auth`: the vault's `.key.lock` is created `0600`, as `RefreshLock`'s file is, and one
+  that v0.33.0 or v0.33.1 created at the umask's mode (`0644` as a rule) is narrowed the next
+  time the lock is taken. The file is empty and the directory `0700`, so nothing was exposed.
+  `Vault::clear` documents what it leaves: `.key.lock` and `.key.id`, neither secret, because
+  removing a lock file another run waits on splits the lock, and the renewed id is how a process
+  holding the old key learns it was cleared.
+
 ## v0.33.1 — 2026-11-17
 
 - `pk-cli-config`: `ConfigStore::save` writes `config.json` owner-only and atomically: a `0600`

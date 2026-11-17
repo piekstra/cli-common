@@ -367,6 +367,14 @@ impl Vault {
     /// a new key. Takes the key lock, so it does not race a first write; run
     /// it when no other run of the CLI is using the vault. How many entries
     /// were removed.
+    ///
+    /// The directory keeps two files, neither secret, both `0600`. One is
+    /// `.key.lock`, empty: removing a lock file another run is waiting on
+    /// would give the two of them different locks. The other is `.key.id`,
+    /// renewed here: a process that cached the old key sees it changed and
+    /// makes a new key on its next write, rather than sealing with the
+    /// deleted one. A removed id could not tell such a process that its key
+    /// is gone if it cached the key before any id existed.
     pub fn clear(&self) -> Result<usize, CliError> {
         let mut removed = 0;
         // The lock before the cache, the order `put` takes them in.
@@ -603,14 +611,30 @@ impl Vault {
 
     /// The key lock, waited for at most `self.wait`: a holder stalled on a
     /// keychain dialog must not hang an unattended run. Released on drop.
+    /// The lock file is created `0600`, as `RefreshLock`'s is; one that
+    /// v0.33.0 or v0.33.1 created at the umask's mode is narrowed.
     fn lock_key(&self) -> Result<File, CliError> {
         let path = self.dir.join(LOCK_FILE);
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
             .open(&path)
             .map_err(|e| io_error("opening", &path, &e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if file
+                .metadata()
+                .is_ok_and(|m| m.permissions().mode() & 0o077 != 0)
+            {
+                let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+            }
+        }
         let started = Instant::now();
         loop {
             match file.try_lock() {
