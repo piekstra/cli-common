@@ -32,7 +32,12 @@
 //!   empty directory reads nothing. It is created by the first write, under a
 //!   lock in the directory so two processes cannot create two keys, and never
 //!   while entries exist: those would be lost to a new key, so a missing key
-//!   with entries present is an error naming the remedy.
+//!   with entries present is an error naming the remedy. A random key id
+//!   beside the entries changes whenever a key is made or the vault cleared:
+//!   a write holds the key lock and checks it, so a long-running process
+//!   whose cached key another process cleared makes a new key rather than
+//!   seal an entry nothing can read, and a read that fails to decrypt
+//!   reloads the key once when the id moved.
 //!
 //! - **Moving in and resetting.** [`Vault::migrate_from`] moves a CLI's
 //!   old keychain items in, deleting each only once its copy reads back.
@@ -69,6 +74,9 @@ const NONCE_LEN: usize = 24;
 const EXTENSION: &str = "pkv";
 const KEY_FORMAT: u32 = 1;
 const LOCK_FILE: &str = ".key.lock";
+/// A random id that changes whenever the key is made or the vault cleared,
+/// so a process holding a cached key sees it was replaced.
+const ID_FILE: &str = ".key.id";
 
 /// The remedy of an entry that does not decrypt, for a CLI to replace with
 /// its own command: remove that one entry ([`Vault::delete`]) and sign in
@@ -218,12 +226,18 @@ struct PlainRef<'a> {
 
 type Key = Zeroizing<[u8; 32]>;
 
+/// The key as this process read it, with the vault's key id at the time.
+struct Cached {
+    key: Key,
+    id: Option<String>,
+}
+
 /// Secrets in owner-only encrypted files, under one keychain key. See the
 /// [module docs](self).
 pub struct Vault {
     keys: Box<dyn KeyStore>,
     dir: PathBuf,
-    key: Mutex<Option<Key>>,
+    key: Mutex<Option<Cached>>,
     wait: Duration,
 }
 
@@ -275,20 +289,29 @@ impl Vault {
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(io_error("reading", &path, &e)),
         };
-        let Some(key) = self.key(false)? else {
+        let Some(key) = self.read_side_key()? else {
             return Err(key_lost(&self.dir));
         };
-        let plain = open(&key, &file_stem(&path), &sealed).ok_or_else(|| unreadable(&path))?;
-        if plain.name != name {
-            return Err(unreadable(&path));
-        }
+        let stem = file_stem(&path);
+        let read = |key: &Key| open(key, &stem, &sealed).filter(|plain| plain.name == name);
+        let plain = match read(&key) {
+            Some(plain) => plain,
+            // Another process may have cleared the vault and made a new key.
+            None => self
+                .reload_if_replaced()?
+                .and_then(|newer| read(&newer))
+                .ok_or_else(|| unreadable(&path))?,
+        };
         Ok(Some(Secret::new(plain.value)))
     }
 
     /// Store `value` under `name`, replacing what was there.
     pub fn put(&self, name: &str, value: &Secret) -> Result<(), CliError> {
         self.ensure_dir()?;
-        let key = self.key(true)?.ok_or_else(|| key_lost(&self.dir))?;
+        // Held through the write, so a `clear` in another process cannot
+        // remove the key between this check and the entry landing.
+        let _lock = self.lock_key()?;
+        let key = self.write_side_key()?;
         let path = self.entry_path(name);
         let plain = Zeroizing::new(
             serde_json::to_vec(&PlainRef {
@@ -323,21 +346,19 @@ impl Vault {
     /// entries exist is still an error, since no entry can be read.
     pub fn list(&self) -> Result<Listing, CliError> {
         let entries = self.entry_files()?;
-        let mut listing = Listing::default();
         if entries.is_empty() {
+            return Ok(Listing::default());
+        }
+        let key = self.read_side_key()?.ok_or_else(|| key_lost(&self.dir))?;
+        let listing = list_with(&key, &entries)?;
+        if listing.unreadable.is_empty() {
             return Ok(listing);
         }
-        let key = self.key(false)?.ok_or_else(|| key_lost(&self.dir))?;
-        for path in entries {
-            let sealed = fs::read(&path).map_err(|e| io_error("reading", &path, &e))?;
-            match open(&key, &file_stem(&path), &sealed) {
-                Some(plain) => listing.names.push(plain.name),
-                None => listing.unreadable.push(path),
-            }
+        // Another process may have cleared the vault and made a new key.
+        match self.reload_if_replaced()? {
+            Some(newer) => list_with(&newer, &self.entry_files()?),
+            None => Ok(listing),
         }
-        listing.names.sort();
-        listing.unreadable.sort();
-        Ok(listing)
     }
 
     /// Remove every entry and the key item: the reset after a lost or
@@ -346,10 +367,15 @@ impl Vault {
     /// it when no other run of the CLI is using the vault. How many entries
     /// were removed.
     pub fn clear(&self) -> Result<usize, CliError> {
-        let mut cached = self.key.lock().unwrap();
         let mut removed = 0;
-        if self.dir.exists() {
-            let _lock = self.lock_key()?;
+        // The lock before the cache, the order `put` takes them in.
+        let held = if self.dir.exists() {
+            Some(self.lock_key()?)
+        } else {
+            None
+        };
+        let mut cached = self.key.lock().unwrap();
+        if held.is_some() {
             for path in self.entry_files()? {
                 fs::remove_file(&path).map_err(|e| io_error("deleting", &path, &e))?;
                 removed += 1;
@@ -357,10 +383,11 @@ impl Vault {
             for path in self.temp_files()? {
                 let _ = fs::remove_file(&path);
             }
-            self.keys.delete(KEY_ACCOUNT)?;
-        } else {
-            self.keys.delete(KEY_ACCOUNT)?;
+            // A new id, so a process that cached the old key makes a new
+            // one on its next write instead of sealing with the old.
+            self.write_id()?;
         }
+        self.keys.delete(KEY_ACCOUNT)?;
         *cached = None;
         Ok(removed)
     }
@@ -465,28 +492,63 @@ impl Vault {
         Ok(files)
     }
 
-    /// The key, read once per process. With `create`, a vault that has no
-    /// key and no entries gets one, made under the directory's lock.
-    fn key(&self, create: bool) -> Result<Option<Key>, CliError> {
+    /// The key for a read: the one this process cached, else the
+    /// keychain's. `None` when the keychain has none.
+    fn read_side_key(&self) -> Result<Option<Key>, CliError> {
         let mut cached = self.key.lock().unwrap();
-        if let Some(key) = cached.as_ref() {
-            return Ok(Some(key.clone()));
+        if let Some(c) = cached.as_ref() {
+            return Ok(Some(c.key.clone()));
         }
-        if let Some(key) = self.read_key()? {
-            *cached = Some(key.clone());
-            return Ok(Some(key));
-        }
-        if !create {
+        let id = self.current_id()?;
+        let Some(key) = self.read_key()? else {
+            return Ok(None);
+        };
+        *cached = Some(Cached {
+            key: key.clone(),
+            id,
+        });
+        Ok(Some(key))
+    }
+
+    /// After a read failed to decrypt: the keychain's key when the vault's
+    /// key id moved since this process cached its key (another process
+    /// cleared the vault and made a new one), else `None`.
+    fn reload_if_replaced(&self) -> Result<Option<Key>, CliError> {
+        let mut cached = self.key.lock().unwrap();
+        let id = self.current_id()?;
+        if cached.as_ref().is_some_and(|c| c.id == id) {
             return Ok(None);
         }
-        let _lock = self.lock_key()?;
-        // Another process may have made the key while this one waited.
+        *cached = None;
+        let Some(key) = self.read_key()? else {
+            return Ok(None);
+        };
+        *cached = Some(Cached {
+            key: key.clone(),
+            id,
+        });
+        Ok(Some(key))
+    }
+
+    /// The key for a write, holding the key lock: the cached one while the
+    /// vault's key id is unchanged, else the keychain's, else a new one when
+    /// the vault has no entries. Entries without a key are an error.
+    fn write_side_key(&self) -> Result<Key, CliError> {
+        let mut cached = self.key.lock().unwrap();
+        let id = self.current_id()?;
+        if let Some(c) = cached.as_ref().filter(|c| c.id == id) {
+            return Ok(c.key.clone());
+        }
+        *cached = None;
         if let Some(key) = self.read_key()? {
-            *cached = Some(key.clone());
-            return Ok(Some(key));
+            *cached = Some(Cached {
+                key: key.clone(),
+                id,
+            });
+            return Ok(key);
         }
         if !self.entry_files()?.is_empty() {
-            return Ok(None);
+            return Err(key_lost(&self.dir));
         }
         let mut fresh: Key = Zeroizing::new([0u8; 32]);
         getrandom::fill(fresh.as_mut()).map_err(|e| {
@@ -510,8 +572,32 @@ impl Vault {
                 ))
             }
         }
-        *cached = Some(fresh.clone());
-        Ok(Some(fresh))
+        let id = self.write_id()?;
+        *cached = Some(Cached {
+            key: fresh.clone(),
+            id: Some(id),
+        });
+        Ok(fresh)
+    }
+
+    /// The vault's key id, `None` before the first key.
+    fn current_id(&self) -> Result<Option<String>, CliError> {
+        let path = self.dir.join(ID_FILE);
+        match fs::read_to_string(&path) {
+            Ok(id) => Ok(Some(id.trim().to_string())),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io_error("reading", &path, &e)),
+        }
+    }
+
+    /// Give the vault a new key id; under the key lock.
+    fn write_id(&self) -> Result<String, CliError> {
+        let mut raw = [0u8; 16];
+        getrandom::fill(&mut raw)
+            .map_err(|e| CliError::Other(format!("drawing a key id from the system: {e}")))?;
+        let id = hex(&raw);
+        write_atomically(&self.dir, &self.dir.join(ID_FILE), id.as_bytes())?;
+        Ok(id)
     }
 
     /// The key lock, waited for at most `self.wait`: a holder stalled on a
@@ -584,6 +670,21 @@ pub fn default_dir(bin: &str) -> Result<PathBuf, CliError> {
         CliError::Other("cannot locate the home directory for the vault ($HOME unset)".into())
     })?;
     Ok(home.join(".config").join(bin).join("vault"))
+}
+
+/// The names in `entries` that decrypt with `key`, and the files that do not.
+fn list_with(key: &Key, entries: &[PathBuf]) -> Result<Listing, CliError> {
+    let mut listing = Listing::default();
+    for path in entries {
+        let sealed = fs::read(path).map_err(|e| io_error("reading", path, &e))?;
+        match open(key, &file_stem(path), &sealed) {
+            Some(plain) => listing.names.push(plain.name),
+            None => listing.unreadable.push(path.clone()),
+        }
+    }
+    listing.names.sort();
+    listing.unreadable.sort();
+    Ok(listing)
 }
 
 fn seal(key: &Key, stem: &str, plain: &[u8]) -> Result<Vec<u8>, CliError> {

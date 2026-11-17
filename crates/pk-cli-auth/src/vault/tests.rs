@@ -202,6 +202,39 @@ fn clear_removes_every_entry_and_the_key() {
 }
 
 #[test]
+fn a_writer_holding_the_old_key_makes_a_new_one_after_a_clear() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(MemoryKeys::new());
+    let agent = tmp.vault_with(&keys);
+    agent.put("adult1/session", &secret("one")).unwrap();
+    // Another process forgets every sign-in.
+    assert_eq!(tmp.vault_with(&keys).clear().unwrap(), 1);
+    // The agent's renewal lands after it, with its key still cached.
+    agent.put("adult1/session", &secret("two")).unwrap();
+    let fresh = tmp.vault_with(&keys);
+    assert_eq!(
+        fresh.get("adult1/session").unwrap().unwrap().expose(),
+        "two"
+    );
+    assert_eq!(keys.writes(), 2, "a second key, made after the clear");
+}
+
+#[test]
+fn a_reader_holding_the_old_key_follows_a_new_one() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(MemoryKeys::new());
+    let reader = tmp.vault_with(&keys);
+    reader.put("a", &secret("old")).unwrap();
+    assert_eq!(reader.get("a").unwrap().unwrap().expose(), "old");
+    let other = tmp.vault_with(&keys);
+    other.clear().unwrap();
+    other.put("a", &secret("new")).unwrap();
+    other.put("b", &secret("b")).unwrap();
+    assert_eq!(reader.get("a").unwrap().unwrap().expose(), "new");
+    assert_eq!(reader.names().unwrap(), ["a", "b"]);
+}
+
+#[test]
 fn items_move_in_read_back_and_only_then_leave() {
     let tmp = TempDir::new();
     let keys = Arc::new(MemoryKeys::new());
