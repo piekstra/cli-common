@@ -11,10 +11,10 @@
 pub mod profile;
 
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::fs;
+use std::path::PathBuf;
+
+use pk_cli_core::private_file::{self, Replace};
 
 use pk_cli_core::CliError;
 use serde::{de::DeserializeOwned, Serialize};
@@ -65,28 +65,28 @@ impl ConfigStore {
         }
     }
 
-    /// Write the config owner-only and atomically: a temporary file created
-    /// `0600` beside it, synced, then renamed over it and the directory
-    /// synced. A crash leaves the old file or the new one, never part of
-    /// either, and no other local account can read it. A file an earlier
-    /// release left at a wider mode is replaced by a `0600` one on the first
-    /// write. A directory this creates is `0700`; one that exists keeps its
-    /// mode, since `--config` may name a file in a shared directory. A
-    /// `config.json` that is a symlink is written through to its target, so
-    /// the link survives.
+    /// Write the config owner-only and atomically, through
+    /// [`pk_cli_core::private_file`]: a `0600` temporary file beside it,
+    /// synced, renamed over it, the directory synced. A crash leaves the old
+    /// file or the new one, never part of either, and no other local account
+    /// can read it. A file an earlier release left at a wider mode is
+    /// replaced by a `0600` one on the first write. A directory this creates
+    /// is `0700`; one that exists keeps its mode, since `--config` may name a
+    /// file in a shared directory. A `config.json` that is a symlink (a
+    /// dotfiles checkout's) is written through to its final target, created
+    /// with its directory if missing, so the link survives.
     pub fn save<T: Serialize>(&self, config: &T) -> Result<(), CliError> {
         let path = self.path()?;
         let body = serde_json::to_string_pretty(config)
             .map_err(|e| CliError::Other(format!("serializing config: {e}")))?;
-        let path = match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.file_type().is_symlink() => fs::canonicalize(&path)
-                .map_err(|e| CliError::Other(format!("resolving {}: {e}", path.display())))?,
-            _ => path,
-        };
-        if let Some(dir) = parent_of(&path) {
-            create_private_dir(dir)?;
+        let target = private_file::resolve_links(&path)
+            .map_err(|e| CliError::Other(format!("resolving {}: {e}", path.display())))?;
+        if let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty()) {
+            private_file::create_dir_all(dir)
+                .map_err(|e| CliError::Other(format!("creating {}: {e}", dir.display())))?;
         }
-        write_private(&path, body.as_bytes())
+        private_file::write(&target, body.as_bytes(), Replace::Always)
+            .map_err(|e| CliError::Other(format!("writing {}: {e}", target.display())))
     }
 
     /// Remove the config file entirely (used by `auth logout --forget`).
@@ -99,74 +99,6 @@ impl ConfigStore {
             Err(e) => Err(CliError::Other(format!("removing {}: {e}", path.display()))),
         }
     }
-}
-
-/// The directory holding `path`, `None` for a bare file name.
-fn parent_of(path: &Path) -> Option<&Path> {
-    path.parent().filter(|dir| !dir.as_os_str().is_empty())
-}
-
-/// Create `dir` and any missing parents `0700`; an existing one is left as
-/// it is.
-fn create_private_dir(dir: &Path) -> Result<(), CliError> {
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    builder
-        .create(dir)
-        .map_err(|e| CliError::Other(format!("creating {}: {e}", dir.display())))
-}
-
-/// Replace `path` with `bytes`: a `0600` temporary file beside it, synced,
-/// renamed over it, the directory synced. The temporary file is removed when
-/// any step fails.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let dir = parent_of(path).unwrap_or(Path::new("."));
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "config.json".into());
-    let temp = dir.join(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = replace_with(&temp, path, dir, bytes);
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
-fn replace_with(temp: &Path, path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), CliError> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(temp)
-        .map_err(|e| CliError::Other(format!("creating {}: {e}", temp.display())))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|e| CliError::Other(format!("writing {}: {e}", temp.display())))?;
-    drop(file);
-    fs::rename(temp, path)
-        .map_err(|e| CliError::Other(format!("writing {}: {e}", path.display())))?;
-    #[cfg(unix)]
-    fs::File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| CliError::Other(format!("syncing {}: {e}", dir.display())))?;
-    #[cfg(not(unix))]
-    let _ = dir;
-    Ok(())
 }
 
 /// Where configs live, from the environment `var` reads. An empty variable counts as unset.
@@ -183,6 +115,8 @@ fn config_base(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use serde::Deserialize;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
     struct Demo {
@@ -274,6 +208,28 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(mode(&target), 0o600);
+        assert_eq!(store.load::<Demo>().unwrap(), demo());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// A dotfiles link made before its file exists: the first save creates
+    /// the target, and its missing directory `0700`.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_gets_its_target_created() {
+        let dir = fresh_dir("dangling");
+        fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("config.json");
+        std::os::unix::fs::symlink(Path::new("dotfiles/app/config.json"), &link).unwrap();
+        let store = ConfigStore::new("test").with_override(Some(link.clone()));
+        store.save(&demo()).unwrap();
+        let target = dir.join("dotfiles").join("app").join("config.json");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(mode(&target), 0o600);
+        assert_eq!(mode(&dir.join("dotfiles")), 0o700);
         assert_eq!(store.load::<Demo>().unwrap(), demo());
         let _ = fs::remove_dir_all(dir);
     }
