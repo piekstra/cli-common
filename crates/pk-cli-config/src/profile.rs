@@ -336,6 +336,24 @@ mod tests {
     }
 
     #[test]
+    fn the_environment_is_read_and_an_empty_value_counts_as_unset() {
+        // A variable no other test reads, so setting it races nothing.
+        const VAR: &str = "PK_CLI_CONFIG_PROFILE_ENV_TEST";
+        let p = two();
+        std::env::set_var(VAR, "");
+        let err = resolve(None, VAR, &p, "ex").unwrap_err();
+        assert!(err.to_string().contains("needs a profile"), "{err}");
+        std::env::set_var(VAR, "adult2");
+        assert_eq!(resolve(None, VAR, &p, "ex").unwrap(), name("adult2"));
+        assert_eq!(
+            resolve(Some("adult1"), VAR, &p, "ex").unwrap(),
+            name("adult1")
+        );
+        std::env::remove_var(VAR);
+        assert!(resolve(None, VAR, &p, "ex").is_err());
+    }
+
+    #[test]
     fn profiles_keep_settings_and_serialise_as_an_object() {
         #[derive(Serialize, Deserialize, Default, PartialEq, Debug)]
         struct Settings {

@@ -9,7 +9,11 @@
   ciphertext and the file named by its hash, written by temporary file and rename. The key is read
   only when an entry exists or is written, so a logged-out run reads nothing; the first write creates
   it under a lock, and a key missing while entries exist is an error rather than a new key.
-  `get`, `put`, `delete`, `names`, `get_json`, `put_json`; `MemoryKeys` for tests. New dependency:
+  `get`, `put`, `delete`, `names`, `list` (the names, and the files that do not decrypt), `clear`
+  (every entry and the key: the reset after a lost key), `get_json`, `put_json`, and
+  `migrate_from(&keychain, pairs)`, which moves a CLI's old items in, deleting each only once its
+  copy reads back. The key lock is waited for at most 30 seconds, then exit 5. `MemoryKeys` for
+  tests. New dependency:
   `chacha20poly1305` 0.10 (RustCrypto, MIT or Apache-2.0). DESIGN.md §2.5.
 - `pk-cli-config`: `profile`, for a CLI with one profile per login. `ProfileName` (1 to 32 lowercase
   letters, digits, `-` or `_`), `Profiles` (a field of the CLI's config: name to the CLI's settings),

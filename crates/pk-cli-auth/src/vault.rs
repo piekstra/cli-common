@@ -34,16 +34,23 @@
 //!   while entries exist: those would be lost to a new key, so a missing key
 //!   with entries present is an error naming the remedy.
 //!
+//! - **Moving in and resetting.** [`Vault::migrate_from`] moves a CLI's
+//!   old keychain items in, deleting each only once its copy reads back.
+//!   [`Vault::clear`] removes every entry and the key, the reset after a
+//!   lost key; one damaged entry needs only [`Vault::delete`], and
+//!   [`Vault::list`] names it while listing the others.
+//!
 //! Tests give [`Vault::new`] a [`MemoryKeys`] and a directory of their own;
 //! a CLI's tests give it their `<PREFIX>_KEYCHAIN_SERVICE` override and a
 //! temporary directory, so nothing reads the real keychain or vault.
 
 use std::collections::HashMap;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -63,14 +70,29 @@ const EXTENSION: &str = "pkv";
 const KEY_FORMAT: u32 = 1;
 const LOCK_FILE: &str = ".key.lock";
 
-/// What to do about an entry the vault cannot read, for a CLI to replace.
+/// The remedy of an entry that does not decrypt, for a CLI to replace with
+/// its own command: remove that one entry ([`Vault::delete`]) and sign in
+/// again. The CLI's other entries are unaffected.
+pub const REMEDY_DELETE_ENTRY: &str =
+    "remove this sign-in and sign in again; the others are unaffected";
+
+/// The remedy of a key that is missing or is not a key, for a CLI to
+/// replace with its own command: [`Vault::clear`] and sign in again, since
+/// nothing can read the entries without their key.
 pub const REMEDY_CLEAR: &str =
-    "delete the vault directory's entries and sign in again; nothing else can read them";
+    "remove every sign-in this CLI keeps and sign in again: none can be read without the vault's key";
+
+/// How long a first write, or [`Vault::clear`], waits by default for
+/// another process holding the key lock.
+pub const KEY_WAIT: Duration = Duration::from_secs(30);
 
 /// Where the vault's key item lives: the keychain, or memory in a test.
+/// Also the store [`Vault::migrate_from`] moves items out of.
 pub trait KeyStore: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<Secret>, CliError>;
     fn set(&self, account: &str, value: &Secret) -> Result<(), CliError>;
+    /// `true` when there was an item to delete.
+    fn delete(&self, account: &str) -> Result<bool, CliError>;
 }
 
 impl KeyStore for CredentialStore {
@@ -80,6 +102,10 @@ impl KeyStore for CredentialStore {
 
     fn set(&self, account: &str, value: &Secret) -> Result<(), CliError> {
         CredentialStore::set(self, account, value)
+    }
+
+    fn delete(&self, account: &str) -> Result<bool, CliError> {
+        CredentialStore::delete(self, account)
     }
 }
 
@@ -127,6 +153,10 @@ impl KeyStore for MemoryKeys {
             .insert(account.to_string(), value.expose().to_string());
         Ok(())
     }
+
+    fn delete(&self, account: &str) -> Result<bool, CliError> {
+        Ok(self.items.lock().unwrap().remove(account).is_some())
+    }
 }
 
 impl<K: KeyStore + ?Sized> KeyStore for std::sync::Arc<K> {
@@ -137,6 +167,31 @@ impl<K: KeyStore + ?Sized> KeyStore for std::sync::Arc<K> {
     fn set(&self, account: &str, value: &Secret) -> Result<(), CliError> {
         (**self).set(account, value)
     }
+
+    fn delete(&self, account: &str) -> Result<bool, CliError> {
+        (**self).delete(account)
+    }
+}
+
+/// What [`Vault::list`] found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listing {
+    /// The names of the entries that read, sorted.
+    pub names: Vec<String>,
+    /// The files that do not decrypt with the key, sorted. Each holds one
+    /// entry, which only signing in again replaces.
+    pub unreadable: Vec<PathBuf>,
+}
+
+/// What [`Vault::migrate_from`] did, pair by pair.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Migration {
+    /// Copied into the vault and deleted from the old store.
+    pub moved: usize,
+    /// Already in the vault: that entry kept and the old item deleted.
+    pub kept: usize,
+    /// In neither: nothing to do.
+    pub absent: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -169,6 +224,7 @@ pub struct Vault {
     keys: Box<dyn KeyStore>,
     dir: PathBuf,
     key: Mutex<Option<Key>>,
+    wait: Duration,
 }
 
 impl fmt::Debug for Vault {
@@ -196,7 +252,14 @@ impl Vault {
             keys: Box::new(keys),
             dir: dir.into(),
             key: Mutex::new(None),
+            wait: KEY_WAIT,
         }
+    }
+
+    /// Wait at most `wait` for the key lock instead of [`KEY_WAIT`].
+    pub fn wait_at_most(mut self, wait: Duration) -> Self {
+        self.wait = wait;
+        self
     }
 
     pub fn dir(&self) -> &Path {
@@ -248,22 +311,106 @@ impl Vault {
         }
     }
 
-    /// Every entry's name, sorted. Reads the keychain only when there are
-    /// entries.
+    /// Every entry's name, sorted, leaving out entries that do not decrypt
+    /// ([`list`](Self::list) names those). Reads the keychain only when
+    /// there are entries.
     pub fn names(&self) -> Result<Vec<String>, CliError> {
+        Ok(self.list()?.names)
+    }
+
+    /// The entries' names, sorted, and the files that do not decrypt: one
+    /// damaged entry leaves the others listed. A key that is missing while
+    /// entries exist is still an error, since no entry can be read.
+    pub fn list(&self) -> Result<Listing, CliError> {
         let entries = self.entry_files()?;
+        let mut listing = Listing::default();
         if entries.is_empty() {
-            return Ok(Vec::new());
+            return Ok(listing);
         }
         let key = self.key(false)?.ok_or_else(|| key_lost(&self.dir))?;
-        let mut names = Vec::with_capacity(entries.len());
         for path in entries {
             let sealed = fs::read(&path).map_err(|e| io_error("reading", &path, &e))?;
-            let plain = open(&key, &file_stem(&path), &sealed).ok_or_else(|| unreadable(&path))?;
-            names.push(plain.name);
+            match open(&key, &file_stem(&path), &sealed) {
+                Some(plain) => listing.names.push(plain.name),
+                None => listing.unreadable.push(path),
+            }
         }
-        names.sort();
-        Ok(names)
+        listing.names.sort();
+        listing.unreadable.sort();
+        Ok(listing)
+    }
+
+    /// Remove every entry and the key item: the reset after a lost or
+    /// damaged key, and a CLI's "forget every sign-in". The next write makes
+    /// a new key. Takes the key lock, so it does not race a first write; run
+    /// it when no other run of the CLI is using the vault. How many entries
+    /// were removed.
+    pub fn clear(&self) -> Result<usize, CliError> {
+        let mut cached = self.key.lock().unwrap();
+        let mut removed = 0;
+        if self.dir.exists() {
+            let _lock = self.lock_key()?;
+            for path in self.entry_files()? {
+                fs::remove_file(&path).map_err(|e| io_error("deleting", &path, &e))?;
+                removed += 1;
+            }
+            for path in self.temp_files()? {
+                let _ = fs::remove_file(&path);
+            }
+            self.keys.delete(KEY_ACCOUNT)?;
+        } else {
+            self.keys.delete(KEY_ACCOUNT)?;
+        }
+        *cached = None;
+        Ok(removed)
+    }
+
+    /// Move items from `from` (the keychain items a CLI kept before the
+    /// vault) into entries here. `pairs` maps each item's account to its
+    /// entry's name. Per pair: an entry already here is kept (it is the
+    /// newer: nothing writes the old item once a CLI has moved) and the item
+    /// deleted; otherwise the item is read, written here, read back and
+    /// compared, and only then deleted. A failure leaves the item in place,
+    /// so the next run picks up where this one stopped; a run with nothing
+    /// left to move reads no item, only looks up absent ones, which raises
+    /// no dialog on macOS. Hold whatever lock the CLI writes these secrets
+    /// under (a session's refresh lock) around the call.
+    ///
+    /// Each item read by a newly built binary costs one macOS dialog, once.
+    /// The previous release reads only the items, so once they are moved a
+    /// downgrade finds no sign-in. They are not kept for it: a renewal after
+    /// the move rotates the refresh token, and the item's would be stale.
+    pub fn migrate_from(
+        &self,
+        from: &dyn KeyStore,
+        pairs: &[(&str, &str)],
+    ) -> Result<Migration, CliError> {
+        let mut done = Migration::default();
+        for &(account, name) in pairs {
+            if self.get(name)?.is_some() {
+                from.delete(account)?;
+                done.kept += 1;
+                continue;
+            }
+            let Some(item) = from.get(account)? else {
+                done.absent += 1;
+                continue;
+            };
+            self.put(name, &item)?;
+            let same = self
+                .get(name)?
+                .is_some_and(|back| back.expose() == item.expose());
+            if !same {
+                return Err(CliError::Other(
+                    "a secret written to the vault did not read back the same; the keychain item \
+                     is kept"
+                        .into(),
+                ));
+            }
+            from.delete(account)?;
+            done.moved += 1;
+        }
+        Ok(done)
     }
 
     /// The entry `name` as JSON. One that is present but does not parse as
@@ -332,15 +479,7 @@ impl Vault {
         if !create {
             return Ok(None);
         }
-        let lock_path = self.dir.join(LOCK_FILE);
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .map_err(|e| io_error("opening", &lock_path, &e))?;
-        lock.lock()
-            .map_err(|e| io_error("locking", &lock_path, &e))?;
+        let _lock = self.lock_key()?;
         // Another process may have made the key while this one waited.
         if let Some(key) = self.read_key()? {
             *cached = Some(key.clone());
@@ -373,6 +512,45 @@ impl Vault {
         }
         *cached = Some(fresh.clone());
         Ok(Some(fresh))
+    }
+
+    /// The key lock, waited for at most `self.wait`: a holder stalled on a
+    /// keychain dialog must not hang an unattended run. Released on drop.
+    fn lock_key(&self) -> Result<File, CliError> {
+        let path = self.dir.join(LOCK_FILE);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| io_error("opening", &path, &e))?;
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(TryLockError::Error(e)) => return Err(io_error("locking", &path, &e)),
+                Err(TryLockError::WouldBlock) => {
+                    if started.elapsed() >= self.wait {
+                        return Err(CliError::Upstream(format!(
+                            "another process has held {} for over {:?}, making or removing the \
+                             vault's key (a keychain prompt waiting for an answer keeps it there)",
+                            path.display(),
+                            self.wait
+                        )));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
+
+    fn temp_files(&self) -> Result<Vec<PathBuf>, CliError> {
+        let read = fs::read_dir(&self.dir).map_err(|e| io_error("listing", &self.dir, &e))?;
+        Ok(read
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|x| x == "tmp"))
+            .collect())
     }
 
     fn read_key(&self) -> Result<Option<Key>, CliError> {
@@ -511,7 +689,7 @@ fn unreadable(path: &Path) -> CliError {
         "the vault entry {} does not decrypt with this vault's key",
         path.display()
     ))
-    .with_remedy(REMEDY_CLEAR)
+    .with_remedy(REMEDY_DELETE_ENTRY)
 }
 
 fn key_lost(dir: &Path) -> CliError {

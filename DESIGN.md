@@ -1108,12 +1108,22 @@ secret in a file of its own:
 | Where | `~/.config/<bin>/vault/` (`Vault::for_binary`), anchored to the home directory alone as `RefreshLock`'s file is (§1.7), so a launchd agent and a terminal open one vault. The directory is `0700`, each entry `0600` |
 | An entry | `PKV1`, a 24-byte random nonce, and the XChaCha20-Poly1305 ciphertext of `{"name", "value"}`, in a file named by the SHA-256 of the name, so no name is on disk in the clear (the hash is unkeyed, so a reader of the owner-only directory could test a guessed name, never read one). The file name is the authenticated data and the decrypted name must be the one asked for, so a file copied over another reads as an error, never as the other entry. An error names the file and never a value |
 | Writes | to a temporary file, synced, renamed over the entry, and the directory synced: a crash leaves the old entry or the new one. Entries are apart, so a write to one never touches another; writes to one entry are serialised the way the CLI already serialises them (a session under `RefreshLock`) |
-| API | `get`, `put`, `delete` (no key needed), `names` (sorted), `get_json` and `put_json` (an entry that does not parse is an error, never `None`, as `CredentialStore::get_json`) |
+| API | `get`, `put`, `delete` (no key needed), `names` (sorted) and `list` (the names, and apart from them the files that do not decrypt, so one damaged entry leaves the others listed), `get_json` and `put_json` (an entry that does not parse is an error, never `None`, as `CredentialStore::get_json`), `clear` (every entry and the key item, under the key lock: the reset after a lost or damaged key) |
+| Remedies | an entry that does not decrypt is `REMEDY_DELETE_ENTRY` (that one sign-in; the others are unaffected); a missing or malformed key is `REMEDY_CLEAR` (`clear` and sign in again). A CLI replaces each with its own command |
+| The key lock | waited for at most 30 seconds (`KEY_WAIT`, `wait_at_most`), then exit 5 naming the file, so a first write stalled on a keychain dialog never hangs another run |
 | Tests | `Vault::new(MemoryKeys::new(), dir)` with a directory of the test's own; `MemoryKeys` counts reads and writes, so a test can show what reaches the keychain. A CLI's surface tests give it their `<PREFIX>_KEYCHAIN_SERVICE` override and a temporary `HOME` |
 
-Moving from one item per login to the vault costs one read of each old
-item by the new binary, so one dialog per item, once; after it a new binary
-asks once for the CLI.
+`Vault::migrate_from(&keychain, pairs)` moves a CLI's old items in, `pairs`
+mapping each item's account to its entry's name, under the lock the CLI
+writes them with. Per pair: an entry already there is kept and the item
+deleted; otherwise the item is read, written, read back and compared, and
+only then deleted, so a failure leaves the item for the next run, and a run
+with nothing left reads no item. It costs one read of each old item by the
+new binary, so one dialog per item, once (delete test items beforehand with
+`security delete-generic-password`, which raises none); after it a new
+binary asks once for the CLI. A downgrade past the move finds no sign-in:
+the old items are not kept for it, since a renewal after the move rotates
+the refresh token and theirs would be stale.
 
 ### Versioning & consumption
 

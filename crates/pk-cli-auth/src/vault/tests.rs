@@ -123,7 +123,7 @@ fn a_file_copied_over_another_reads_as_an_error() {
     let err = vault.get("b").unwrap_err();
     assert!(err.to_string().contains("does not decrypt"), "{err}");
     assert!(!err.to_string().contains("for a"), "{err}");
-    assert_eq!(err.remedy(), Some(REMEDY_CLEAR));
+    assert_eq!(err.remedy(), Some(REMEDY_DELETE_ENTRY));
 }
 
 #[test]
@@ -139,7 +139,22 @@ fn a_changed_byte_reads_as_an_error_with_no_value_in_it() {
     fs::write(&path, bytes).unwrap();
     let err = vault.get("a").unwrap_err();
     assert!(!err.to_string().contains("the value"), "{err}");
-    assert!(vault.names().is_err());
+    assert!(vault.names().unwrap().is_empty());
+}
+
+#[test]
+fn one_damaged_entry_leaves_the_others_listed() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(MemoryKeys::new());
+    let vault = tmp.vault_with(&keys);
+    vault.put("a", &secret("x")).unwrap();
+    vault.put("b", &secret("y")).unwrap();
+    fs::write(vault.entry_path("a"), b"PKV1 damaged").unwrap();
+    let listing = vault.list().unwrap();
+    assert_eq!(listing.names, ["b"]);
+    assert_eq!(listing.unreadable, [vault.entry_path("a")]);
+    assert_eq!(vault.names().unwrap(), ["b"]);
+    assert!(vault.get("b").unwrap().is_some());
 }
 
 #[test]
@@ -154,10 +169,118 @@ fn a_lost_key_is_an_error_and_never_replaced_while_entries_exist() {
     assert!(err.to_string().contains(KEY_ACCOUNT), "{err}");
     assert!(vault.put("b", &secret("y")).is_err());
     assert_eq!(keys.writes(), 1, "no second key");
+    assert_eq!(err.remedy(), Some(REMEDY_CLEAR));
     // Once the entries are cleared, a new key can be made.
     assert!(vault.delete("a").unwrap());
     vault.put("b", &secret("y")).unwrap();
     assert_eq!(keys.writes(), 2);
+}
+
+#[test]
+fn clear_removes_every_entry_and_the_key() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(MemoryKeys::new());
+    let vault = tmp.vault_with(&keys);
+    vault.put("a", &secret("x")).unwrap();
+    vault.put("b", &secret("y")).unwrap();
+    fs::write(vault.dir().join(".stray.tmp"), b"").unwrap();
+    assert_eq!(vault.clear().unwrap(), 2);
+    assert!(keys.get(KEY_ACCOUNT).unwrap().is_none());
+    assert!(vault.names().unwrap().is_empty());
+    assert!(!vault.dir().join(".stray.tmp").exists());
+    // A key that is not a key is cleared the same way.
+    keys.set(KEY_ACCOUNT, &secret("not a key")).unwrap();
+    assert!(vault.put("c", &secret("z")).is_err());
+    assert_eq!(vault.clear().unwrap(), 0);
+    vault.put("c", &secret("z")).unwrap();
+    assert_eq!(vault.get("c").unwrap().unwrap().expose(), "z");
+    // A vault that never existed: nothing to remove, nothing created.
+    let other = TempDir::new();
+    let fresh = other.vault_with(&Arc::new(MemoryKeys::new()));
+    assert_eq!(fresh.clear().unwrap(), 0);
+    assert!(!fresh.dir().exists());
+}
+
+#[test]
+fn items_move_in_read_back_and_only_then_leave() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(MemoryKeys::new());
+    let vault = tmp.vault_with(&keys);
+    let old = MemoryKeys::new();
+    old.set("smart/org-1/p-1", &secret("session one")).unwrap();
+    old.set("smart/org-1/p-2", &secret("session two, older"))
+        .unwrap();
+    vault
+        .put("adult1/org-1/p-2", &secret("session two"))
+        .unwrap();
+    let pairs = [
+        ("smart/org-1/p-1", "adult1/org-1/p-1"),
+        ("smart/org-1/p-2", "adult1/org-1/p-2"),
+        ("smart/org-1/p-3", "adult1/org-1/p-3"),
+    ];
+    let done = vault.migrate_from(&old, &pairs).unwrap();
+    assert_eq!(
+        done,
+        Migration {
+            moved: 1,
+            kept: 1,
+            absent: 1
+        }
+    );
+    assert_eq!(
+        vault.get("adult1/org-1/p-1").unwrap().unwrap().expose(),
+        "session one"
+    );
+    assert_eq!(
+        vault.get("adult1/org-1/p-2").unwrap().unwrap().expose(),
+        "session two"
+    );
+    assert!(old.get("smart/org-1/p-1").unwrap().is_none());
+    assert!(old.get("smart/org-1/p-2").unwrap().is_none());
+    // Again: nothing left to move, and no item read but absent ones.
+    let reads = old.reads();
+    let again = vault.migrate_from(&old, &pairs[..1]).unwrap();
+    assert_eq!(again.kept, 1);
+    assert_eq!(old.reads(), reads, "a kept entry reads no item");
+}
+
+#[test]
+fn a_failed_move_keeps_the_item() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(MemoryKeys::new());
+    tmp.vault_with(&keys).put("x", &secret("x")).unwrap();
+    keys.forget();
+    // A new process: the key is gone and an entry is there.
+    let vault = tmp.vault_with(&keys);
+    let old = MemoryKeys::new();
+    old.set("item", &secret("the session")).unwrap();
+    assert!(vault.migrate_from(&old, &[("item", "entry")]).is_err());
+    assert_eq!(old.get("item").unwrap().unwrap().expose(), "the session");
+}
+
+#[test]
+fn a_held_key_lock_is_waited_for_and_then_refused() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(MemoryKeys::new());
+    let vault = tmp
+        .vault_with(&keys)
+        .wait_at_most(Duration::from_millis(200));
+    vault.ensure_dir().unwrap();
+    let held = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(vault.dir().join(LOCK_FILE))
+        .unwrap();
+    held.lock().unwrap();
+    let started = Instant::now();
+    let err = vault.put("a", &secret("x")).unwrap_err();
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert_eq!(err.exit_code(), 5, "{err}");
+    assert!(err.to_string().contains(LOCK_FILE), "{err}");
+    assert_eq!(keys.writes(), 0);
+    drop(held);
+    vault.put("a", &secret("x")).unwrap();
 }
 
 #[test]
