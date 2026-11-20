@@ -211,7 +211,8 @@ impl CliError {
     }
 
     /// The `{"error": {"code", "message"}}` DTO emitted on stdout in `--json`
-    /// mode (SPEC v1 §1.4).
+    /// mode (SPEC v1 §1.4), plus `reason` ([`Reason::slug`]) and `remedy`
+    /// when the error carries them.
     pub fn to_json(&self) -> serde_json::Value {
         let mut error = json!({ "code": self.code(), "message": self.to_string() });
         if let Some(reason) = self.reason() {
