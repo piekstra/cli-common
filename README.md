@@ -54,7 +54,8 @@ Exit codes: `0` ok · `1` other · `2` usage · `3` auth · `4` not found ·
 `5` upstream/provider · `6` confirmation required.
 
 `--json` on any command → the DTO alone on stdout; on failure,
-`{"error": {"code", "message"}}` plus the matching exit code. Canonical DTOs
+`{"error": {"code", "message"}}` (plus `reason` and `remedy` when the error has
+them) and the matching exit code. Canonical DTOs
 carry a `"schema"` tag: `auth-status/v1`, `self-update/v1`, `cli-info/v1`,
 plus per-profile shapes (e.g. `utility-summary/v1`, `device-rooms/v1`). A CLI
 declares its domain profiles in `info` (`"profiles": ["utility/v1"]`).

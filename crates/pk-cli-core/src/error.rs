@@ -78,6 +78,25 @@ pub enum Reason {
     Provider(&'static str),
 }
 
+impl Reason {
+    /// The reason as `--json` prints it (`error.reason`): `snake_case` for
+    /// the shared reasons, like [`CliError::code`]'s slugs, and a
+    /// [`Provider`](Reason::Provider) reason as the CLI spelled it, which
+    /// should be `snake_case` too.
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Reason::NoCredential => "no_credential",
+            Reason::CredentialRefused => "credential_refused",
+            Reason::Forbidden => "forbidden",
+            Reason::CredentialUnreadable => "credential_unreadable",
+            Reason::RenewalOff => "renewal_off",
+            Reason::BadRequest => "bad_request",
+            Reason::ClientBlocked => "client_blocked",
+            Reason::Provider(slug) => slug,
+        }
+    }
+}
+
 /// What [`CliError::Detailed`] holds. Read it through `CliError`'s methods.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Detail {
@@ -192,9 +211,17 @@ impl CliError {
     }
 
     /// The `{"error": {"code", "message"}}` DTO emitted on stdout in `--json`
-    /// mode (SPEC v1 §1.4).
+    /// mode (SPEC v1 §1.4), plus `reason` ([`Reason::slug`]) and `remedy`
+    /// when the error carries them.
     pub fn to_json(&self) -> serde_json::Value {
-        json!({ "error": { "code": self.code(), "message": self.to_string() } })
+        let mut error = json!({ "code": self.code(), "message": self.to_string() });
+        if let Some(reason) = self.reason() {
+            error["reason"] = reason.slug().into();
+        }
+        if let Some(remedy) = self.remedy() {
+            error["remedy"] = remedy.into();
+        }
+        json!({ "error": error })
     }
 }
 
@@ -276,7 +303,7 @@ mod tests {
     }
 
     /// Scripts branch on `$?` and `error.code`, and a person reads the text: typing a
-    /// cause changes none of them.
+    /// cause changes none of them, and only adds `error.reason` to `--json`.
     #[test]
     fn a_reason_keeps_the_exit_code_slug_and_text_of_every_kind() {
         for plain in every_kind() {
@@ -284,7 +311,14 @@ mod tests {
             assert_eq!(typed.exit_code(), plain.exit_code(), "{plain:?}");
             assert_eq!(typed.code(), plain.code(), "{plain:?}");
             assert_eq!(typed.to_string(), plain.to_string(), "{plain:?}");
-            assert_eq!(typed.to_json(), plain.to_json(), "{plain:?}");
+            let (typed_json, plain_json) = (typed.to_json(), plain.to_json());
+            assert_eq!(typed_json["error"]["code"], plain_json["error"]["code"]);
+            assert_eq!(
+                typed_json["error"]["message"],
+                plain_json["error"]["message"]
+            );
+            assert_eq!(typed_json["error"]["reason"], "forbidden");
+            assert!(plain_json["error"].get("reason").is_none());
             assert_eq!(typed.reason(), Some(Reason::Forbidden));
             assert_eq!(typed.base(), &plain);
             assert_eq!(typed.message(), "m", "{plain:?}");
@@ -304,9 +338,41 @@ mod tests {
         );
         assert_eq!(e.to_json()["error"]["message"], e.to_string());
         assert_eq!(e.to_json()["error"]["code"], "not_found");
+        assert_eq!(e.to_json()["error"]["remedy"], "list them first");
+        assert!(e.to_json()["error"].get("reason").is_none());
         assert_eq!(e.message(), "no account");
         assert_eq!(e.remedy(), Some("list them first"));
         assert_eq!(e.reason(), None);
+    }
+
+    #[test]
+    fn json_carries_the_reason_and_the_remedy_only_when_set() {
+        let plain = CliError::Usage("m".into()).to_json();
+        assert_eq!(plain, json!({"error": {"code": "usage", "message": "m"}}));
+        let typed = CliError::Usage("m".into())
+            .because(Reason::Provider("no_client"))
+            .with_remedy("r")
+            .to_json();
+        assert_eq!(
+            typed,
+            json!({"error": {"code": "usage", "message": "m \u{2014} r", "reason": "no_client", "remedy": "r"}})
+        );
+        let slugs = [
+            (Reason::NoCredential, "no_credential"),
+            (Reason::CredentialRefused, "credential_refused"),
+            (Reason::Forbidden, "forbidden"),
+            (Reason::CredentialUnreadable, "credential_unreadable"),
+            (Reason::RenewalOff, "renewal_off"),
+            (Reason::BadRequest, "bad_request"),
+            (Reason::ClientBlocked, "client_blocked"),
+        ];
+        for (reason, slug) in slugs {
+            assert_eq!(reason.slug(), slug);
+            assert_eq!(
+                CliError::Auth("m".into()).because(reason).to_json()["error"]["reason"],
+                slug
+            );
+        }
     }
 
     /// Detail on detail folds into one, so `base` is always a plain variant.
