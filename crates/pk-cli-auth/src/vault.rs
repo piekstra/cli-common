@@ -325,6 +325,20 @@ impl Vault {
         write_atomically(&path, &sealed)
     }
 
+    /// Whether an entry `name` is stored. It looks for the entry's file and
+    /// never reads the keychain, so a command that only reports whether a
+    /// secret is there (`info`, a status line) raises no prompt for a newly
+    /// built binary. It does not decrypt: an entry sealed with a lost or
+    /// replaced key is still there, and [`get`](Self::get) reports it.
+    pub fn contains(&self, name: &str) -> Result<bool, CliError> {
+        let path = self.entry_path(name);
+        match fs::metadata(&path) {
+            Ok(meta) => Ok(meta.is_file()),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(io_error("reading", &path, &e)),
+        }
+    }
+
     /// Delete the entry `name`. `true` when one was there. Needs no key.
     pub fn delete(&self, name: &str) -> Result<bool, CliError> {
         let path = self.entry_path(name);
