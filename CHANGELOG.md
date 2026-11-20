@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.33.4 — 2026-11-20
+
+- `pk-cli-core`: the `--json` error DTO adds `reason` and `remedy` when the error has them
+  (`CliError::because`, `with_remedy`). For example, `{"error": {"code": "usage", "message":
+  "… — …", "reason": "no_client", "remedy": "…"}}`. A script can now tell one cause of an exit
+  code from another, which only code inside the CLI could before. `message` is unchanged, remedy
+  and all, and an error with neither prints exactly as before. `Reason::slug` is the spelling:
+  `snake_case` for the shared reasons, and a `Provider` reason as given. Asked for by the
+  mychart-cli session.
+
 ## v0.33.2 — 2026-11-17
 
 - `pk-cli-auth`: the vault's `.key.lock` is created `0600`, as `RefreshLock`'s file is, and one

@@ -1,6 +1,6 @@
 # cli-common — shared surface & libraries for the piekstra CLI family
 
-Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · `Confirm::Undecided`, when a window capture's read cannot decide (§2.2) · 2026-11-03 · `pk-cli-arcgis`, read-only ArcGIS REST layer queries (Part 2) · 2026-11-03 · `SendDeadline`, a late write's check in one place (§1.9, §2.3) · 2026-11-03 · `CliError::because`, a typed cause and a remedy apart from the message (§1.5, §1.9) · 2026-11-03 · a position cursor for lists whose rows move (§1.9) · 2026-11-03 · an item over Windows's credential limit, split and put back together (§1.7) · 2026-11-03 · `hold_within`, `stop_note` (§1.9) · 2026-11-03 · `ReadBudget`, `RowsSeen`, `forget_note` (§1.9) · 2026-11-04 · OAuth 2 sign-in with PKCE and a loopback redirect, `pk_cli_auth::oauth` (§2.4) · 2026-11-12 · a registered https page that forwards the redirect to the loopback, `AuthorizationCodeFlow::redirect_uri` (§2.4) · 2026-11-16
+Status: draft v1 · 2026-07-11 · §1.8 domain profiles added in v1.1 · 2026-07-19 · confirm/read-back rails, one-item keychain rule, `smart-home/v1` (0.8.0) · 2026-09-10 · 1Password source + secret precedence (§1.7) · 2026-10-02 · `pk-cli-drive`, state in the owner's Drive (§2.1) · 2026-10-02 · `pk-cli-browser`, `auth login --browser` (§2.2) · 2026-10-29 · MCP profile, `pk-cli-mcp` (§1.9, §2.3) · 2026-11-01 · transport seam, WebAssembly module ABI (§2.3) · 2026-11-02 · `<bin> mcp --http` for the Worker's tunnel (§1.9, §2.3) · 2026-11-02 · a kept browser profile per CLI, `--fresh-profile`, `forget_profile` (§1.7, §2.2) · 2026-11-02 · renewing a rotating refresh token under a lock (§1.7) · 2026-11-03 · clearing a kept browser profile's site storage, `profile_exists`, `browser_profile` in `auth-status/v1` (§1.4, §1.7, §2.2) · 2026-11-03 · closing a kept profile's Chrome over its debug port (§2.2) · 2026-11-03 · `Confirm::Undecided`, when a window capture's read cannot decide (§2.2) · 2026-11-03 · `pk-cli-arcgis`, read-only ArcGIS REST layer queries (Part 2) · 2026-11-03 · `SendDeadline`, a late write's check in one place (§1.9, §2.3) · 2026-11-03 · `CliError::because`, a typed cause and a remedy apart from the message (§1.5, §1.9) · 2026-11-03 · a position cursor for lists whose rows move (§1.9) · 2026-11-03 · an item over Windows's credential limit, split and put back together (§1.7) · 2026-11-03 · `hold_within`, `stop_note` (§1.9) · 2026-11-03 · `ReadBudget`, `RowsSeen`, `forget_note` (§1.9) · 2026-11-04 · OAuth 2 sign-in with PKCE and a loopback redirect, `pk_cli_auth::oauth` (§2.4) · 2026-11-12 · a registered https page that forwards the redirect to the loopback, `AuthorizationCodeFlow::redirect_uri` (§2.4) · 2026-11-16 · `error.reason` and `error.remedy` in `--json` (§1.4, §1.5) · 2026-11-20
 
 The family today: `fpl`, `tojfl`, `lrfl`, `xfin`, `gpm2op`, `target-cli`, `babylist-cli`
 (and future account-portal CLIs). All Rust, all clap-derive, all keychain-secured,
@@ -99,7 +99,10 @@ Stdout = data only; progress/confirmation/diagnostics = stderr.
 **JSON mode (`--json`):**
 - Success → the DTO alone on stdout (no envelope), pretty-printed.
 - Failure → nonzero exit + `{"error": {"code": "<slug>", "message": "..."} }`
-  on stdout, message repeated human-readably on stderr.
+  on stdout, message repeated human-readably on stderr. An error that types its
+  cause or names a remedy (§1.5) adds `"reason": "<slug>"` and `"remedy": "..."`;
+  `message` still ends with the remedy, so a reader that predates them loses
+  nothing.
 - DTO conventions: `snake_case` keys; ISO-8601 dates (`YYYY-MM-DD`, timestamps
   RFC 3339); money as `{"amount": "123.45", "currency": "USD"}` (string
   decimal — never floats); omit unknown fields rather than emitting null noise.
@@ -176,7 +179,10 @@ the exit code says so on the error: `CliError::because(Reason)` types the cause
 cause only this CLI has) and `CliError::with_remedy` keeps what to do next apart from
 what went wrong. A caller reads `reason()`, `message()` and `remedy()`, never the text,
 which gets reworded with no compile error. Neither changes the exit code or the slug;
-`Display` and `--json` print the remedy after the message, joined by an em dash. A
+`Display` and `--json` print the remedy after the message, joined by an em dash, and
+`--json` also gives both apart, as `error.reason` (`Reason::slug`: `snake_case`, a
+`Provider` reason as spelled, so spell it `snake_case`) and `error.remedy`, so a script
+branches on the cause too (v0.33.4). A
 pattern such as `CliError::Auth(_)` does not see through this detail: such a caller
 uses `is_auth()` or matches on `base()`. The shared crates' own errors stay plain, so a
 CLI's patterns over them keep working; a CLI that types a cause checks its own patterns
