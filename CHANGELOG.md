@@ -10,6 +10,15 @@
   `snake_case` for the shared reasons, and a `Provider` reason as given. Asked for by the
   mychart-cli session.
 
+## v0.33.3 — 2026-11-20
+
+- `pk-cli-auth`: `Vault::contains(name)` says whether an entry is stored from its file alone,
+  without the keychain, as `delete` and a `get` of a missing entry already work. A CLI's `info`
+  or status line can then report whether a secret is configured without a prompt for a newly
+  built binary, instead of copying the vault's file naming (kaiser-cli did, for `info`'s `client`
+  member). It does not decrypt: an entry sealed with a lost key is still there, and `get`
+  reports it.
+
 ## v0.33.2 — 2026-11-17
 
 - `pk-cli-auth`: the vault's `.key.lock` is created `0600`, as `RefreshLock`'s file is, and one
