@@ -58,6 +58,23 @@ fn an_entry_reads_back_and_is_gone_once_deleted() {
 }
 
 #[test]
+fn contains_finds_an_entry_without_the_key() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(MemoryKeys::new());
+    let vault = tmp.vault_with(&keys);
+    assert!(!vault.contains("_client/sandbox").unwrap());
+    vault.put("_client/sandbox", &secret("pair")).unwrap();
+    // A new process: nothing cached, and the check reads no key.
+    let fresh = tmp.vault_with(&keys);
+    let reads = keys.reads();
+    assert!(fresh.contains("_client/sandbox").unwrap());
+    assert!(!fresh.contains("_client/production").unwrap());
+    assert_eq!(keys.reads(), reads);
+    assert!(fresh.delete("_client/sandbox").unwrap());
+    assert!(!fresh.contains("_client/sandbox").unwrap());
+}
+
+#[test]
 fn nothing_stored_reads_no_key_and_writes_none() {
     let tmp = TempDir::new();
     let keys = Arc::new(MemoryKeys::new());
@@ -65,6 +82,7 @@ fn nothing_stored_reads_no_key_and_writes_none() {
     assert!(vault.get("adult1/org-1/p-1").unwrap().is_none());
     assert!(vault.names().unwrap().is_empty());
     assert!(!vault.delete("adult1/org-1/p-1").unwrap());
+    assert!(!vault.contains("adult1/org-1/p-1").unwrap());
     assert_eq!((keys.reads(), keys.writes()), (0, 0));
     assert!(!vault.dir().exists(), "a read creates nothing");
 }
