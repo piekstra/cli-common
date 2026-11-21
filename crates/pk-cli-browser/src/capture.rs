@@ -19,7 +19,9 @@
 //! 5. for a capture that watches requests, checks that the request it needs
 //!    was seen, and holds the tab open for its window once the rest is
 //!    ready (the pages' network events arrive on the watch, a longer-lived
-//!    connection described in `watch.rs`);
+//!    connection described in `watch.rs`, which also reads the bodies a
+//!    capture keeps as their loads finish). [`finish`](crate::finish) ends
+//!    the windows open at the time;
 //! 6. hands what it read to the CLI's confirm hook, if the capture has one,
 //!    whose answer leaves the tab open for the next poll, lets the capture
 //!    through, or ends the wait;
@@ -42,7 +44,8 @@ use crate::host::{parse_url, HostRule};
 use crate::interrupt;
 use crate::jar::{cookie_header, jar_cookies, jar_names, pick_cookie, JarCookie};
 use crate::watch::{
-    CapturedRequest, LoggedRequest, Next, RequestLog, RequestRule, SeenRequest, Watch,
+    CapturedRequest, CapturedResponse, LoggedRequest, Next, RequestLog, RequestRule, ResponseLog,
+    SeenRequest, Watch,
 };
 
 /// How long a sign-in may take before the wait gives up: the family's
@@ -90,6 +93,7 @@ pub struct Capture {
     jar: Option<String>,
     request: Option<RequestRead>,
     log: Option<LogRead>,
+    responses: Option<ResponsesRead>,
     user_agent: bool,
     confirm: Option<ConfirmHook>,
     hint: Option<String>,
@@ -113,6 +117,13 @@ struct RequestRead {
 #[derive(Debug, Clone)]
 struct LogRead {
     domain: String,
+    during: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct ResponsesRead {
+    domain: String,
+    paths: Vec<String>,
     during: Duration,
 }
 
@@ -182,6 +193,7 @@ impl Capture {
             jar: None,
             request: None,
             log: None,
+            responses: None,
             user_agent: false,
             confirm: None,
             hint: None,
@@ -301,6 +313,45 @@ impl Capture {
         self
     }
 
+    /// Keep the responses the capture's pages load from `domain` (or a host
+    /// under it) on one of `paths`, bodies and all: each page load,
+    /// `XMLHttpRequest` and `fetch()` there, as the page received it. For a
+    /// CLI that reads what the owner looks at, with the owner doing every
+    /// click: the crate sends nothing to the site and reads each body from
+    /// the browser's own buffer once its load finishes. A path matches as a
+    /// cookie path does (itself, or anything under it on a `/` boundary);
+    /// `"/"` is every path.
+    ///
+    /// Keeping starts as soon as a page on the capture's hosts is open (it
+    /// enables `Network` there, as [`Capture::request_log`] does). Once
+    /// everything else is ready, the tab is held open `during` more, or
+    /// until [`finish`](crate::finish) ends the window, so the owner can go
+    /// through the pages; then the capture is read and its tab closed as
+    /// usual, and the responses are handed over as
+    /// [`Captured::responses`]. The confirm hook sees none of them.
+    ///
+    /// Bounded: 500 responses, 10 MiB a body and 200 MiB in all. A load is
+    /// counted in [`Captured::responses_skipped`] when it does not fit, when
+    /// the browser no longer holds its body or does not hand it over in
+    /// time, when it is still loading as the capture is read, and when the
+    /// watch has to reconnect while it is in progress (with a status line
+    /// saying so, so the owner can reload those pages). A page the owner
+    /// opens in a new tab is watched from the next poll, so what it loads in
+    /// its first seconds can be missed. `domain` follows the rule of
+    /// [`Capture::cookie_jar`]. A later call replaces an earlier one.
+    pub fn responses<I, S>(mut self, domain: impl Into<String>, paths: I, during: Duration) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.responses = Some(ResponsesRead {
+            domain: domain.into(),
+            paths: paths.into_iter().map(Into::into).collect(),
+            during,
+        });
+        self
+    }
+
     /// Also read the browser's `User-Agent` (a browser-level call no page
     /// can observe), handed over as [`Captured::user_agent`], for a provider
     /// that binds the session to the browser that earned it (a Cloudflare
@@ -361,6 +412,7 @@ impl Capture {
             && self.jar.is_none()
             && self.request.is_none()
             && self.log.is_none()
+            && self.responses.is_none()
         {
             return bad(format!("`{label}` names nothing to read"));
         }
@@ -405,6 +457,22 @@ impl Capture {
         }
         if let Some(log) = &self.log {
             self.domain_rule(&log.domain, "logs the requests to")?;
+        }
+        if let Some(read) = &self.responses {
+            self.domain_rule(&read.domain, "keeps the responses of")?;
+            if read.paths.is_empty() {
+                return bad(format!("`{label}` keeps responses on no path"));
+            }
+            if let Some(path) = read
+                .paths
+                .iter()
+                .find(|p| !p.starts_with('/') || p.contains(['?', '#']))
+            {
+                return bad(format!(
+                    "`{label}` keeps responses on `{path}`, which is not a path starting with \
+                     `/` without a query"
+                ));
+            }
         }
         Ok(())
     }
@@ -497,6 +565,8 @@ pub struct Captured {
     jar: Option<Vec<JarCookie>>,
     request: Option<CapturedRequest>,
     request_log: Option<Vec<LoggedRequest>>,
+    responses: Option<Vec<CapturedResponse>>,
+    responses_skipped: usize,
     user_agent: Option<String>,
 }
 
@@ -555,6 +625,25 @@ impl Captured {
     /// were first seen; empty for a capture without one.
     pub fn request_log(&self) -> &[LoggedRequest] {
         self.request_log.as_deref().unwrap_or_default()
+    }
+
+    /// The responses a [`Capture::responses`] kept, in the order their
+    /// loads finished; empty for a capture without one.
+    pub fn responses(&self) -> &[CapturedResponse] {
+        self.responses.as_deref().unwrap_or_default()
+    }
+
+    /// The kept responses, moved out, so their bodies are not copied.
+    pub fn take_responses(&mut self) -> Vec<CapturedResponse> {
+        self.responses.take().unwrap_or_default()
+    }
+
+    /// Loads on the capture's paths that were not kept: their body was
+    /// larger than allowed, the bounds were reached, the browser no longer
+    /// held it or did not hand it over in time, it was still loading when
+    /// the capture was read, or the watch reconnected while it loaded.
+    pub fn responses_skipped(&self) -> usize {
+        self.responses_skipped
     }
 
     /// The browser's `User-Agent`, for a capture
@@ -639,6 +728,8 @@ pub(crate) trait Driver {
     fn exited(&mut self) -> bool;
     fn canceled(&self) -> bool;
     fn cancel_check(&self) -> fn() -> bool;
+    /// Whether [`finish`](crate::finish) was called since the last ask.
+    fn finish_requested(&mut self) -> bool;
 }
 
 impl Driver for Browser {
@@ -658,6 +749,10 @@ impl Driver for Browser {
 
     fn cancel_check(&self) -> fn() -> bool {
         interrupt::canceled
+    }
+
+    fn finish_requested(&mut self) -> bool {
+        interrupt::take_finish()
     }
 }
 
@@ -731,8 +826,14 @@ struct Waiting<'a> {
     request: Option<RequestRule>,
     seen: Option<CapturedRequest>,
     log: Option<RequestLog>,
+    responses: Option<ResponseLog>,
     /// When everything but the watch window was first ready.
     hold_since: Option<Instant>,
+    /// The watch window was ended by [`finish`](crate::finish).
+    hold_over: bool,
+    /// Loads in progress that a reconnecting watch lost since the last
+    /// status line about it.
+    responses_lost: usize,
     undecided: Option<UndecidedRead>,
     warned_undecided: bool,
 }
@@ -757,7 +858,14 @@ impl<'a> Waiting<'a> {
                 .as_ref()
                 .and_then(|l| HostRule::domain(&l.domain).ok())
                 .map(RequestLog::new),
+            responses: capture.responses.as_ref().and_then(|r| {
+                HostRule::domain(&r.domain)
+                    .ok()
+                    .map(|rule| ResponseLog::new(rule, r.paths.clone()))
+            }),
             hold_since: None,
+            hold_over: false,
+            responses_lost: 0,
             undecided: None,
             warned_undecided: false,
         }
@@ -765,7 +873,7 @@ impl<'a> Waiting<'a> {
 
     /// Whether the capture watches its pages' requests.
     fn watches(&self) -> bool {
-        self.request.is_some() || self.log.is_some()
+        self.request.is_some() || self.log.is_some() || self.responses.is_some()
     }
 
     /// How long the tab is held open once everything else is ready: the
@@ -779,7 +887,9 @@ impl<'a> Waiting<'a> {
             }) if self.seen.is_none() => Some(*within),
             _ => None,
         };
-        request.max(self.capture.log.as_ref().map(|l| l.during))
+        request
+            .max(self.capture.log.as_ref().map(|l| l.during))
+            .max(self.capture.responses.as_ref().map(|r| r.during))
     }
 }
 
@@ -1018,6 +1128,8 @@ fn read_when_ready<T: Transport>(
         jar,
         request: w.seen.take(),
         request_log: w.log.as_ref().map(|log| log.entries().to_vec()),
+        responses: None,
+        responses_skipped: 0,
         user_agent,
     };
     if state.final_round {
@@ -1027,7 +1139,12 @@ fn read_when_ready<T: Transport>(
             read.ask_at = state.now;
         }
     }
-    let captured = confirm_gate(w, candidate, state.now, notes)?;
+    let mut captured = confirm_gate(w, candidate, state.now, notes)?;
+    if let Some(log) = w.responses.as_mut() {
+        let (kept, skipped) = log.take();
+        captured.responses = Some(kept);
+        captured.responses_skipped = skipped;
+    }
     let closed = close_pages(cdp, &matching);
     Ok((captured, closed))
 }
@@ -1137,6 +1254,9 @@ fn hold_gate(
     let Some(window) = w.window() else {
         return Ok(());
     };
+    if w.hold_over {
+        return Ok(());
+    }
     let since = match w.hold_since {
         Some(since) => since,
         None => {
@@ -1336,6 +1456,27 @@ pub(crate) fn run_wait<D: Driver>(
         if driver.exited() {
             return Err(window_closed(&settings.login_hint, &waiting));
         }
+        lost_notes(&mut waiting, note);
+        if driver.finish_requested() {
+            let mut ended = 0;
+            for w in waiting
+                .iter_mut()
+                .filter(|w| !w.done && w.hold_since.is_some() && !w.hold_over)
+            {
+                w.hold_over = true;
+                ended += 1;
+            }
+            if ended == 0 {
+                note(
+                    "Nothing is held open yet, so there is nothing to finish; finish once a tab \
+                     is being kept open.",
+                );
+            } else {
+                note("Finishing: reading what the pages loaded, then closing the tab.");
+                // Read the loads that finished meanwhile before the poll.
+                pause(driver, Duration::ZERO, None, &mut watch, &mut waiting)?;
+            }
+        }
         let poll = match driver.connect() {
             Err(e) => Err(e),
             Ok(transport) => {
@@ -1385,7 +1526,8 @@ pub(crate) fn run_wait<D: Driver>(
                 if empty_polls >= CLOSED_POLLS {
                     return Err(window_closed(&settings.login_hint, &waiting));
                 }
-                follow_pages(driver, &mut watch, &poll.pages, &waiting, settings)?;
+                follow_pages(driver, &mut watch, &poll.pages, &mut waiting, settings)?;
+                lost_notes(&mut waiting, note);
                 None
             }
         };
@@ -1430,7 +1572,7 @@ fn follow_pages<D: Driver>(
     driver: &mut D,
     watch: &mut Option<Watch<D::T>>,
     pages: &[PageTarget],
-    waiting: &[Waiting<'_>],
+    waiting: &mut [Waiting<'_>],
     settings: &WaitSettings,
 ) -> Result<(), BrowserError> {
     let watching = |w: &&Waiting<'_>| !w.done && w.watches();
@@ -1459,14 +1601,41 @@ fn follow_pages<D: Driver>(
         let cdp = Cdp::new(transport, settings.call_timeout, driver.cancel_check());
         *watch = Some(Watch::new(cdp.keeping_events()));
     }
-    if let Some(w) = watch.as_mut() {
-        match w.sync(&wanted) {
-            Ok(()) => {}
-            Err(CdpError::Canceled) => return Err(canceled()),
-            Err(_) => *watch = None,
-        }
+    let failed = match watch.as_mut().map(|w| w.sync(&wanted)) {
+        Some(Err(CdpError::Canceled)) => return Err(canceled()),
+        Some(Err(_)) => true,
+        _ => false,
+    };
+    if failed {
+        drop_watch(watch, waiting);
     }
     Ok(())
+}
+
+/// Drop a watch that failed, to be opened again on a later poll. Its
+/// sessions go with it, and the bodies the browser held for them, so every
+/// load a capture was still waiting on is counted as skipped, and noted.
+fn drop_watch<T: Transport>(watch: &mut Option<Watch<T>>, waiting: &mut [Waiting<'_>]) {
+    *watch = None;
+    for w in waiting.iter_mut().filter(|w| !w.done) {
+        if let Some(responses) = w.responses.as_mut() {
+            w.responses_lost += responses.abandon_pending();
+        }
+    }
+}
+
+/// A status line for each capture whose watch lost loads in progress.
+fn lost_notes(waiting: &mut [Waiting<'_>], note: &mut dyn FnMut(&str)) {
+    for w in waiting.iter_mut().filter(|w| w.responses_lost > 0) {
+        let n = std::mem::take(&mut w.responses_lost);
+        note(&format!(
+            "{}: the page watch reconnected, so {n} load{} in progress {} not kept; reload \
+             those pages to keep them.",
+            w.capture.label,
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "was" } else { "were" },
+        ));
+    }
 }
 
 /// Wait until the next poll (or the deadline), waking to notice a cancel,
@@ -1489,7 +1658,7 @@ fn pause<D: Driver>(
             match pump(w, waiting) {
                 Ok(()) => {}
                 Err(CdpError::Canceled) => return Err(canceled()),
-                Err(_) => *watch = None,
+                Err(_) => drop_watch(watch, waiting),
             }
         }
         let now = Instant::now();
@@ -1516,12 +1685,38 @@ fn pump<T: Transport>(watch: &mut Watch<T>, waiting: &mut [Waiting<'_>]) -> Resu
                 }
             }
             Next::Response(seen) => {
-                let log = waiting
-                    .get_mut(seen.capture)
-                    .filter(|w| !w.done)
-                    .and_then(|w| w.log.as_mut());
-                if let Some(log) = log {
+                let Some(w) = waiting.get_mut(seen.capture).filter(|w| !w.done) else {
+                    continue;
+                };
+                if let Some(responses) = w.responses.as_mut() {
+                    responses.respond(&seen.id, seen.status, seen.mime.clone());
+                }
+                if let Some(log) = w.log.as_mut() {
                     log.respond(&seen.id, seen.status, seen.mime);
+                }
+            }
+            Next::Finished(load) => {
+                let Some(responses) = waiting
+                    .get_mut(load.capture)
+                    .filter(|w| !w.done)
+                    .and_then(|w| w.responses.as_mut())
+                    .filter(|r| r.is_pending(&load.id))
+                else {
+                    continue;
+                };
+                let body = if responses.worth_reading(&load.id, load.encoded) {
+                    watch.response_body(&load.session, &load.id)?
+                } else {
+                    None
+                };
+                responses.keep(&load.id, body);
+            }
+            Next::Failed(load) => {
+                let responses = waiting
+                    .get_mut(load.capture)
+                    .and_then(|w| w.responses.as_mut());
+                if let Some(responses) = responses {
+                    responses.forget(&load.id);
                 }
             }
         }
@@ -1552,6 +1747,9 @@ fn observe_request(w: &mut Waiting<'_>, seen: SeenRequest) {
     if let Some(log) = w.log.as_mut() {
         log.observe(&seen.id, &seen.method, &url, &seen.kind);
     }
+    if let Some(responses) = w.responses.as_mut() {
+        responses.observe(&seen.id, &seen.method, &url, &seen.kind);
+    }
 }
 
 /// The status line printed when a capture whose session is in place
@@ -1560,6 +1758,25 @@ fn observe_request(w: &mut Waiting<'_>, seen: SeenRequest) {
 fn hold_note(w: &Waiting<'_>, window: Duration) -> String {
     let label = &w.capture.label;
     let window = duration_words(window);
+    match (&w.log, &w.responses) {
+        (Some(log), Some(responses)) => {
+            return format!(
+                "{label}: keeping the tab open {window} to record the page's requests to {} and \
+                 keep what its pages load from {}; go through the pages there meanwhile, and \
+                 leave the tab open.",
+                log.domain(),
+                responses.domain()
+            );
+        }
+        (None, Some(responses)) => {
+            return format!(
+                "{label}: keeping the tab open {window} and keeping what its pages load from {}; \
+                 go through the pages there meanwhile, and leave the tab open.",
+                responses.domain()
+            );
+        }
+        _ => {}
+    }
     if let Some(log) = &w.log {
         return format!(
             "{label}: keeping the tab open {window} to record the page's requests to {} before \

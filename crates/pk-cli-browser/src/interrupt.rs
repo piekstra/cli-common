@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 static CANCELED: AtomicBool = AtomicBool::new(false);
+static FINISH: AtomicBool = AtomicBool::new(false);
 static LIVE: Mutex<Registry> = Mutex::new(Registry {
     next: 0,
     entries: Vec::new(),
@@ -50,6 +51,26 @@ pub fn cancel() {
 
 pub(crate) fn canceled() -> bool {
     CANCELED.load(Ordering::SeqCst)
+}
+
+/// End the watch windows held open now ([`Capture::request_log`],
+/// [`Capture::responses`], [`Capture::optional_request`]): each capture
+/// holding its tab open is read at the next poll, with what its pages
+/// loaded so far, and handed over as usual. For a CLI that lets the owner
+/// say they are done (an Enter on stdin, from a thread of its own) rather
+/// than wait out the window. A finish while no tab is being held open yet
+/// ends nothing, with a note on stderr; it applies once.
+///
+/// [`Capture::request_log`]: crate::Capture::request_log
+/// [`Capture::responses`]: crate::Capture::responses
+/// [`Capture::optional_request`]: crate::Capture::optional_request
+pub fn finish() {
+    FINISH.store(true, Ordering::SeqCst);
+}
+
+/// Whether [`finish`] was called since the last ask, clearing it.
+pub(crate) fn take_finish() -> bool {
+    FINISH.swap(false, Ordering::SeqCst)
 }
 
 fn registry() -> MutexGuard<'static, Registry> {

@@ -17,6 +17,7 @@ clap = { workspace = true }
 serde_json = { workspace = true }
 tungstenite = { workspace = true }
 ctrlc = { workspace = true }
+zeroize = { workspace = true }
 
 [features]
 # Constructors for what a capture hands over (`Captured::for_test` and its
