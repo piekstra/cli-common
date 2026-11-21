@@ -562,7 +562,9 @@ impl ResponseLog {
             return;
         }
         if self.pending.len() >= MAX_PENDING {
-            self.pending.clear();
+            // Loads that never finish (a page that left the hosts mid-load)
+            // would otherwise pile up; they count as skipped, not lost.
+            self.abandon_pending();
         }
         self.pending.insert(
             id.to_string(),
@@ -598,7 +600,11 @@ impl ResponseLog {
     /// Whether the finished load `id` is worth reading: one it waits on,
     /// with room left, and not already larger on the wire (`encoded`, the
     /// browser's `encodedDataLength`) than a body it would keep. A body
-    /// decoded larger than it was sent is still checked once read.
+    /// decoded larger than it was sent is still checked once read; one that
+    /// decodes past the websocket's 16 MiB frame (a compressed body of some
+    /// 12 MiB or more) breaks the watch connection instead, which then
+    /// reconnects and counts every load in progress as skipped, with a
+    /// status line.
     pub fn worth_reading(&self, id: &str, encoded: Option<u64>) -> bool {
         self.is_pending(id)
             && self.has_room()
@@ -1681,6 +1687,23 @@ mod response_limit_tests {
         let (kept, skipped) = log.take();
         assert!(kept.is_empty());
         assert_eq!(skipped, 3, "two abandoned, one still loading at the read");
+    }
+
+    #[test]
+    fn loads_that_never_finish_count_as_skipped_when_they_pile_up() {
+        let mut log = small();
+        let u = parse_url("https://portal.example.com/api/x").unwrap();
+        for i in 0..=MAX_PENDING {
+            log.observe(&format!("R{i}"), "GET", &u, "XHR");
+        }
+        assert!(log.is_pending(&format!("R{MAX_PENDING}")));
+        assert!(!log.is_pending("R0"));
+        let (_, skipped) = log.take();
+        assert_eq!(
+            skipped,
+            MAX_PENDING + 1,
+            "the ones dropped, and the one still loading"
+        );
     }
 
     #[test]
