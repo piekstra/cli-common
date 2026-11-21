@@ -124,15 +124,18 @@ impl CapturedBuilder {
         self
     }
 
-    /// The kept responses, in the order given, and how many were skipped:
-    /// [`Captured::responses`], [`Captured::take_responses`] and
-    /// [`Captured::responses_skipped`].
-    pub fn responses(
-        mut self,
-        responses: impl IntoIterator<Item = CapturedResponse>,
-        skipped: usize,
-    ) -> Self {
+    /// The kept responses, in the order given: [`Captured::responses`] and
+    /// [`Captured::take_responses`]. A real capture hands its responses to
+    /// the CLI only after its confirm hook passes, and the hook itself never
+    /// sees any, so use this step to test the CLI's mapping of what it
+    /// kept, not a confirm hook.
+    pub fn responses(mut self, responses: impl IntoIterator<Item = CapturedResponse>) -> Self {
         self.captured.responses = Some(responses.into_iter().collect());
+        self
+    }
+
+    /// How many loads were not kept: [`Captured::responses_skipped`].
+    pub fn responses_skipped(mut self, skipped: usize) -> Self {
         self.captured.responses_skipped = skipped;
         self
     }

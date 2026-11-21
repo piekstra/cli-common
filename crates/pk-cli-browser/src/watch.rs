@@ -18,7 +18,11 @@
 //! ([`Capture::responses`]) also gets the body of each response its pages
 //! loaded on the paths it names: once the load finishes, the watch reads the
 //! body the browser already holds (`Network.getResponseBody`), which sends
-//! nothing to the site and which no page can observe.
+//! nothing to the site and which no page can observe. A load whose
+//! transferred size already exceeds the body bound is not read at all; a
+//! read the browser does not answer in time counts as a skipped load and
+//! leaves the watch up; and a watch that has to reconnect counts the loads
+//! still in progress as skipped, since their bodies went with the session.
 //!
 //! [`Capture::request`]: crate::Capture::request
 //! [`Capture::optional_request`]: crate::Capture::optional_request
@@ -45,10 +49,26 @@ const MAX_LOGGED: usize = 500;
 const MAX_PENDING: usize = 2_000;
 /// Responses one capture keeps; later ones are counted as skipped.
 pub(crate) const MAX_RESPONSES: usize = 500;
-/// The largest body kept; a larger one is counted as skipped.
-pub(crate) const MAX_BODY: usize = 20 * 1024 * 1024;
+/// The largest body kept; a larger one is counted as skipped. Base64 and
+/// the CDP envelope put a body this size under the websocket's 16 MiB frame
+/// limit, so reading one never breaks the watch connection.
+pub(crate) const MAX_BODY: usize = 10 * 1024 * 1024;
 /// The most body bytes one capture keeps in all.
 pub(crate) const MAX_BODIES: usize = 200 * 1024 * 1024;
+
+/// The bounds a [`ResponseLog`] keeps within.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Limits {
+    pub responses: usize,
+    pub body: usize,
+    pub total: usize,
+}
+
+const LIMITS: Limits = Limits {
+    responses: MAX_RESPONSES,
+    body: MAX_BODY,
+    total: MAX_BODIES,
+};
 
 /// The first request a capture's pages made to the URL it watches for.
 ///
@@ -374,9 +394,12 @@ impl RequestLog {
 /// on the paths the capture names. The URL comes without its query, as a
 /// logged request's does. The body is the bytes the browser received
 /// (decoded, as the page saw them), handed over in memory and zeroized when
-/// dropped; `Debug` shows its length only. It is whatever the site sent,
-/// which on a signed-in app can include a token, so a CLI names the paths
-/// that serve the data it needs, and writes nothing it did not ask for.
+/// dropped; `Debug` shows its length only. The zeroizing is best effort: the
+/// websocket message it arrived in and the CDP client's parse of it are
+/// ordinary buffers, though the text the body is decoded from is zeroized.
+/// It is whatever the site sent, which on a signed-in app can include a
+/// token, so a CLI names the paths that serve the data it needs, and writes
+/// nothing it did not ask for.
 ///
 /// [`Capture::responses`]: crate::Capture::responses
 pub struct CapturedResponse {
@@ -494,6 +517,7 @@ struct PendingResponse {
 pub(crate) struct ResponseLog {
     rule: HostRule,
     paths: Vec<String>,
+    limits: Limits,
     pending: HashMap<String, PendingResponse>,
     kept: Vec<CapturedResponse>,
     bytes: usize,
@@ -502,9 +526,14 @@ pub(crate) struct ResponseLog {
 
 impl ResponseLog {
     pub fn new(rule: HostRule, paths: Vec<String>) -> Self {
+        Self::with_limits(rule, paths, LIMITS)
+    }
+
+    pub fn with_limits(rule: HostRule, paths: Vec<String>, limits: Limits) -> Self {
         ResponseLog {
             rule,
             paths,
+            limits,
             pending: HashMap::new(),
             kept: Vec::new(),
             bytes: 0,
@@ -563,7 +592,26 @@ impl ResponseLog {
 
     /// Whether another body could still be kept, so it is worth reading.
     pub fn has_room(&self) -> bool {
-        self.kept.len() < MAX_RESPONSES && self.bytes < MAX_BODIES
+        self.kept.len() < self.limits.responses && self.bytes < self.limits.total
+    }
+
+    /// Whether the finished load `id` is worth reading: one it waits on,
+    /// with room left, and not already larger on the wire (`encoded`, the
+    /// browser's `encodedDataLength`) than a body it would keep. A body
+    /// decoded larger than it was sent is still checked once read.
+    pub fn worth_reading(&self, id: &str, encoded: Option<u64>) -> bool {
+        self.is_pending(id)
+            && self.has_room()
+            && encoded.is_none_or(|n| n <= self.limits.body as u64)
+    }
+
+    /// Count every load still in progress as skipped: the watch lost its
+    /// session with their pages, and their bodies with it. Returns how many.
+    pub fn abandon_pending(&mut self) -> usize {
+        let n = self.pending.len();
+        self.skipped += n;
+        self.pending.clear();
+        n
     }
 
     /// Drop a noted request whose load failed: there is no body to keep.
@@ -577,10 +625,11 @@ impl ResponseLog {
         let Some(p) = self.pending.remove(id) else {
             return;
         };
+        let limits = self.limits;
         let fits = |body: &Vec<u8>| {
-            self.kept.len() < MAX_RESPONSES
-                && body.len() <= MAX_BODY
-                && self.bytes + body.len() <= MAX_BODIES
+            self.kept.len() < limits.responses
+                && body.len() <= limits.body
+                && self.bytes + body.len() <= limits.total
         };
         match body {
             Some(body) if fits(&body) => {
@@ -604,8 +653,10 @@ impl ResponseLog {
     }
 
     /// The kept responses, in the order their loads finished, and how many
-    /// were skipped; the log is empty afterwards.
+    /// were skipped, counting the loads still in progress; the log is empty
+    /// afterwards.
     pub fn take(&mut self) -> (Vec<CapturedResponse>, usize) {
+        self.abandon_pending();
         self.bytes = 0;
         let skipped = std::mem::take(&mut self.skipped);
         (std::mem::take(&mut self.kept), skipped)
@@ -643,6 +694,8 @@ pub(crate) struct SeenLoad {
     pub id: String,
     /// The watch's session with the page, to read the body in.
     pub session: String,
+    /// The bytes the load took on the wire, as the browser reports them.
+    pub encoded: Option<u64>,
 }
 
 /// One message read from the watch.
@@ -727,6 +780,11 @@ pub(crate) fn decode(event: &Value, sessions: &mut Sessions) -> Next {
                 capture,
                 id,
                 session: session.to_string(),
+                encoded: params
+                    .get("encodedDataLength")
+                    .and_then(Value::as_f64)
+                    .filter(|n| *n >= 0.0)
+                    .map(|n| n as u64),
             };
             if method == "Network.loadingFinished" {
                 Next::Finished(load)
@@ -739,17 +797,21 @@ pub(crate) fn decode(event: &Value, sessions: &mut Sessions) -> Next {
 }
 
 /// A `Network.getResponseBody` result as bytes: base64 decoded when the
-/// browser sent it so, else the text's own bytes.
-pub(crate) fn body_bytes(result: &Value) -> Option<Vec<u8>> {
-    let body = result.get("body")?.as_str()?;
-    if result
+/// browser sent it so, else the text's own bytes. The text is taken out of
+/// the result and zeroized once decoded.
+pub(crate) fn body_bytes(mut result: Value) -> Option<Vec<u8>> {
+    let base64 = result
         .get("base64Encoded")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        base64_decode(body)
+        .unwrap_or(false);
+    let Value::String(text) = result.get_mut("body")?.take() else {
+        return None;
+    };
+    let text = Zeroizing::new(text);
+    if base64 {
+        base64_decode(&text)
     } else {
-        Some(body.as_bytes().to_vec())
+        Some(text.as_bytes().to_vec())
     }
 }
 
@@ -879,16 +941,18 @@ impl<T: Transport> Watch<T> {
 
     /// The body of the finished load `id`, from the browser's own buffer
     /// (`Network.getResponseBody` in the page's session, which sends
-    /// nothing to the site). `None` when the browser no longer holds it, or
-    /// the page has gone.
+    /// nothing to the site). `None` when the browser no longer holds it,
+    /// the page has gone, or the browser did not answer within the call's
+    /// bound: that one load is skipped and the watch stays up. A late
+    /// answer is read past as a stale reply.
     pub fn response_body(&mut self, session: &str, id: &str) -> Result<Option<Vec<u8>>, CdpError> {
         match self.cdp.call(
             "Network.getResponseBody",
             json!({ "requestId": id }),
             Some(session),
         ) {
-            Ok(result) => Ok(body_bytes(&result)),
-            Err(CdpError::Protocol { .. }) => Ok(None),
+            Ok(result) => Ok(body_bytes(result)),
+            Err(CdpError::Protocol { .. } | CdpError::Timeout(_)) => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -1385,14 +1449,14 @@ mod response_tests {
             assert_eq!(base64_decode(text).as_deref(), *want, "{text}");
         }
         assert_eq!(
-            body_bytes(&json!({"body": "Zm9v", "base64Encoded": true})).as_deref(),
+            body_bytes(json!({"body": "Zm9v", "base64Encoded": true})).as_deref(),
             Some(&b"foo"[..])
         );
         assert_eq!(
-            body_bytes(&json!({"body": "Zm9v", "base64Encoded": false})).as_deref(),
+            body_bytes(json!({"body": "Zm9v", "base64Encoded": false})).as_deref(),
             Some(&b"Zm9v"[..])
         );
-        assert_eq!(body_bytes(&json!({"base64Encoded": true})), None);
+        assert_eq!(body_bytes(json!({"base64Encoded": true})), None);
     }
 
     #[test]
@@ -1464,7 +1528,7 @@ mod response_tests {
         log.respond("R2", Some(200), Some("application/json".into()));
         log.keep("R2", Some(b"{}".to_vec()));
         let (kept, skipped) = log.take();
-        assert_eq!(skipped, 0);
+        assert_eq!(skipped, 2, "R1 and R3 were still loading at the read");
         assert_eq!(kept.len(), 1);
         let r = &kept[0];
         assert_eq!(
@@ -1548,5 +1612,86 @@ mod response_tests {
         assert!(!log.has_room());
         let (kept, skipped) = log.take();
         assert_eq!((kept.len(), skipped), (MAX_RESPONSES, 2));
+    }
+}
+
+#[cfg(test)]
+mod response_limit_tests {
+    use super::*;
+
+    fn small() -> ResponseLog {
+        ResponseLog::with_limits(
+            HostRule::domain("example.com").unwrap(),
+            vec!["/".into()],
+            Limits {
+                responses: 10,
+                body: 4,
+                total: 10,
+            },
+        )
+    }
+
+    fn note(log: &mut ResponseLog, id: &str) {
+        let u = parse_url("https://portal.example.com/api/x").unwrap();
+        log.observe(id, "GET", &u, "XHR");
+    }
+
+    #[test]
+    fn the_total_bound_skips_what_would_pass_it() {
+        let mut log = small();
+        for (id, body) in [("R1", "aaaa"), ("R2", "bbbb"), ("R3", "ccc"), ("R4", "dd")] {
+            note(&mut log, id);
+            log.keep(id, Some(body.as_bytes().to_vec()));
+        }
+        // 4 + 4 kept; 3 more would pass 10; 2 more fits exactly.
+        let (kept, skipped) = log.take();
+        let bodies: Vec<&[u8]> = kept.iter().map(CapturedResponse::body).collect();
+        assert_eq!(bodies, [&b"aaaa"[..], b"bbbb", b"dd"]);
+        assert_eq!(skipped, 1);
+        let mut log = small();
+        for id in ["R1", "R2"] {
+            note(&mut log, id);
+            log.keep(id, Some(b"aaaa".to_vec()));
+        }
+        note(&mut log, "R3");
+        log.keep("R3", Some(b"aa".to_vec()));
+        assert!(!log.has_room(), "the total is reached");
+        note(&mut log, "R4");
+        assert!(!log.worth_reading("R4", Some(1)));
+    }
+
+    #[test]
+    fn a_load_larger_on_the_wire_than_a_body_is_not_read() {
+        let mut log = small();
+        note(&mut log, "R1");
+        assert!(log.worth_reading("R1", Some(4)));
+        assert!(log.worth_reading("R1", None));
+        assert!(!log.worth_reading("R1", Some(5)));
+        assert!(!log.worth_reading("R9", Some(1)), "not a load it waits on");
+    }
+
+    #[test]
+    fn loads_still_in_progress_count_as_skipped() {
+        let mut log = small();
+        note(&mut log, "R1");
+        note(&mut log, "R2");
+        assert_eq!(log.abandon_pending(), 2);
+        assert!(!log.is_pending("R1"));
+        note(&mut log, "R3");
+        let (kept, skipped) = log.take();
+        assert!(kept.is_empty());
+        assert_eq!(skipped, 3, "two abandoned, one still loading at the read");
+    }
+
+    #[test]
+    fn a_finished_load_carries_its_size_on_the_wire() {
+        let mut sessions: Sessions = HashMap::new();
+        sessions.insert("S1".into(), ("T-app".into(), 0));
+        let event = json!({"method": "Network.loadingFinished", "sessionId": "S1",
+                           "params": {"requestId": "R1", "encodedDataLength": 1234.0}});
+        match decode(&event, &mut sessions) {
+            Next::Finished(load) => assert_eq!(load.encoded, Some(1234)),
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -272,8 +272,11 @@
 //! A kept response's body ([`Capture::responses`]) is not a [`Secret`] but
 //! is handled as one: handed over in memory, zeroized when dropped, shown
 //! by `Debug` as its length only, and never written or logged by the crate.
-//! It is whatever the site sent, a token included, so a CLI names the paths
-//! that serve the data it needs.
+//! The zeroizing is best effort: the websocket message a body arrives in,
+//! and the CDP client's parse of it, are ordinary buffers. A body is
+//! whatever the site sent, a token included, so a CLI names the paths that
+//! serve the data it needs, and treats what it gets as it would a
+//! [`Secret`] until it has kept only what it asked for.
 //!
 //! The [`Capture::confirm`] hook is the CLI's code, run in the CLI's
 //! process with the candidate session: the request it makes is the CLI's
@@ -284,10 +287,11 @@
 //! Only the crate reads a [`Captured`] out of a browser, so a CLI's unit
 //! tests build one by hand, through the `test-util` feature:
 //! `Captured::for_test(label, host)` starts a builder whose steps (`value`,
-//! `cookie`, `jar`, `request`, `request_log`, `responses`, `user_agent`) set
-//! what each getter answers, and `JarCookie::for_test`,
-//! `CapturedRequest::for_test`, `LoggedRequest::for_test` and
-//! `CapturedResponse::for_test` build the parts. Values go in as plain
+//! `cookie`, `jar`, `request`, `request_log`, `responses`,
+//! `responses_skipped`, `user_agent`) set what each getter answers, and
+//! `JarCookie::for_test`, `CapturedRequest::for_test`,
+//! `LoggedRequest::for_test` and `CapturedResponse::for_test` build the
+//! parts. Values go in as plain
 //! strings and come back as `Secret`s, normalized as read ones are (method
 //! and host case, a cookie domain's leading dot, the query cut). The CLI
 //! then runs its confirm hook, and its mapping of a capture onto its own

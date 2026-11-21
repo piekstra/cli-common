@@ -330,11 +330,14 @@ impl Capture {
     /// usual, and the responses are handed over as
     /// [`Captured::responses`]. The confirm hook sees none of them.
     ///
-    /// Bounded: 500 responses, 20 MiB a body and 200 MiB in all; what does
-    /// not fit, or whose body the browser no longer holds, is counted in
-    /// [`Captured::responses_skipped`]. A page the owner opens in a new tab
-    /// is watched from the next poll, so what it loads in its first seconds
-    /// can be missed. `domain` follows the rule of
+    /// Bounded: 500 responses, 10 MiB a body and 200 MiB in all. A load is
+    /// counted in [`Captured::responses_skipped`] when it does not fit, when
+    /// the browser no longer holds its body or does not hand it over in
+    /// time, when it is still loading as the capture is read, and when the
+    /// watch has to reconnect while it is in progress (with a status line
+    /// saying so, so the owner can reload those pages). A page the owner
+    /// opens in a new tab is watched from the next poll, so what it loads in
+    /// its first seconds can be missed. `domain` follows the rule of
     /// [`Capture::cookie_jar`]. A later call replaces an earlier one.
     pub fn responses<I, S>(mut self, domain: impl Into<String>, paths: I, during: Duration) -> Self
     where
@@ -635,9 +638,10 @@ impl Captured {
         self.responses.take().unwrap_or_default()
     }
 
-    /// Responses on the capture's paths that were not kept: their body was
-    /// larger than allowed, the bounds were reached, or the browser no
-    /// longer held it.
+    /// Loads on the capture's paths that were not kept: their body was
+    /// larger than allowed, the bounds were reached, the browser no longer
+    /// held it or did not hand it over in time, it was still loading when
+    /// the capture was read, or the watch reconnected while it loaded.
     pub fn responses_skipped(&self) -> usize {
         self.responses_skipped
     }
@@ -827,6 +831,9 @@ struct Waiting<'a> {
     hold_since: Option<Instant>,
     /// The watch window was ended by [`finish`](crate::finish).
     hold_over: bool,
+    /// Loads in progress that a reconnecting watch lost since the last
+    /// status line about it.
+    responses_lost: usize,
     undecided: Option<UndecidedRead>,
     warned_undecided: bool,
 }
@@ -858,6 +865,7 @@ impl<'a> Waiting<'a> {
             }),
             hold_since: None,
             hold_over: false,
+            responses_lost: 0,
             undecided: None,
             warned_undecided: false,
         }
@@ -1448,6 +1456,7 @@ pub(crate) fn run_wait<D: Driver>(
         if driver.exited() {
             return Err(window_closed(&settings.login_hint, &waiting));
         }
+        lost_notes(&mut waiting, note);
         if driver.finish_requested() {
             let mut ended = 0;
             for w in waiting
@@ -1517,7 +1526,8 @@ pub(crate) fn run_wait<D: Driver>(
                 if empty_polls >= CLOSED_POLLS {
                     return Err(window_closed(&settings.login_hint, &waiting));
                 }
-                follow_pages(driver, &mut watch, &poll.pages, &waiting, settings)?;
+                follow_pages(driver, &mut watch, &poll.pages, &mut waiting, settings)?;
+                lost_notes(&mut waiting, note);
                 None
             }
         };
@@ -1562,7 +1572,7 @@ fn follow_pages<D: Driver>(
     driver: &mut D,
     watch: &mut Option<Watch<D::T>>,
     pages: &[PageTarget],
-    waiting: &[Waiting<'_>],
+    waiting: &mut [Waiting<'_>],
     settings: &WaitSettings,
 ) -> Result<(), BrowserError> {
     let watching = |w: &&Waiting<'_>| !w.done && w.watches();
@@ -1591,14 +1601,41 @@ fn follow_pages<D: Driver>(
         let cdp = Cdp::new(transport, settings.call_timeout, driver.cancel_check());
         *watch = Some(Watch::new(cdp.keeping_events()));
     }
-    if let Some(w) = watch.as_mut() {
-        match w.sync(&wanted) {
-            Ok(()) => {}
-            Err(CdpError::Canceled) => return Err(canceled()),
-            Err(_) => *watch = None,
-        }
+    let failed = match watch.as_mut().map(|w| w.sync(&wanted)) {
+        Some(Err(CdpError::Canceled)) => return Err(canceled()),
+        Some(Err(_)) => true,
+        _ => false,
+    };
+    if failed {
+        drop_watch(watch, waiting);
     }
     Ok(())
+}
+
+/// Drop a watch that failed, to be opened again on a later poll. Its
+/// sessions go with it, and the bodies the browser held for them, so every
+/// load a capture was still waiting on is counted as skipped, and noted.
+fn drop_watch<T: Transport>(watch: &mut Option<Watch<T>>, waiting: &mut [Waiting<'_>]) {
+    *watch = None;
+    for w in waiting.iter_mut().filter(|w| !w.done) {
+        if let Some(responses) = w.responses.as_mut() {
+            w.responses_lost += responses.abandon_pending();
+        }
+    }
+}
+
+/// A status line for each capture whose watch lost loads in progress.
+fn lost_notes(waiting: &mut [Waiting<'_>], note: &mut dyn FnMut(&str)) {
+    for w in waiting.iter_mut().filter(|w| w.responses_lost > 0) {
+        let n = std::mem::take(&mut w.responses_lost);
+        note(&format!(
+            "{}: the page watch reconnected, so {n} load{} in progress {} not kept; reload \
+             those pages to keep them.",
+            w.capture.label,
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "was" } else { "were" },
+        ));
+    }
 }
 
 /// Wait until the next poll (or the deadline), waking to notice a cancel,
@@ -1621,7 +1658,7 @@ fn pause<D: Driver>(
             match pump(w, waiting) {
                 Ok(()) => {}
                 Err(CdpError::Canceled) => return Err(canceled()),
-                Err(_) => *watch = None,
+                Err(_) => drop_watch(watch, waiting),
             }
         }
         let now = Instant::now();
@@ -1667,7 +1704,7 @@ fn pump<T: Transport>(watch: &mut Watch<T>, waiting: &mut [Waiting<'_>]) -> Resu
                 else {
                     continue;
                 };
-                let body = if responses.has_room() {
+                let body = if responses.worth_reading(&load.id, load.encoded) {
                     watch.response_body(&load.session, &load.id)?
                 } else {
                     None
@@ -1721,12 +1758,24 @@ fn observe_request(w: &mut Waiting<'_>, seen: SeenRequest) {
 fn hold_note(w: &Waiting<'_>, window: Duration) -> String {
     let label = &w.capture.label;
     let window = duration_words(window);
-    if let Some(responses) = &w.responses {
-        return format!(
-            "{label}: keeping the tab open {window} and keeping what its pages load from {}; go \
-             through the pages there meanwhile, and leave the tab open.",
-            responses.domain()
-        );
+    match (&w.log, &w.responses) {
+        (Some(log), Some(responses)) => {
+            return format!(
+                "{label}: keeping the tab open {window} to record the page's requests to {} and \
+                 keep what its pages load from {}; go through the pages there meanwhile, and \
+                 leave the tab open.",
+                log.domain(),
+                responses.domain()
+            );
+        }
+        (None, Some(responses)) => {
+            return format!(
+                "{label}: keeping the tab open {window} and keeping what its pages load from {}; \
+                 go through the pages there meanwhile, and leave the tab open.",
+                responses.domain()
+            );
+        }
+        _ => {}
     }
     if let Some(log) = &w.log {
         return format!(

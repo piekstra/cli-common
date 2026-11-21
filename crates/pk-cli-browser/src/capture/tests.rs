@@ -118,6 +118,10 @@ struct State {
     /// `finish()` is called once this many polls have happened.
     finish_at: Option<usize>,
     finish_taken: bool,
+    /// Reading this request's body gets no answer.
+    body_read_hangs: Option<&'static str>,
+    /// Reading this request's body breaks the connection, once.
+    body_read_breaks: Option<&'static str>,
 }
 
 thread_local! {
@@ -303,6 +307,13 @@ impl Transport for FakeTransport {
             "Network.getResponseBody" => {
                 assert!(session.is_some(), "a body is read in the page's session");
                 let id = params["requestId"].as_str().unwrap();
+                if s.body_read_hangs == Some(id) {
+                    return Ok(());
+                }
+                if s.body_read_breaks == Some(id) {
+                    s.body_read_breaks = None;
+                    return Err("dummy broken pipe".into());
+                }
                 let body = s
                     .pages
                     .iter()
@@ -2535,4 +2546,87 @@ fn response_reads_are_validated() {
             }
         }
     }
+}
+
+#[test]
+fn a_body_read_that_gets_no_answer_skips_that_load_and_keeps_the_watch() {
+    let mut app = page("T-app", "https://portal.example.com/billing");
+    app.requests = vec![
+        FakeRequest {
+            response: Some((200, "application/json")),
+            body: Some(("{}", false)),
+            ..request("R1", "GET", "https://portal.example.com/api/billing/slow")
+        },
+        FakeRequest {
+            after: 1,
+            response: Some((200, "application/json")),
+            body: Some((r#"{"ok":true}"#, false)),
+            ..request("R2", "GET", "https://portal.example.com/api/billing/fast")
+        },
+    ];
+    let mut fake = fake_with(vec![app]);
+    fake.0.borrow_mut().body_read_hangs = Some("R1");
+    let out = run(
+        &mut fake,
+        &[billing_capture(Duration::from_millis(300))],
+        LONG,
+    );
+    let got = out.result.unwrap();
+    assert_eq!(kept(&got[0]).len(), 1);
+    assert!(kept(&got[0])[0].contains("/api/billing/fast"));
+    assert_eq!(got[0].responses_skipped(), 1);
+    assert!(
+        !out.notes.iter().any(|n| n.contains("reconnected")),
+        "{:?}",
+        out.notes
+    );
+}
+
+#[test]
+fn a_watch_that_breaks_mid_read_counts_its_loads_as_skipped_and_says_so() {
+    let mut app = page("T-app", "https://portal.example.com/billing");
+    app.requests = vec![FakeRequest {
+        response: Some((200, "application/json")),
+        body: Some(("{}", false)),
+        ..request(
+            "R1",
+            "GET",
+            "https://portal.example.com/api/billing/statements",
+        )
+    }];
+    let mut fake = fake_with(vec![app]);
+    fake.0.borrow_mut().body_read_breaks = Some("R1");
+    let out = run(
+        &mut fake,
+        &[billing_capture(Duration::from_millis(300))],
+        LONG,
+    );
+    let got = out.result.unwrap();
+    assert!(
+        out.notes.iter().any(|n| n
+            == "Example: the page watch reconnected, so 1 load in progress was not kept; reload \
+                those pages to keep them."),
+        "{:?}",
+        out.notes
+    );
+    assert!(got[0].responses_skipped() >= 1);
+    assert!(
+        fake.0.borrow().connections >= 2,
+        "the watch connected again"
+    );
+}
+
+#[test]
+fn the_hold_note_names_both_a_log_and_kept_responses() {
+    let mut fake = fake_with(vec![billing_page()]);
+    let capture = billing_capture(Duration::from_millis(40))
+        .request_log("example.com", Duration::from_millis(20));
+    let out = run(&mut fake, &[capture], LONG);
+    out.result.unwrap();
+    assert_eq!(
+        out.notes[1],
+        "Example: keeping the tab open 40 milliseconds to record the page's requests to \
+         example.com and keep what its pages load from example.com; go through the pages there \
+         meanwhile, and leave the tab open."
+    );
 }
