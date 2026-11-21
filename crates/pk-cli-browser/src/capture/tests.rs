@@ -60,6 +60,11 @@ struct FakeRequest {
     document: Option<&'static str>,
     /// The response, if one comes.
     response: Option<(u16, &'static str)>,
+    /// The body `Network.getResponseBody` answers with (text, whether it is
+    /// base64); `None` answers as a body the browser no longer holds.
+    body: Option<(&'static str, bool)>,
+    /// The load fails (`Network.loadingFailed`) instead of finishing.
+    fails: bool,
 }
 
 fn request(id: &'static str, method: &'static str, url: &'static str) -> FakeRequest {
@@ -72,6 +77,8 @@ fn request(id: &'static str, method: &'static str, url: &'static str) -> FakeReq
         headers: json!({}),
         document: None,
         response: None,
+        body: None,
+        fails: false,
     }
 }
 
@@ -108,6 +115,9 @@ struct State {
     enabled: Vec<(usize, String, &'static str)>,
     /// (session, request id) of each request event sent.
     emitted: Vec<(String, &'static str)>,
+    /// `finish()` is called once this many polls have happened.
+    finish_at: Option<usize>,
+    finish_taken: bool,
 }
 
 thread_local! {
@@ -161,12 +171,6 @@ impl FakeTransport {
                     "request": {"url": r.url, "method": r.method, "headers": r.headers}}})
                 .to_string(),
             );
-            // Traffic the watch does not act on.
-            self.inbox.push_back(
-                json!({"method": "Network.loadingFinished", "sessionId": session,
-                       "params": {"requestId": r.id}})
-                .to_string(),
-            );
             if let Some((status, mime)) = r.response {
                 self.inbox.push_back(
                     json!({"method": "Network.responseReceived", "sessionId": session, "params": {
@@ -174,6 +178,15 @@ impl FakeTransport {
                     .to_string(),
                 );
             }
+            let end = if r.fails {
+                "Network.loadingFailed"
+            } else {
+                "Network.loadingFinished"
+            };
+            self.inbox.push_back(
+                json!({"method": end, "sessionId": session, "params": {"requestId": r.id}})
+                    .to_string(),
+            );
         }
     }
 }
@@ -287,6 +300,20 @@ impl Transport for FakeTransport {
                 s.enabled.push((conn, session, target));
                 Ok(json!({}))
             }
+            "Network.getResponseBody" => {
+                assert!(session.is_some(), "a body is read in the page's session");
+                let id = params["requestId"].as_str().unwrap();
+                let body = s
+                    .pages
+                    .iter()
+                    .flat_map(|p| p.requests.iter())
+                    .find(|r| r.id == id)
+                    .and_then(|r| r.body);
+                match body {
+                    Some((text, base64)) => Ok(json!({"body": text, "base64Encoded": base64})),
+                    None => Err((-32000, "No resource with given identifier found")),
+                }
+            }
             "Browser.getVersion" => match s.user_agent {
                 Some(ua) => Ok(json!({"product": "Chrome/0", "userAgent": ua})),
                 None => Err((-32000, "Browser unavailable")),
@@ -350,6 +377,14 @@ impl Driver for Fake {
     }
     fn cancel_check(&self) -> fn() -> bool {
         canceled_mid_poll
+    }
+    fn finish_requested(&mut self) -> bool {
+        let mut s = self.0.borrow_mut();
+        if !s.finish_taken && s.finish_at.is_some_and(|n| s.polls >= n) {
+            s.finish_taken = true;
+            return true;
+        }
+        false
     }
 }
 
@@ -1357,6 +1392,8 @@ fn bare_candidate() -> Captured {
         jar: None,
         request: None,
         request_log: None,
+        responses: None,
+        responses_skipped: 0,
         user_agent: None,
     }
 }
@@ -2144,6 +2181,8 @@ fn candidate(request: Option<CapturedRequest>) -> Captured {
         jar: None,
         request,
         request_log: None,
+        responses: None,
+        responses_skipped: 0,
         user_agent: None,
     }
 }
@@ -2265,4 +2304,235 @@ fn the_confirm_gate_keeps_the_request_for_the_next_poll_on_not_yet() {
         confirm_gate(&mut w, candidate(None), Instant::now(), &mut Vec::new()),
         Err(Gate::Failed(CliError::Other(m))) if m == "refused"
     ));
+}
+
+// ---- Kept responses -----------------------------------------------------
+
+fn billing_page() -> FakePage {
+    let mut app = page("T-app", "https://portal.example.com/billing");
+    app.requests = vec![
+        FakeRequest {
+            response: Some((200, "application/json")),
+            body: Some((
+                r#"{"statements":[{"id":"S-1","amount_due":"12.34"}]}"#,
+                false,
+            )),
+            ..request(
+                "R1",
+                "GET",
+                "https://portal.example.com/api/billing/statements?page=1",
+            )
+        },
+        FakeRequest {
+            after: 1,
+            kind: "Fetch",
+            response: Some((200, "application/pdf")),
+            body: Some(("JVBERi0xLjQK", true)),
+            ..request(
+                "R2",
+                "GET",
+                "https://portal.example.com/api/billing/statement/S-1/pdf",
+            )
+        },
+        // Off the named paths, another kind, another domain: never read.
+        FakeRequest {
+            response: Some((200, "application/json")),
+            body: Some((r#"{"token":"dummy-token"}"#, false)),
+            ..request("R3", "GET", "https://portal.example.com/api/session")
+        },
+        FakeRequest {
+            kind: "Script",
+            body: Some(("dummy()", false)),
+            ..request("R4", "GET", "https://portal.example.com/api/billing/app.js")
+        },
+        FakeRequest {
+            body: Some(("{}", false)),
+            ..request("R5", "GET", "https://cdn.example.org/api/billing/x")
+        },
+        // On the paths, but the browser no longer holds the body: skipped.
+        FakeRequest {
+            response: Some((200, "application/json")),
+            ..request("R6", "GET", "https://portal.example.com/api/billing/gone")
+        },
+        // A failed load has no body to keep or skip.
+        FakeRequest {
+            fails: true,
+            ..request("R7", "GET", "https://portal.example.com/api/billing/failed")
+        },
+    ];
+    app
+}
+
+fn billing_capture(during: Duration) -> Capture {
+    Capture::new("Example", HostRule::exact("portal.example.com").unwrap()).responses(
+        "example.com",
+        ["/api/billing"],
+        during,
+    )
+}
+
+fn kept(captured: &Captured) -> Vec<String> {
+    captured
+        .responses()
+        .iter()
+        .map(|r| {
+            format!(
+                "{} {}{} {} {:?} {:?} {}",
+                r.method(),
+                r.host(),
+                r.path(),
+                r.kind(),
+                r.status(),
+                r.mime(),
+                String::from_utf8_lossy(r.body())
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn responses_keep_the_bodies_the_pages_loaded_on_the_named_paths() {
+    let mut fake = fake_with(vec![
+        page("T-login", "https://login.example.com/"),
+        billing_page(),
+    ]);
+    let out = run(
+        &mut fake,
+        &[billing_capture(Duration::from_millis(40))],
+        LONG,
+    );
+    let mut got = out.result.unwrap();
+    assert_eq!(
+        kept(&got[0]),
+        [
+            r#"GET portal.example.com/api/billing/statements XHR Some(200) Some("application/json") {"statements":[{"id":"S-1","amount_due":"12.34"}]}"#,
+            "GET portal.example.com/api/billing/statement/S-1/pdf Fetch Some(200) Some(\"application/pdf\") %PDF-1.4\n",
+        ]
+    );
+    assert_eq!(
+        got[0].responses_skipped(),
+        1,
+        "the body the browser no longer held"
+    );
+    assert_eq!(
+        out.notes[1],
+        "Example: keeping the tab open 40 milliseconds and keeping what its pages load from \
+         example.com; go through the pages there meanwhile, and leave the tab open."
+    );
+    let debug = format!("{:?}", got[0]);
+    assert!(debug.contains("body_len"), "{debug}");
+    assert!(
+        !debug.contains("amount_due") && !debug.contains("PDF"),
+        "{debug}"
+    );
+    // Bodies are read only for loads on the named paths, in the page's session.
+    let reads = calls_named(&fake, "Network.getResponseBody");
+    assert_eq!(reads.len(), 3, "{reads:?}");
+    assert!(reads
+        .iter()
+        .all(|(s, t)| s.is_some() && t.as_deref() == Some("T-app")));
+    let enables = calls_named(&fake, "Network.enable");
+    assert_eq!(enables.len(), 1);
+    assert_eq!(
+        enables[0].1.as_deref(),
+        Some("T-app"),
+        "never the login host"
+    );
+    assert_eq!(fake.0.borrow().closed, ["T-app"]);
+    let taken = got[0].take_responses();
+    assert_eq!(taken.len(), 2);
+    assert!(got[0].responses().is_empty());
+}
+
+#[test]
+fn finish_ends_the_window_and_hands_over_what_was_loaded() {
+    let mut fake = fake_with(vec![billing_page()]);
+    fake.0.borrow_mut().finish_at = Some(3);
+    let started = Instant::now();
+    let out = run(
+        &mut fake,
+        &[billing_capture(Duration::from_secs(3600))],
+        LONG,
+    );
+    let got = out.result.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(kept(&got[0]).len(), 2);
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n == "Finishing: reading what the pages loaded, then closing the tab."),
+        "{:?}",
+        out.notes
+    );
+    assert_eq!(fake.0.borrow().closed, ["T-app"]);
+}
+
+#[test]
+fn a_finish_before_any_tab_is_held_open_ends_nothing() {
+    let mut app = billing_page();
+    app.value = json!("signed-in");
+    app.ready_after = 3;
+    let mut fake = fake_with(vec![app]);
+    fake.0.borrow_mut().finish_at = Some(1);
+    let capture = billing_capture(Duration::from_millis(40)).expression("document.title");
+    let out = run(&mut fake, &[capture], LONG);
+    let got = out.result.unwrap();
+    assert_eq!(kept(&got[0]).len(), 2);
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n.starts_with("Nothing is held open yet")),
+        "{:?}",
+        out.notes
+    );
+    assert!(!out.notes.iter().any(|n| n.starts_with("Finishing")));
+}
+
+#[test]
+fn response_reads_are_validated() {
+    let portal = || HostRule::exact("portal.example.com").unwrap();
+    let cases: Vec<(Capture, Option<&str>)> = vec![
+        (
+            Capture::new("X", portal()).responses("example.com", ["/"], Duration::ZERO),
+            None,
+        ),
+        (
+            Capture::new("X", portal()).responses(
+                "portal.example.com",
+                ["/api", "/b"],
+                Duration::ZERO,
+            ),
+            None,
+        ),
+        (
+            Capture::new("X", portal()).responses("example.org", ["/"], Duration::ZERO),
+            Some("keeps the responses of `example.org`, which none of its hosts is on"),
+        ),
+        (
+            Capture::new("X", portal()).responses(
+                "example.com",
+                Vec::<String>::new(),
+                Duration::ZERO,
+            ),
+            Some("`X` keeps responses on no path"),
+        ),
+        (
+            Capture::new("X", portal()).responses("example.com", ["api"], Duration::ZERO),
+            Some("keeps responses on `api`, which is not a path starting with `/`"),
+        ),
+        (
+            Capture::new("X", portal()).responses("example.com", ["/api?x=1"], Duration::ZERO),
+            Some("which is not a path starting with `/` without a query"),
+        ),
+    ];
+    for (capture, want) in cases {
+        let got = capture.validate();
+        match want {
+            None => assert!(got.is_ok(), "{got:?}"),
+            Some(want) => {
+                let msg = got.unwrap_err().to_string();
+                assert!(msg.contains(want), "{msg}");
+            }
+        }
+    }
 }

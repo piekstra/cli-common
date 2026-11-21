@@ -7,7 +7,7 @@ use pk_cli_secrets::Secret;
 use super::Captured;
 use crate::host::normalize_host;
 use crate::jar::JarCookie;
-use crate::watch::{CapturedRequest, LoggedRequest};
+use crate::watch::{CapturedRequest, CapturedResponse, LoggedRequest};
 
 impl Captured {
     /// Start building a `Captured` by hand, for a CLI's unit tests (the
@@ -66,6 +66,8 @@ impl Captured {
                 jar: None,
                 request: None,
                 request_log: None,
+                responses: None,
+                responses_skipped: 0,
                 user_agent: None,
             },
         }
@@ -119,6 +121,19 @@ impl CapturedBuilder {
     /// first seen): [`Captured::request_log`].
     pub fn request_log(mut self, entries: impl IntoIterator<Item = LoggedRequest>) -> Self {
         self.captured.request_log = Some(entries.into_iter().collect());
+        self
+    }
+
+    /// The kept responses, in the order given, and how many were skipped:
+    /// [`Captured::responses`], [`Captured::take_responses`] and
+    /// [`Captured::responses_skipped`].
+    pub fn responses(
+        mut self,
+        responses: impl IntoIterator<Item = CapturedResponse>,
+        skipped: usize,
+    ) -> Self {
+        self.captured.responses = Some(responses.into_iter().collect());
+        self.captured.responses_skipped = skipped;
         self
     }
 

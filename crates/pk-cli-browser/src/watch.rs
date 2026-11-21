@@ -14,17 +14,23 @@
 //! What comes out is typed and narrow: one request's method, URL (query and
 //! fragment cut) and headers (values as [`Secret`]s), and, for a log, each
 //! endpoint's method, host, path, kind, status and content type, with no
-//! header, body or query at all.
+//! header, body or query at all. A capture that keeps responses
+//! ([`Capture::responses`]) also gets the body of each response its pages
+//! loaded on the paths it names: once the load finishes, the watch reads the
+//! body the browser already holds (`Network.getResponseBody`), which sends
+//! nothing to the site and which no page can observe.
 //!
 //! [`Capture::request`]: crate::Capture::request
 //! [`Capture::optional_request`]: crate::Capture::optional_request
 //! [`Capture::request_log`]: crate::Capture::request_log
+//! [`Capture::responses`]: crate::Capture::responses
 
 use std::collections::HashMap;
 use std::fmt;
 
 use pk_cli_secrets::Secret;
 use serde_json::{json, Map, Value};
+use zeroize::Zeroizing;
 
 use crate::capture::PageTarget;
 use crate::cdp::{Cdp, CdpError, Transport};
@@ -37,6 +43,12 @@ use crate::jar::path_matches;
 const MAX_LOGGED: usize = 500;
 /// Requests a log remembers while it waits for their responses.
 const MAX_PENDING: usize = 2_000;
+/// Responses one capture keeps; later ones are counted as skipped.
+pub(crate) const MAX_RESPONSES: usize = 500;
+/// The largest body kept; a larger one is counted as skipped.
+pub(crate) const MAX_BODY: usize = 20 * 1024 * 1024;
+/// The most body bytes one capture keeps in all.
+pub(crate) const MAX_BODIES: usize = 200 * 1024 * 1024;
 
 /// The first request a capture's pages made to the URL it watches for.
 ///
@@ -357,6 +369,249 @@ impl RequestLog {
     }
 }
 
+/// One response a capture's pages loaded, body and all, for a
+/// [`Capture::responses`]: a page load, an `XMLHttpRequest` or a `fetch()`
+/// on the paths the capture names. The URL comes without its query, as a
+/// logged request's does. The body is the bytes the browser received
+/// (decoded, as the page saw them), handed over in memory and zeroized when
+/// dropped; `Debug` shows its length only. It is whatever the site sent,
+/// which on a signed-in app can include a token, so a CLI names the paths
+/// that serve the data it needs, and writes nothing it did not ask for.
+///
+/// [`Capture::responses`]: crate::Capture::responses
+pub struct CapturedResponse {
+    method: String,
+    host: String,
+    path: String,
+    kind: RequestKind,
+    status: Option<u16>,
+    mime: Option<String>,
+    body: Zeroizing<Vec<u8>>,
+}
+
+impl CapturedResponse {
+    /// The method, uppercase.
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+
+    /// The host it came from, lowercase.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// The path, without the query or fragment.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn kind(&self) -> RequestKind {
+        self.kind
+    }
+
+    /// The response's status, if the browser reported one.
+    pub fn status(&self) -> Option<u16> {
+        self.status
+    }
+
+    /// The response's content type, if the browser reported one.
+    pub fn mime(&self) -> Option<&str> {
+        self.mime.as_deref()
+    }
+
+    /// The body, as the page received it.
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+impl fmt::Debug for CapturedResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CapturedResponse")
+            .field("method", &self.method)
+            .field("host", &self.host)
+            .field("path", &self.path)
+            .field("kind", &self.kind)
+            .field("status", &self.status)
+            .field("mime", &self.mime)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
+}
+
+#[cfg(feature = "test-util")]
+impl CapturedResponse {
+    /// A kept response as a capture hands it over, for a CLI's unit tests
+    /// (the `test-util` feature, a dev-dependency only; see the crate docs).
+    /// Normalized as a kept one is: the method uppercased, the host
+    /// lowercased, and the path cut at its query or fragment.
+    ///
+    /// # Panics
+    ///
+    /// If `host` is not a host name, or `path` does not start with `/`.
+    pub fn for_test(
+        method: &str,
+        host: &str,
+        path: &str,
+        kind: RequestKind,
+        status: Option<u16>,
+        mime: Option<&str>,
+        body: &[u8],
+    ) -> Self {
+        let Some(normalized) = normalize_host(host) else {
+            panic!("CapturedResponse::for_test: `{host}` is not a host name");
+        };
+        assert!(
+            path.starts_with('/'),
+            "CapturedResponse::for_test: the path `{path}` does not start with `/`"
+        );
+        CapturedResponse {
+            method: method.to_ascii_uppercase(),
+            host: normalized,
+            path: path.split(['?', '#']).next().unwrap_or("/").to_string(),
+            kind,
+            status,
+            mime: mime.map(str::to_string),
+            body: Zeroizing::new(body.to_vec()),
+        }
+    }
+}
+
+/// A request whose response a capture keeps, until its load finishes.
+#[derive(Debug)]
+struct PendingResponse {
+    method: String,
+    host: String,
+    path: String,
+    kind: RequestKind,
+    status: Option<u16>,
+    mime: Option<String>,
+}
+
+/// The responses a capture keeps: the requests on its domain and paths
+/// still loading, and the bodies of those that finished.
+#[derive(Debug)]
+pub(crate) struct ResponseLog {
+    rule: HostRule,
+    paths: Vec<String>,
+    pending: HashMap<String, PendingResponse>,
+    kept: Vec<CapturedResponse>,
+    bytes: usize,
+    skipped: usize,
+}
+
+impl ResponseLog {
+    pub fn new(rule: HostRule, paths: Vec<String>) -> Self {
+        ResponseLog {
+            rule,
+            paths,
+            pending: HashMap::new(),
+            kept: Vec::new(),
+            bytes: 0,
+            skipped: 0,
+        }
+    }
+
+    /// The domain it keeps responses from, normalized.
+    pub fn domain(&self) -> &str {
+        self.rule.host()
+    }
+
+    /// Note a request if it is a page load or a data call to an `https`
+    /// host on the domain, on one of the paths. A request under an id seen
+    /// before (a redirect) replaces it, and one that no longer matches
+    /// drops it.
+    pub fn observe(&mut self, id: &str, method: &str, url: &UrlParts, kind: &str) {
+        self.pending.remove(id);
+        let Some(kind) = RequestKind::from_cdp(kind) else {
+            return;
+        };
+        if !url.is_https_default_port()
+            || !self.rule.matches_host(&url.host)
+            || !self.paths.iter().any(|p| path_matches(&url.path, p))
+        {
+            return;
+        }
+        if self.pending.len() >= MAX_PENDING {
+            self.pending.clear();
+        }
+        self.pending.insert(
+            id.to_string(),
+            PendingResponse {
+                method: method.to_ascii_uppercase(),
+                host: url.host.clone(),
+                path: url.path.clone(),
+                kind,
+                status: None,
+                mime: None,
+            },
+        );
+    }
+
+    /// Record the status and content type of a noted request's response.
+    pub fn respond(&mut self, id: &str, status: Option<u16>, mime: Option<String>) {
+        if let Some(pending) = self.pending.get_mut(id) {
+            pending.status = status;
+            pending.mime = mime;
+        }
+    }
+
+    /// Whether the load `id` is one it waits on.
+    pub fn is_pending(&self, id: &str) -> bool {
+        self.pending.contains_key(id)
+    }
+
+    /// Whether another body could still be kept, so it is worth reading.
+    pub fn has_room(&self) -> bool {
+        self.kept.len() < MAX_RESPONSES && self.bytes < MAX_BODIES
+    }
+
+    /// Drop a noted request whose load failed: there is no body to keep.
+    pub fn forget(&mut self, id: &str) {
+        self.pending.remove(id);
+    }
+
+    /// Keep the body of the finished load `id`, or count it as skipped
+    /// when there is none (the browser no longer held it) or no room.
+    pub fn keep(&mut self, id: &str, body: Option<Vec<u8>>) {
+        let Some(p) = self.pending.remove(id) else {
+            return;
+        };
+        let fits = |body: &Vec<u8>| {
+            self.kept.len() < MAX_RESPONSES
+                && body.len() <= MAX_BODY
+                && self.bytes + body.len() <= MAX_BODIES
+        };
+        match body {
+            Some(body) if fits(&body) => {
+                self.bytes += body.len();
+                self.kept.push(CapturedResponse {
+                    method: p.method,
+                    host: p.host,
+                    path: p.path,
+                    kind: p.kind,
+                    status: p.status,
+                    mime: p.mime,
+                    body: Zeroizing::new(body),
+                });
+            }
+            Some(body) => {
+                drop(Zeroizing::new(body));
+                self.skipped += 1;
+            }
+            None => self.skipped += 1,
+        }
+    }
+
+    /// The kept responses, in the order their loads finished, and how many
+    /// were skipped; the log is empty afterwards.
+    pub fn take(&mut self) -> (Vec<CapturedResponse>, usize) {
+        self.bytes = 0;
+        let skipped = std::mem::take(&mut self.skipped);
+        (std::mem::take(&mut self.kept), skipped)
+    }
+}
+
 /// A request one watched page made.
 #[derive(Debug)]
 pub(crate) struct SeenRequest {
@@ -381,6 +636,15 @@ pub(crate) struct SeenResponse {
     pub mime: Option<String>,
 }
 
+/// A load one watched page finished, or that failed.
+#[derive(Debug)]
+pub(crate) struct SeenLoad {
+    pub capture: usize,
+    pub id: String,
+    /// The watch's session with the page, to read the body in.
+    pub session: String,
+}
+
 /// One message read from the watch.
 #[derive(Debug)]
 pub(crate) enum Next {
@@ -390,6 +654,8 @@ pub(crate) enum Next {
     Ignored,
     Request(SeenRequest),
     Response(SeenResponse),
+    Finished(SeenLoad),
+    Failed(SeenLoad),
 }
 
 /// Session id → (target id, the index of the capture it is watched for).
@@ -407,11 +673,8 @@ pub(crate) fn decode(event: &Value, sessions: &mut Sessions) -> Next {
         }
         return Next::Ignored;
     }
-    let Some(&(_, capture)) = event
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .and_then(|s| sessions.get(s))
-    else {
+    let session = event.get("sessionId").and_then(Value::as_str);
+    let Some(&(_, capture)) = session.and_then(|s| sessions.get(s)) else {
         return Next::Ignored;
     };
     let text = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_string);
@@ -456,8 +719,74 @@ pub(crate) fn decode(event: &Value, sessions: &mut Sessions) -> Next {
                 mime: text(response.and_then(|r| r.get("mimeType"))),
             })
         }
+        "Network.loadingFinished" | "Network.loadingFailed" => {
+            let (Some(id), Some(session)) = (text(params.get("requestId")), session) else {
+                return Next::Ignored;
+            };
+            let load = SeenLoad {
+                capture,
+                id,
+                session: session.to_string(),
+            };
+            if method == "Network.loadingFinished" {
+                Next::Finished(load)
+            } else {
+                Next::Failed(load)
+            }
+        }
         _ => Next::Ignored,
     }
+}
+
+/// A `Network.getResponseBody` result as bytes: base64 decoded when the
+/// browser sent it so, else the text's own bytes.
+pub(crate) fn body_bytes(result: &Value) -> Option<Vec<u8>> {
+    let body = result.get("body")?.as_str()?;
+    if result
+        .get("base64Encoded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        base64_decode(body)
+    } else {
+        Some(body.as_bytes().to_vec())
+    }
+}
+
+/// Standard base64 with padding, as DevTools sends a binary body; `None`
+/// for anything else.
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    fn value(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some(u32::from(c - b'A')),
+            b'a'..=b'z' => Some(u32::from(c - b'a') + 26),
+            b'0'..=b'9' => Some(u32::from(c - b'0') + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = text.as_bytes();
+    if bytes.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    let chunks = bytes.len() / 4;
+    for (i, chunk) in bytes.chunks(4).enumerate() {
+        let last = i + 1 == chunks;
+        let pad = chunk.iter().rev().take_while(|&&c| c == b'=').count();
+        if pad > 2 || (pad > 0 && !last) {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &chunk[..4 - pad] {
+            n = (n << 6) | value(c)?;
+        }
+        n <<= 6 * pad as u32;
+        let three = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&three[..3 - pad]);
+    }
+    Some(out)
 }
 
 /// The watch connection: the pages it is attached to, and the events they
@@ -544,6 +873,22 @@ impl<T: Transport> Watch<T> {
         ) {
             // Already gone: the page closed, which detached it.
             Ok(_) | Err(CdpError::Protocol { .. }) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The body of the finished load `id`, from the browser's own buffer
+    /// (`Network.getResponseBody` in the page's session, which sends
+    /// nothing to the site). `None` when the browser no longer holds it, or
+    /// the page has gone.
+    pub fn response_body(&mut self, session: &str, id: &str) -> Result<Option<Vec<u8>>, CdpError> {
+        match self.cdp.call(
+            "Network.getResponseBody",
+            json!({ "requestId": id }),
+            Some(session),
+        ) {
+            Ok(result) => Ok(body_bytes(&result)),
+            Err(CdpError::Protocol { .. }) => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -1002,5 +1347,206 @@ mod tests {
                 "Target.detachFromTarget S1"
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+
+    fn url(u: &str) -> UrlParts {
+        parse_url(u).unwrap()
+    }
+
+    fn log() -> ResponseLog {
+        ResponseLog::new(
+            HostRule::domain("example.com").unwrap(),
+            vec!["/api/billing".into()],
+        )
+    }
+
+    #[test]
+    fn base64_bodies_decode_and_anything_else_is_refused() {
+        let cases: &[(&str, Option<&[u8]>)] = &[
+            ("", Some(b"")),
+            ("Zg==", Some(b"f")),
+            ("Zm8=", Some(b"fo")),
+            ("Zm9v", Some(b"foo")),
+            ("JVBERi0xLjQK", Some(b"%PDF-1.4\n")),
+            ("+/+/", Some(&[0xfb, 0xff, 0xbf])),
+            ("Zg=", None),
+            ("Zg===", None),
+            ("Z===", None),
+            ("Zg==Zg==", None),
+            ("Zm9v!", None),
+            ("Zm 9v", None),
+        ];
+        for (text, want) in cases {
+            assert_eq!(base64_decode(text).as_deref(), *want, "{text}");
+        }
+        assert_eq!(
+            body_bytes(&json!({"body": "Zm9v", "base64Encoded": true})).as_deref(),
+            Some(&b"foo"[..])
+        );
+        assert_eq!(
+            body_bytes(&json!({"body": "Zm9v", "base64Encoded": false})).as_deref(),
+            Some(&b"Zm9v"[..])
+        );
+        assert_eq!(body_bytes(&json!({"base64Encoded": true})), None);
+    }
+
+    #[test]
+    fn a_finished_load_is_read_from_its_own_session() {
+        let mut sessions: Sessions = HashMap::new();
+        sessions.insert("S1".into(), ("T-app".into(), 0));
+        let finished = json!({"method": "Network.loadingFinished", "sessionId": "S1",
+                              "params": {"requestId": "R1"}});
+        match decode(&finished, &mut sessions) {
+            Next::Finished(load) => {
+                assert_eq!(
+                    (load.capture, load.id.as_str(), load.session.as_str()),
+                    (0, "R1", "S1")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let failed = json!({"method": "Network.loadingFailed", "sessionId": "S1",
+                            "params": {"requestId": "R2"}});
+        assert!(matches!(decode(&failed, &mut sessions), Next::Failed(_)));
+        // A session the watch did not attach never feeds a capture.
+        let stranger = json!({"method": "Network.loadingFinished", "sessionId": "S9",
+                              "params": {"requestId": "R1"}});
+        assert!(matches!(decode(&stranger, &mut sessions), Next::Ignored));
+    }
+
+    #[test]
+    fn only_page_loads_and_data_calls_on_the_paths_are_kept() {
+        let mut log = log();
+        let cases: &[(&str, &str, &str, bool)] = &[
+            ("R1", "https://portal.example.com/api/billing", "XHR", true),
+            (
+                "R2",
+                "https://portal.example.com/api/billing/statements?x=1",
+                "Fetch",
+                true,
+            ),
+            (
+                "R3",
+                "https://portal.example.com/api/billing/s/pdf",
+                "Document",
+                true,
+            ),
+            (
+                "R4",
+                "https://portal.example.com/api/billingx",
+                "XHR",
+                false,
+            ),
+            (
+                "R5",
+                "https://portal.example.com/api/billing/app.js",
+                "Script",
+                false,
+            ),
+            ("R6", "https://portal.example.org/api/billing", "XHR", false),
+            ("R7", "http://portal.example.com/api/billing", "XHR", false),
+            (
+                "R8",
+                "https://portal.example.com:8443/api/billing",
+                "XHR",
+                false,
+            ),
+        ];
+        for (id, u, kind, want) in cases {
+            log.observe(id, "get", &url(u), kind);
+            assert_eq!(log.is_pending(id), *want, "{u} {kind}");
+        }
+        log.respond("R2", Some(200), Some("application/json".into()));
+        log.keep("R2", Some(b"{}".to_vec()));
+        let (kept, skipped) = log.take();
+        assert_eq!(skipped, 0);
+        assert_eq!(kept.len(), 1);
+        let r = &kept[0];
+        assert_eq!(
+            (
+                r.method(),
+                r.host(),
+                r.path(),
+                r.kind(),
+                r.status(),
+                r.mime(),
+                r.body()
+            ),
+            (
+                "GET",
+                "portal.example.com",
+                "/api/billing/statements",
+                RequestKind::Fetch,
+                Some(200),
+                Some("application/json"),
+                &b"{}"[..]
+            )
+        );
+        assert!(
+            !format!("{r:?}").contains("{}"),
+            "Debug shows the length only"
+        );
+    }
+
+    #[test]
+    fn a_redirect_off_the_paths_drops_the_request_and_failures_are_forgotten() {
+        let mut log = log();
+        log.observe(
+            "R1",
+            "GET",
+            &url("https://portal.example.com/api/billing/a"),
+            "XHR",
+        );
+        log.observe("R1", "GET", &url("https://portal.example.com/login"), "XHR");
+        assert!(!log.is_pending("R1"));
+        log.observe(
+            "R2",
+            "GET",
+            &url("https://portal.example.com/api/billing/b"),
+            "XHR",
+        );
+        log.forget("R2");
+        log.keep("R2", Some(b"x".to_vec()));
+        log.keep("R3", Some(b"x".to_vec()));
+        let (kept, skipped) = log.take();
+        assert!(kept.is_empty());
+        assert_eq!(
+            skipped, 0,
+            "a load never noted, or forgotten, is not a skip"
+        );
+    }
+
+    #[test]
+    fn a_body_too_large_or_gone_is_skipped() {
+        let mut log = log();
+        let on_path = url("https://portal.example.com/api/billing/s");
+        log.observe("R1", "GET", &on_path, "XHR");
+        log.keep("R1", Some(vec![0; MAX_BODY + 1]));
+        log.observe("R2", "GET", &on_path, "XHR");
+        log.keep("R2", None);
+        log.observe("R3", "GET", &on_path, "XHR");
+        log.keep("R3", Some(vec![1; MAX_BODY]));
+        let (kept, skipped) = log.take();
+        assert_eq!((kept.len(), skipped), (1, 2));
+        assert_eq!(kept[0].body().len(), MAX_BODY);
+    }
+
+    #[test]
+    fn the_count_of_kept_responses_is_bounded() {
+        let mut log = log();
+        let on_path = url("https://portal.example.com/api/billing/s");
+        for i in 0..MAX_RESPONSES + 2 {
+            let id = format!("R{i}");
+            log.observe(&id, "GET", &on_path, "XHR");
+            log.keep(&id, Some(b"{}".to_vec()));
+        }
+        assert!(!log.has_room());
+        let (kept, skipped) = log.take();
+        assert_eq!((kept.len(), skipped), (MAX_RESPONSES, 2));
     }
 }

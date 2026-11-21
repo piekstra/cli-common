@@ -87,10 +87,46 @@
 //! capture's own hosts, never on the login host where the bot checks run.
 //! It enables one CDP domain in a page, `Network`, and only for a capture
 //! that watches requests ([`Capture::request`],
-//! [`Capture::optional_request`], [`Capture::request_log`]): only in pages
-//! on that capture's hosts, from a connection that detaches as soon as a
-//! page leaves them, and never with request bodies. A capture that watches
-//! nothing leaves every page untouched but for the expression.
+//! [`Capture::optional_request`], [`Capture::request_log`],
+//! [`Capture::responses`]): only in pages on that capture's hosts, from a
+//! connection that detaches as soon as a page leaves them, and never with
+//! request bodies. A capture that keeps responses reads each body it keeps
+//! from the browser's own buffer once the load finishes
+//! (`Network.getResponseBody`), which sends nothing to the site. A capture
+//! that watches nothing leaves every page untouched but for the expression.
+//!
+//! # Reading what the owner looks at
+//!
+//! A CLI can also read the pages themselves, for a provider whose terms
+//! allow a person but not a bot: the owner signs in and goes through the
+//! pages in the window, every request being the page's own, and
+//! [`Capture::responses`] keeps what those pages loaded on the paths the CLI
+//! names. The tab is held open for the capture's window; [`finish`] ends it
+//! sooner, so a CLI can let the owner press Enter when done:
+//!
+//! ```no_run
+//! use std::time::Duration;
+//! use pk_cli_browser::{Capture, HostRule, Launch};
+//! # fn main() -> Result<(), pk_cli_core::CliError> {
+//! let capture = Capture::new("Example", HostRule::domain("portal.example.com")?)
+//!     .responses("portal.example.com", ["/api/billing"], Duration::from_secs(1800));
+//! std::thread::spawn(|| {
+//!     let _ = std::io::stdin().read_line(&mut String::new());
+//!     pk_cli_browser::finish();
+//! });
+//! eprintln!("Go through the billing pages, then press Enter here.");
+//! let mut captured = pk_cli_browser::capture(
+//!     Launch::new("example-cli").url("https://portal.example.com/"),
+//!     &capture,
+//!     Duration::from_secs(2400),
+//! )?;
+//! for response in captured.take_responses() {
+//!     // Map `response.body()` onto the CLI's own records.
+//!     # drop(response);
+//! }
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # The kept profile
 //!
@@ -233,6 +269,12 @@
 //! [`Confirm::NotYet`] or [`Confirm::Undecided`] reason is shown too, so a
 //! CLI writes it the same way.
 //!
+//! A kept response's body ([`Capture::responses`]) is not a [`Secret`] but
+//! is handled as one: handed over in memory, zeroized when dropped, shown
+//! by `Debug` as its length only, and never written or logged by the crate.
+//! It is whatever the site sent, a token included, so a CLI names the paths
+//! that serve the data it needs.
+//!
 //! The [`Capture::confirm`] hook is the CLI's code, run in the CLI's
 //! process with the candidate session: the request it makes is the CLI's
 //! own, as any request the CLI makes after the capture is.
@@ -242,9 +284,10 @@
 //! Only the crate reads a [`Captured`] out of a browser, so a CLI's unit
 //! tests build one by hand, through the `test-util` feature:
 //! `Captured::for_test(label, host)` starts a builder whose steps (`value`,
-//! `cookie`, `jar`, `request`, `request_log`, `user_agent`) set what each
-//! getter answers, and `JarCookie::for_test`, `CapturedRequest::for_test`
-//! and `LoggedRequest::for_test` build the parts. Values go in as plain
+//! `cookie`, `jar`, `request`, `request_log`, `responses`, `user_agent`) set
+//! what each getter answers, and `JarCookie::for_test`,
+//! `CapturedRequest::for_test`, `LoggedRequest::for_test` and
+//! `CapturedResponse::for_test` build the parts. Values go in as plain
 //! strings and come back as `Secret`s, normalized as read ones are (method
 //! and host case, a cookie domain's leading dot, the query cut). The CLI
 //! then runs its confirm hook, and its mapping of a capture onto its own
@@ -295,14 +338,14 @@ pub use capture::{capture, Capture, Captured, Confirm, DEFAULT_TIMEOUT};
 pub use chrome::{Browser, Launch};
 pub use error::BrowserError;
 pub use host::HostRule;
-pub use interrupt::cancel;
+pub use interrupt::{cancel, finish};
 pub use jar::JarCookie;
 pub use profile::{forget_named_profile, forget_profile, named_profile_exists, profile_exists};
 #[cfg(any(test, feature = "test-util"))]
 pub use profile::{
     forget_named_profile_in, forget_profile_in, named_profile_exists_in, profile_exists_in,
 };
-pub use watch::{CapturedRequest, LoggedRequest, RequestKind};
+pub use watch::{CapturedRequest, CapturedResponse, LoggedRequest, RequestKind};
 
 /// The family's `auth login --browser` flags. Flatten them into the CLI's
 /// login arguments beside `pk_cli_auth::LoginArgs`, so every portal CLI

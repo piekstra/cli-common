@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.33.5 — 2026-11-21
+
+- `pk-cli-browser`: `Capture::responses(domain, paths, during)` keeps the responses the capture's
+  pages load from `domain` on the named paths, bodies and all (page loads, `XMLHttpRequest`s and
+  `fetch()`es), and hands them over as `Captured::responses` (`take_responses` moves them out,
+  `responses_skipped` counts what did not fit). It is for a provider whose terms allow a person
+  but not a bot: the owner signs in and goes through the pages, every request is the page's own,
+  and the crate reads each body from the browser's own buffer once its load finishes
+  (`Network.getResponseBody`), sending nothing to the site. Bounded to 500 responses, 20 MiB a
+  body and 200 MiB in all. A body is zeroized when dropped, and `Debug` shows its length only.
+  `pk_cli_browser::finish()` ends the watch windows held open now, so a CLI can let the owner
+  press Enter when done instead of waiting out `during`; it works for `request_log` and
+  `optional_request` too. `CapturedResponse::for_test` and the builder's `responses` step come
+  with `test-util`. Additive; asked for by the athena-cli session, for athenahealth's
+  billing pages.
+
 ## v0.33.4 — 2026-11-20
 
 - `pk-cli-core`: the `--json` error DTO adds `reason` and `remedy` when the error has them
