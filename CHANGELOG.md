@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.34.0 — 2026-11-22
+
+- `pk-cli-core`: the `Paged` envelope gains `warnings: [{code, message}]` (`ListWarning`,
+  re-exported at the crate root), added with `Paged::warn(code, message)`. It is how a list says
+  it may be short of what was asked: the provider reported more rows than it served, a per-row
+  detail fetch failed, the range runs past the data on hand, the snapshot is older than the day
+  asked for. Absent when empty, and an envelope without it still deserializes. `Paged::emit` prints
+  each warning on stderr in text mode; `--quiet` never removes one. Minor bump: `Paged` has a new
+  public field, so a struct literal of it no longer compiles (no family CLI builds one). Asked for
+  by the etrade-cli and fidelity-cli reviews, whose short-read and coverage-gap notes reached
+  stderr only.
+
 ## v0.33.5 — 2026-11-21
 
 - `pk-cli-browser`: `Capture::responses(domain, paths, during)` keeps the responses the capture's

@@ -329,12 +329,21 @@ Rules that apply to every profile:
 - A profile owns **spellings and shapes**, never provider logic.
 - Profile DTOs follow §1.4 (schema tags, `Money`, ISO dates, snake_case).
 - Every profile `list` command emits the `Paged` envelope — records under
-  `items`, optional `next_cursor`/`total` — and takes the shared range flags
+  `items`, optional `next_cursor`/`total`/`warnings` — and takes the shared range flags
   `--limit N`, `--since YYYY-MM-DD`, `--until YYYY-MM-DD` (`RangeArgs`).
   Both are profile-agnostic and live in `pk-cli-core` (`pk_cli_core::{Paged,
   RangeArgs}`); profile crates re-export them, so a CLI that adopts two
   profiles gets one type, not two, and a non-utility CLI never depends on the
   utility crate just to page a list.
+- A list that may be short of what was asked says so in the envelope:
+  `warnings: [{code, message}]` (`ListWarning`, added with `Paged::warn`), one
+  per data-integrity note — the provider reported more rows than it served, a
+  per-row detail fetch failed, the range runs past the data on hand, the
+  snapshot is older than the day asked for. `code` is a stable kebab-case
+  word the CLI documents; `message` is for people. `--quiet` never removes a
+  warning, and text mode prints each on stderr from `Paged::emit`, so a CLI
+  does not print them a second time. A consumer treats a list with any
+  warning, known code or not, as possibly incomplete.
 - When a profile earns a crate, and how to add one: see **[PROFILES.md](PROFILES.md)**.
 
 #### The `utility/v1` profile (crate `pk-cli-utility`)

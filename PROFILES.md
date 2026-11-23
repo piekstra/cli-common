@@ -72,6 +72,8 @@ type. `smart-home/v1` (`device-rooms/v1`) is the first.
   are numbers with an explicit `unit`.
 - **Lists** emit `Paged<T>` (`<record>-list/v1`, records under `items`) and
   take `RangeArgs` (`--limit`/`--since`/`--until`). No new pagination flags.
+  A list that may be incomplete carries `warnings` (`Paged::warn`), never only
+  a stderr note.
 - **Spellings**: noun-verb, plural nouns, `list|get` verbs, `ls` alias. When
   existing CLIs disagree, pick the spelling closest to the majority and keep
   old spellings as aliases for one major version (SPEC §1.2 rule).
