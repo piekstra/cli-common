@@ -13,7 +13,7 @@
   stderr only.
 - `pk-cli-mcp`: `PageInfo` carries the same `warnings` (in the output schema as `ListWarning`), and
   `Page::warn` adds one, so an MCP list tool over the same read reports what the CLI list does.
-  `PageInfo` has a new public field too. It adds about 220 characters to each list tool's
+  `PageInfo` has a new public field too. It adds about 240 characters to each list tool's
   `outputSchema`, which counts toward the 8,000-character definitions budget; a CLI near the
   budget sees `assert_conforms` say so on the bump.
 - Rollout: the field is additive under the same `<record>-list/v1` tag, and a consumer on an older
