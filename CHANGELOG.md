@@ -12,6 +12,10 @@
 - `pk-cli-drive`: `DriveFile::shortcut_details` (a new public field, `ShortcutDetails`) and
   `DriveFile::is_shortcut`. Every file answer now asks Drive for `shortcutDetails`.
 - `pk-cli-drive`: the fake Drive server has `add_shortcut` and `trash`.
+- `pk-cli-drive`: `DriveCli::with_vault` takes `impl Into<Arc<Vault>>`, so a process can share
+  one vault across the `DriveCli` values it builds and read its key from the keychain once.
+  `DriveCli::default_vault(bin)` builds the vault `DriveCli::new` would. Callers passing a `Vault`
+  are unchanged.
 
 ## v0.35.1 — 2026-11-23
 

@@ -204,12 +204,7 @@ impl DriveCli {
     /// `<PREFIX>_DRIVE_TEST_ENDPOINT`'s fake server). `command` is how the
     /// CLI mounts these commands (`medrec drive`), for remedies.
     pub fn new(bin: &str, version: &str, command: &str) -> Result<Self, CliError> {
-        let service_var = format!("{}_KEYCHAIN_SERVICE", crate::cache::env_prefix(bin));
-        let keys = match std::env::var(&service_var) {
-            Ok(s) if !s.is_empty() => CredentialStore::new(s),
-            _ => CredentialStore::for_binary(bin),
-        };
-        let vault = Vault::new(keys, pk_cli_auth::vault::default_dir(bin)?);
+        let vault = Self::default_vault(bin)?;
         Ok(DriveCli {
             bin: bin.into(),
             version: version.into(),
@@ -233,9 +228,25 @@ impl DriveCli {
         self
     }
 
-    /// Use `vault` instead (a test's, with its own keys and directory).
-    pub fn with_vault(mut self, vault: Vault) -> Self {
-        self.vault = Arc::new(vault);
+    /// The vault [`DriveCli::new`] uses for `bin`: the keychain service
+    /// `piekstra.<bin>` (or `<PREFIX>_KEYCHAIN_SERVICE`) and `bin`'s vault
+    /// directory. Nothing is read until an entry is.
+    pub fn default_vault(bin: &str) -> Result<Vault, CliError> {
+        let service_var = format!("{}_KEYCHAIN_SERVICE", crate::cache::env_prefix(bin));
+        let keys = match std::env::var(&service_var) {
+            Ok(s) if !s.is_empty() => CredentialStore::new(s),
+            _ => CredentialStore::for_binary(bin),
+        };
+        Ok(Vault::new(keys, pk_cli_auth::vault::default_dir(bin)?))
+    }
+
+    /// Use `vault` instead: a test's, with its own keys and directory, or
+    /// one `Arc<Vault>` shared by every `DriveCli` a process builds. A
+    /// vault reads its key from the keychain once and keeps it, so sharing
+    /// one means a process asks macOS at most once, whether the person
+    /// chose Allow or Always Allow.
+    pub fn with_vault(mut self, vault: impl Into<Arc<Vault>>) -> Self {
+        self.vault = vault.into();
         self
     }
 

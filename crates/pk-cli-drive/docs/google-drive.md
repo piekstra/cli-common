@@ -59,6 +59,15 @@ fixed by its first sign-in: a later sign-in that lands on another account is
 refused, and nothing is stored. `login --account <EMAIL>` sets it in
 advance and sends it to Google as `login_hint`.
 
+A vault reads its key from the keychain once and keeps it. On macOS, each
+newly built binary asks once before it may read the item. "Always Allow"
+lasts for that binary, while "Allow" covers one read. A process that builds
+several `DriveCli` values (a long-running server, a run that opens its store
+more than once) shares one vault, so it reads the key once:
+`with_vault(Arc::new(DriveCli::default_vault(bin)?))`, with the `Arc` kept
+for the process. To bound the wait on a dialog nobody answers, make that
+first read (`account(..).stored()`) on a thread of its own.
+
 ## Mounting the commands
 
 ```rust,ignore

@@ -1066,3 +1066,41 @@ fn a_shortcut_named_like_a_file_beside_it_is_two_items_of_one_name() {
     }
     assert_eq!(h.drive().cat("a.pdf").unwrap().as_deref(), Some("mine"));
 }
+
+#[test]
+fn drive_clis_sharing_one_vault_read_its_key_once() {
+    let h = Harness::new();
+    h.signed_in();
+    h.fake.add_file(ROOT_ID, "a.txt", b"a");
+    let keys = Arc::new(MemoryKeys::default());
+    let dir = h.tmp.path().join("shared-vault");
+    // The sign-in's entries, sealed under a key in `keys` by another run.
+    let writer = Vault::new(Arc::clone(&keys), &dir);
+    for name in [
+        token_entry(&ProfileName::parse(PROFILE).unwrap()),
+        pk_cli_drive::google::client_entry(&ProfileName::parse(PROFILE).unwrap()),
+    ] {
+        let secret = h.vault().get(&name).unwrap().expect("signed in");
+        writer.put(&name, &secret).unwrap();
+    }
+    let spec = DriveSpec::new(ProfileName::parse(PROFILE).unwrap(), ROOT_ID).unwrap();
+    let shared = Arc::new(Vault::new(Arc::clone(&keys), &dir));
+    let before = keys.reads();
+    for _ in 0..3 {
+        let cli = h.cli().with_vault(Arc::clone(&shared));
+        let d = cli.drive(&spec).unwrap().without_backoff();
+        assert_eq!(d.cat("a.txt").unwrap().as_deref(), Some("a"));
+    }
+    assert_eq!(keys.reads() - before, 1, "one key read for three sign-ins");
+    // A vault per DriveCli reads it every time.
+    let fresh_reads = keys.reads();
+    for _ in 0..2 {
+        let cli = h.cli().with_vault(Vault::new(Arc::clone(&keys), &dir));
+        cli.drive(&spec)
+            .unwrap()
+            .without_backoff()
+            .cat("a.txt")
+            .unwrap();
+    }
+    assert_eq!(keys.reads() - fresh_reads, 2);
+}
