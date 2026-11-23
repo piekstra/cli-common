@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.37.4 — 2026-11-23
+
+- `pk-cli-browser`: a watch window (`Capture::responses`, `request_log`, `optional_request`) that
+  ends while no page on the capture's hosts is open now hands the capture over, with what was kept
+  and what the earlier gates last read. This covers a window that runs out while the owner is on
+  another host (a sign-in), the owner closing the window, and the wait's deadline. Before, the
+  capture waited for a page back on its hosts, and the deadline or a closed window ended it with
+  an error that dropped everything kept: a 25-minute tour came back empty. A capture that never
+  became ready still ends with `TimedOut` or `WindowClosed`, as before. A capture handed over that
+  way, with no tab of it left to close, says so in its status line.
+- `pk-cli-browser`: the window's docs say it starts once, the first time the rest is ready, and
+  that leaving the capture's hosts and coming back does not start it again; a capture whose pages
+  need a sign-in makes the sign-in part of being ready. Tests pin both.
+
 ## v0.37.3 — 2026-11-23
 
 - `pk-cli-drive`: `Drive::trash_empty_folder` moves an empty folder to Drive's trash, where it is

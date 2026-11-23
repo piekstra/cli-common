@@ -330,6 +330,16 @@ impl Capture {
     /// usual, and the responses are handed over as
     /// [`Captured::responses`]. The confirm hook sees none of them.
     ///
+    /// The window starts once, the first time everything else is ready,
+    /// and a tab that leaves the capture's hosts and comes back does not
+    /// start it again. A capture whose pages need a sign-in first makes the
+    /// sign-in part of "ready" (an expression or a cookie that only a
+    /// signed-in page has), or its window runs during the sign-in. However
+    /// the window ends (it runs out, [`finish`](crate::finish), the owner
+    /// closes the window, or the wait's deadline), what was kept is handed
+    /// over, with what the earlier gates last read, even when the tab has
+    /// left the capture's hosts by then.
+    ///
     /// Bounded: 500 responses, 10 MiB a body and 200 MiB in all. A load is
     /// counted in [`Captured::responses_skipped`] when it does not fit, when
     /// the browser no longer holds its body or does not hand it over in
@@ -831,6 +841,11 @@ struct Waiting<'a> {
     hold_since: Option<Instant>,
     /// The watch window was ended by [`finish`](crate::finish).
     hold_over: bool,
+    /// What the gates last read while the tab was held open, handed over
+    /// with what the watch kept if the window ends while no page on the
+    /// capture's hosts is open (the owner went on to another site, or
+    /// closed the window), or at the deadline.
+    held: Option<Held>,
     /// Loads in progress that a reconnecting watch lost since the last
     /// status line about it.
     responses_lost: usize,
@@ -865,6 +880,7 @@ impl<'a> Waiting<'a> {
             }),
             hold_since: None,
             hold_over: false,
+            held: None,
             responses_lost: 0,
             undecided: None,
             warned_undecided: false,
@@ -1109,29 +1125,26 @@ fn read_when_ready<T: Transport>(
         .iter()
         .filter(|p| capture.hosts.iter().any(|r| r.matches_url(&p.url)))
         .collect();
-    let first = *matching.first().ok_or(Gate::Wait(None))?;
-    w.progress.saw_page = true;
-
-    let (host, value) = expression_gate(cdp, capture, &matching, first)?;
-    let CookieReads {
-        named: cookies,
-        jar,
-    } = cookie_gate(cdp, w, state, &host)?;
-    request_gate(w)?;
-    hold_gate(w, state, notes)?;
-    let user_agent = user_agent_gate(cdp, capture, state, &host)?;
-    let candidate = Captured {
-        label: capture.label.clone(),
-        host,
-        value,
-        cookies,
-        jar,
-        request: w.seen.take(),
-        request_log: w.log.as_ref().map(|log| log.entries().to_vec()),
-        responses: None,
-        responses_skipped: 0,
-        user_agent,
+    let parts = match ready_parts(cdp, w, &matching, state) {
+        Ok(parts) => parts,
+        // Once the watch window is over, a tab that has left the capture's
+        // hosts does not hold back what was read and kept while it was
+        // there.
+        Err(Gate::Wait(blocked)) => match w.held.take() {
+            Some(held) if window_ended(w, state) => held,
+            held => {
+                w.held = held;
+                return Err(Gate::Wait(blocked));
+            }
+        },
+        Err(gate) => return Err(gate),
     };
+    if let Err(gate) = hold_gate(w, state, notes) {
+        w.held = Some(parts);
+        return Err(gate);
+    }
+    w.held = None;
+    let user_agent = user_agent_gate(cdp, capture, state, &parts.host)?;
     if state.final_round {
         // The deadline is one last permitted ask: a read that decides now
         // keeps a finished sign-in.
@@ -1139,14 +1152,120 @@ fn read_when_ready<T: Transport>(
             read.ask_at = state.now;
         }
     }
-    let mut captured = confirm_gate(w, candidate, state.now, notes)?;
+    let captured = hand_over(w, parts, user_agent, state.now, notes)?;
+    let closed = close_pages(cdp, &matching);
+    Ok((captured, closed))
+}
+
+/// What the gates before the watch window read: the page's host and the
+/// expression's answer, the named cookies and the jar.
+struct Held {
+    host: String,
+    value: Option<Secret>,
+    cookies: Vec<(String, Secret)>,
+    jar: Option<Vec<JarCookie>>,
+}
+
+/// The gates before the watch window, on this poll's pages on the
+/// capture's hosts.
+fn ready_parts<T: Transport>(
+    cdp: &mut Cdp<T>,
+    w: &mut Waiting<'_>,
+    matching: &[&PageTarget],
+    state: &mut PollState<'_>,
+) -> Result<Held, Gate> {
+    let first = *matching.first().ok_or(Gate::Wait(None))?;
+    w.progress.saw_page = true;
+    let (host, value) = expression_gate(cdp, w.capture, matching, first)?;
+    let CookieReads { named, jar } = cookie_gate(cdp, w, state, &host)?;
+    request_gate(w)?;
+    Ok(Held {
+        host,
+        value,
+        cookies: named,
+        jar,
+    })
+}
+
+/// Whether the capture's watch window began and is over: it ran out, was
+/// finished, or the deadline came.
+fn window_ended(w: &Waiting<'_>, state: &PollState<'_>) -> bool {
+    let Some(since) = w.hold_since else {
+        return false;
+    };
+    w.hold_over
+        || state.final_round
+        || w.window()
+            .and_then(|window| since.checked_add(window))
+            .is_none_or(|end| state.now >= end)
+}
+
+/// The capture, from what the gates read, through the confirm hook, with
+/// the request, the request log and the kept responses.
+fn hand_over(
+    w: &mut Waiting<'_>,
+    parts: Held,
+    user_agent: Option<String>,
+    now: Instant,
+    notes: &mut Vec<String>,
+) -> Result<Captured, Gate> {
+    let candidate = Captured {
+        label: w.capture.label.clone(),
+        host: parts.host,
+        value: parts.value,
+        cookies: parts.cookies,
+        jar: parts.jar,
+        request: w.seen.take(),
+        request_log: w.log.as_ref().map(|log| log.entries().to_vec()),
+        responses: None,
+        responses_skipped: 0,
+        user_agent,
+    };
+    let mut captured = confirm_gate(w, candidate, now, notes)?;
     if let Some(log) = w.responses.as_mut() {
         let (kept, skipped) = log.take();
         captured.responses = Some(kept);
         captured.responses_skipped = skipped;
     }
-    let closed = close_pages(cdp, &matching);
-    Ok((captured, closed))
+    Ok(captured)
+}
+
+/// Hand over each capture whose tab was held open, from what its gates
+/// last read, when no poll can read it again: the window was closed, or
+/// the deadline's last round could not reach a page. Returns whether every
+/// capture is done.
+fn hand_over_held(
+    waiting: &mut [Waiting<'_>],
+    user_agent: Option<&String>,
+    note: &mut dyn FnMut(&str),
+    on_capture: &mut dyn FnMut(Captured) -> Result<(), CliError>,
+) -> Result<bool, BrowserError> {
+    for w in waiting.iter_mut().filter(|w| !w.done) {
+        let Some(parts) = w.held.take() else {
+            continue;
+        };
+        w.hold_over = true;
+        let mut notes = Vec::new();
+        let read = hand_over(w, parts, user_agent.cloned(), Instant::now(), &mut notes);
+        for line in &notes {
+            note(line);
+        }
+        match read {
+            Ok(captured) => {
+                w.done = true;
+                note(&format!(
+                    "{}: the tab was no longer open, so what it read and kept before then was \
+                     captured.",
+                    w.capture.label
+                ));
+                on_capture(captured).map_err(BrowserError::Handler)?;
+            }
+            Err(Gate::Failed(e)) => return Err(BrowserError::Handler(e)),
+            Err(Gate::Canceled) => return Err(canceled()),
+            Err(Gate::Wait(_)) => {}
+        }
+    }
+    Ok(waiting.iter().all(|w| w.done))
 }
 
 /// The expression's answer and the host of the page that gave it, from the
@@ -1245,7 +1364,9 @@ fn request_gate(w: &Waiting<'_>) -> Result<(), Gate> {
 
 /// The tab stays open for the capture's watch window, which starts (with a
 /// status line) the first time every earlier gate passes, and ends when it
-/// runs out or at the deadline's final round.
+/// runs out, at [`finish`](crate::finish), or at the deadline's final
+/// round. It starts once: a tab that leaves the capture's hosts (to sign in
+/// again, say) and comes back does not start it again.
 fn hold_gate(
     w: &mut Waiting<'_>,
     state: &PollState<'_>,
@@ -1454,6 +1575,9 @@ pub(crate) fn run_wait<D: Driver>(
             return Err(canceled());
         }
         if driver.exited() {
+            if hand_over_held(&mut waiting, user_agent.as_ref(), note, on_capture)? {
+                return Ok(());
+            }
             return Err(window_closed(&settings.login_hint, &waiting));
         }
         lost_notes(&mut waiting, note);
@@ -1524,6 +1648,9 @@ pub(crate) fn run_wait<D: Driver>(
                     return Ok(());
                 }
                 if empty_polls >= CLOSED_POLLS {
+                    if hand_over_held(&mut waiting, user_agent.as_ref(), note, on_capture)? {
+                        return Ok(());
+                    }
                     return Err(window_closed(&settings.login_hint, &waiting));
                 }
                 follow_pages(driver, &mut watch, &poll.pages, &mut waiting, settings)?;
@@ -1544,6 +1671,9 @@ pub(crate) fn run_wait<D: Driver>(
                 final_round = true;
                 pause(driver, Duration::ZERO, None, &mut watch, &mut waiting)?;
                 continue;
+            }
+            if hand_over_held(&mut waiting, user_agent.as_ref(), note, on_capture)? {
+                return Ok(());
             }
             return Err(timed_out(
                 &settings.login_hint,
@@ -1861,6 +1991,7 @@ pub(crate) fn announce(captures: &[Capture], timeout: Duration) -> String {
 /// The status line printed as a capture is read.
 pub(crate) fn captured_note(label: &str, closed: &Result<usize, String>) -> String {
     match closed {
+        Ok(0) => format!("{label}: session captured; no tab of it was open to close."),
         Ok(1) => format!("{label}: session captured, tab closed."),
         Ok(n) => format!("{label}: session captured, {n} tabs closed."),
         Err(e) => format!(
