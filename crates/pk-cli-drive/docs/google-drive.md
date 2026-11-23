@@ -69,9 +69,13 @@ more than once) shares one vault, so it reads the key once: keep
 answers, call `load_key(wait)` on that vault before the first sign-in is
 read. It reads on a thread of its own and holds none of the vault's locks,
 so an unanswered dialog is `KeyLoad::Waiting`. Until it is answered, the
-vault's reads and writes that need the key fail at once with exit 3. A read
-made some other way, holding the vault's key lock, would block every other
-user of the shared vault.
+vault's reads and writes that need the key fail at once with exit 3. A
+process nobody may be watching (a server, a scheduled run) also builds its
+vault with `bound_key_reads(wait)`. That holds every later read of the key
+to the same bound: the read again after another process replaced the key
+(a reset and a new sign-in in a terminal), and a write's. Without it such a
+read waits on the dialog holding the vault's key lock, and every other user
+of the shared vault waits behind it.
 
 ## Mounting the commands
 
