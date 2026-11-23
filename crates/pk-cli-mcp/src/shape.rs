@@ -97,6 +97,25 @@ pub struct PageInfo {
     /// How to get the rest, or how to narrow the call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    // The data-integrity notes a CLI list carries in its `Paged` envelope
+    // (`pk_cli_core::ListWarning`), so the codes match. Unlike `truncated`, no
+    // cursor fetches what a warning says is missing. The doc line below is the
+    // output schema's description, counted in every list tool's definition, so
+    // it stays short.
+    /// Why rows may be missing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(with = "Vec<ListWarningSchema>")]
+    pub warnings: Vec<pk_cli_core::ListWarning>,
+}
+
+// The output schema of a `pk_cli_core::ListWarning`, which has no schemars
+// derive of its own: pk-cli-core does not depend on schemars.
+#[derive(JsonSchema)]
+#[schemars(rename = "ListWarning")]
+#[allow(dead_code)]
+struct ListWarningSchema {
+    code: String,
+    message: String,
 }
 
 /// One page of a list: the records and the page fields, flat.
@@ -105,6 +124,19 @@ pub struct Page<T> {
     pub items: Vec<T>,
     #[serde(flatten)]
     pub info: PageInfo,
+}
+
+impl<T> Page<T> {
+    /// Record a data-integrity warning on the page (see [`PageInfo::warnings`]).
+    /// A tool over the same provider read as a CLI list passes on what the
+    /// CLI would put in its envelope: `page.info.warnings.extend(paged.warnings)`.
+    pub fn warn(&mut self, code: impl Into<String>, message: impl Into<String>) -> &mut Self {
+        self.info.warnings.push(pk_cli_core::ListWarning {
+            code: code.into(),
+            message: message.into(),
+        });
+        self
+    }
 }
 
 /// Which way a list runs, by its rows' position keys ([`PositionRequest::page`]).
@@ -552,6 +584,7 @@ fn cut<T: Serialize>(
             next_cursor,
             truncated,
             hint,
+            warnings: Vec::new(),
         },
     })
 }
@@ -1072,6 +1105,29 @@ mod tests {
             .unwrap();
         let v = serde_json::to_value(&page).unwrap();
         assert_eq!(v, json!({"items": ["a", "b"], "returned": 2}));
+    }
+
+    #[test]
+    fn a_warning_rides_beside_the_page_fields_and_in_the_output_schema() {
+        let mut page = PageRequest::new(&args(None, None), &())
+            .unwrap()
+            .page(vec!["a"], "x")
+            .unwrap();
+        page.warn("short-read", "reported 2 rows and served 1");
+        let v = serde_json::to_value(&page).unwrap();
+        assert_eq!(
+            v,
+            json!({"items": ["a"], "returned": 1, "warnings": [
+                {"code": "short-read", "message": "reported 2 rows and served 1"}
+            ]})
+        );
+        let schema = serde_json::to_value(schemars::schema_for!(Page<String>)).unwrap();
+        let warnings = &schema["properties"]["warnings"];
+        assert_eq!(warnings["type"], "array", "{schema}");
+        assert_eq!(warnings["items"]["$ref"], "#/$defs/ListWarning", "{schema}");
+        let def = &schema["$defs"]["ListWarning"];
+        assert_eq!(def["required"], json!(["code", "message"]), "{schema}");
+        assert_eq!(def["properties"]["code"]["type"], "string", "{schema}");
     }
 
     #[test]

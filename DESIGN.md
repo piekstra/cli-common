@@ -343,7 +343,13 @@ Rules that apply to every profile:
   word the CLI documents; `message` is for people. `--quiet` never removes a
   warning, and text mode prints each on stderr from `Paged::emit`, so a CLI
   does not print them a second time. A consumer treats a list with any
-  warning, known code or not, as possibly incomplete.
+  warning, known code or not, as possibly incomplete. An MCP list tool over
+  the same read carries the same notes in its result's `warnings`
+  (`pk_cli_mcp::PageInfo`, `Page::warn`), so the codes match. The field is
+  additive under the same `<record>-list/v1` tag, and an older consumer
+  ignores it: a consumer of a list that can carry warnings is on cli-common
+  v0.34.0 or later (or reads `warnings` from the JSON itself) before or with
+  its producers, since only then does a list without any read as complete.
 - When a profile earns a crate, and how to add one: see **[PROFILES.md](PROFILES.md)**.
 
 #### The `utility/v1` profile (crate `pk-cli-utility`)
