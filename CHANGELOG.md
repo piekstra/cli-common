@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.37.0 — 2026-11-23
+
+- `pk-cli-core`: `confirm::ask(prompt)`, the yes/no read `confirm` is built on, without the
+  family's refusal policy: `<prompt> [y/N]` on stderr, true only for `y`/`yes`, false for anything
+  else and for EOF. `confirm` now calls it, unchanged in behaviour. A CLI whose data contract makes
+  an interactive "no" a successful no-op (tax-cli's) can use it instead of keeping its own copy of
+  the read.
+
 ## v0.36.1 — 2026-11-23
 
 - `pk-cli-auth`: `Vault::bound_key_reads(wait)` holds every keychain read of the key to `wait`, as

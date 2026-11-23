@@ -21,7 +21,9 @@
 //!   *proceed* or *cancelled*.
 //!
 //! [`gate`] is the one-call form for the common case where the prompt text is
-//! known up front; it is the two steps back to back.
+//! known up front; it is the two steps back to back. [`ask`] is the bare
+//! yes/no read [`confirm`] is built on, for a CLI that keeps its own policy
+//! for a refusal.
 //!
 //! Every refusal is [`CliError::ConfirmationRequired`] (exit 6), including a
 //! user answering "n": to a script the two are the same condition — the
@@ -57,14 +59,26 @@ pub fn confirm(force: bool, prompt: &str) -> Result<(), CliError> {
     if force {
         return Ok(());
     }
-    eprint!("{prompt} [y/N] ");
-    let stdin = std::io::stdin();
-    let mut lock = stdin.lock();
-    if read_answer(&mut lock)? {
+    if ask(prompt)? {
         Ok(())
     } else {
         Err(CliError::ConfirmationRequired("cancelled".into()))
     }
+}
+
+/// The yes/no read on its own: `<prompt> [y/N]` on stderr, true only for
+/// `y`/`yes` (case-insensitive, trimmed); anything else, EOF included, is
+/// false.
+///
+/// [`confirm`] is this plus the family's refusal policy (a "no" is exit 6).
+/// A CLI whose data contract makes an interactive "no" a successful no-op
+/// calls this and decides itself. Like [`confirm`], reach it only after
+/// [`require_confirmable`] passed, so stdin is known to be answerable.
+pub fn ask(prompt: &str) -> Result<bool, CliError> {
+    eprint!("{prompt} [y/N] ");
+    let stdin = std::io::stdin();
+    let mut lock = stdin.lock();
+    read_answer(&mut lock)
 }
 
 /// [`require_confirmable`] then [`confirm`] in one call, for mutations whose
