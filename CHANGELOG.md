@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.37.1 — 2026-11-23
+
+- `pk-cli-drive`: `Drive::duplicates(rel)` returns every name two or more items share in one folder
+  under `rel`, as `Duplicate { dir, dir_id, name, folders, ids }`. These are the groups that stop a
+  listing or a path with `duplicate_name`. The walk goes on past each group, so one call finds them
+  all, without parsing an error's text. Groups are per folder id: two folders of one name are two
+  folders. Under `Listing::Whole` a shortcut counts as an item, and a shortcut to a folder is
+  walked once.
+- `pk-cli-drive`: `LoginArgs::default()` is `login` with no flags: it waits `LOGIN_WAIT_MINUTES`
+  (5) for the browser, the constant the flag's default also uses. The derived default waited 0, so
+  a sign-in built from it timed out at once.
+- `pk-cli-drive`: `FakeDrive::add_parent(id, parent)`, for a file in two folders.
+
 ## v0.37.0 — 2026-11-23
 
 - `pk-cli-core`: `confirm::ask(prompt)`, the yes/no read `confirm` is built on, without the

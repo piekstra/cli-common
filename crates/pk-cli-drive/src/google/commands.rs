@@ -101,7 +101,10 @@ pub enum FolderCommand {
     List,
 }
 
-#[derive(Args, Debug, Clone, Default)]
+/// How long `login` waits for the browser by default, in minutes.
+pub const LOGIN_WAIT_MINUTES: u64 = 5;
+
+#[derive(Args, Debug, Clone)]
 pub struct LoginArgs {
     /// Import this Desktop app client JSON (from the Google Cloud console)
     /// first.
@@ -121,8 +124,23 @@ pub struct LoginArgs {
     #[arg(long)]
     pub no_browser: bool,
     /// Minutes to wait for the browser.
-    #[arg(long, value_name = "MINUTES", default_value_t = 5)]
+    #[arg(long, value_name = "MINUTES", default_value_t = LOGIN_WAIT_MINUTES)]
     pub wait: u64,
+}
+
+/// As clap parses `login` with no flags: the browser opened, five minutes
+/// to finish the sign-in.
+impl Default for LoginArgs {
+    fn default() -> Self {
+        Self {
+            client_file: None,
+            client_stdin: false,
+            scopes: Vec::new(),
+            account: None,
+            no_browser: false,
+            wait: LOGIN_WAIT_MINUTES,
+        }
+    }
 }
 
 #[derive(Args, Debug, Clone, Default)]

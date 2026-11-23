@@ -50,10 +50,10 @@ pub use api::Retry;
 pub use client::{id_hint, DesktopClient};
 pub use commands::{
     ClientCommand, DriveArgs, DriveCli, DriveCommand, FolderCommand, LoginArgs, LogoutArgs,
-    ProfilesCommand, Scope, StatusArgs,
+    ProfilesCommand, Scope, StatusArgs, LOGIN_WAIT_MINUTES,
 };
 pub use drive::{
-    check_folder_id, Drive, DriveSpec, Existing, Hashed, Listing, TreeCopy, SPEC_PREFIX,
+    check_folder_id, Drive, DriveSpec, Duplicate, Existing, Hashed, Listing, TreeCopy, SPEC_PREFIX,
 };
 pub use endpoints::Endpoints;
 pub use files::{md5_file, About, DriveFile, ShortcutDetails, RESUMABLE_ABOVE};

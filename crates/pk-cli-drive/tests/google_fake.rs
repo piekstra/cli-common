@@ -12,8 +12,9 @@ use pk_cli_config::profile::ProfileName;
 use pk_cli_core::{CliError, Reason};
 use pk_cli_drive::google::fake::{FakeDrive, When, ACCOUNT, MY_DRIVE, ROOT_ID};
 use pk_cli_drive::google::{
-    token_entry, ClientCommand, Drive, DriveCli, DriveCommand, DriveSpec, Existing, FolderCommand,
-    Listing, LoginArgs, LogoutArgs, ProfileStore, ProfilesCommand, Retry, Scope, StatusArgs,
+    token_entry, ClientCommand, Drive, DriveCli, DriveCommand, DriveSpec, Duplicate, Existing,
+    FolderCommand, Listing, LoginArgs, LogoutArgs, ProfileStore, ProfilesCommand, Retry, Scope,
+    StatusArgs,
 };
 use pk_cli_drive::{Backend, CachePolicy, CachedRemote, RemoteRead, RemoteStore};
 
@@ -1103,4 +1104,116 @@ fn drive_clis_sharing_one_vault_read_its_key_once() {
             .unwrap();
     }
     assert_eq!(keys.reads() - fresh_reads, 2);
+}
+
+#[test]
+fn duplicates_lists_every_shared_name_with_its_ids_and_walks_past_each() {
+    let h = Harness::new();
+    h.signed_in();
+    let a1 = h.fake.add_file(ROOT_ID, "index.json", b"one");
+    let a2 = h.fake.add_file(ROOT_ID, "index.json", b"two");
+    // Two folders of one name; each is walked, and a clash inside the
+    // second is found too.
+    let y1 = h.fake.add_folder(ROOT_ID, "2024");
+    let y2 = h.fake.add_folder(ROOT_ID, "2024");
+    h.fake.add_file(&y1, "w2.pdf", b"a");
+    let b1 = h.fake.add_file(&y2, "w2.pdf", b"b");
+    let b2 = h.fake.add_file(&y2, "w2.pdf", b"c");
+    // A file and a folder of one name read as two items, not a clash.
+    h.fake.add_folder(ROOT_ID, "notes");
+    h.fake.add_file(ROOT_ID, "notes", b"x");
+    // A file in two folders is in each: it clashes in the first only.
+    let shared = h.fake.add_file(&y1, "1099.pdf", b"s");
+    h.fake.add_parent(&shared, &y2);
+    let y1_own = h.fake.add_file(&y1, "1099.pdf", b"t");
+    let d = h.drive();
+    let found = d.duplicates("").unwrap();
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    let want = vec![
+        Duplicate {
+            dir: "".into(),
+            dir_id: ROOT_ID.into(),
+            name: "2024".into(),
+            folders: true,
+            ids: sorted(vec![y1.clone(), y2.clone()]),
+        },
+        Duplicate {
+            dir: "".into(),
+            dir_id: ROOT_ID.into(),
+            name: "index.json".into(),
+            folders: false,
+            ids: sorted(vec![a1, a2]),
+        },
+        Duplicate {
+            dir: "2024".into(),
+            dir_id: y1.clone(),
+            name: "1099.pdf".into(),
+            folders: false,
+            ids: sorted(vec![shared.clone(), y1_own]),
+        },
+        Duplicate {
+            dir: "2024".into(),
+            dir_id: y2.clone(),
+            name: "w2.pdf".into(),
+            folders: false,
+            ids: sorted(vec![b1, b2]),
+        },
+    ];
+    assert_eq!(found, want);
+    assert!(d.duplicates("missing").unwrap().is_empty());
+    // The listing still stops at the first, as before.
+    assert_eq!(
+        reason(&d.list_entries("").unwrap_err()),
+        Some(Reason::Provider("duplicate_name"))
+    );
+}
+
+#[test]
+fn a_whole_listings_duplicates_count_shortcuts_and_walk_their_folders_once() {
+    let h = Harness::new();
+    h.signed_in();
+    let elsewhere = h.fake.add_folder(MY_DRIVE, "shared");
+    h.fake.add_file(&elsewhere, "k1.pdf", b"one");
+    h.fake.add_file(&elsewhere, "k1.pdf", b"two");
+    h.fake.add_shortcut(ROOT_ID, "shared", &elsewhere);
+    h.fake.add_shortcut(ROOT_ID, "again", &elsewhere);
+    let mine = h.fake.add_file(ROOT_ID, "a.pdf", b"mine");
+    let theirs = h.fake.add_file(MY_DRIVE, "a.pdf", b"theirs");
+    let cut = h.fake.add_shortcut(ROOT_ID, "a.pdf", &theirs);
+    // The default listing skips shortcuts: nothing clashes.
+    assert!(h.drive().duplicates("").unwrap().is_empty());
+    let found = h.drive().listing(Listing::Whole).duplicates("").unwrap();
+    let names: Vec<(String, String, usize)> = found
+        .iter()
+        .map(|d| (d.dir.clone(), d.name.clone(), d.ids.len()))
+        .collect();
+    // The shared folder is walked once, under the first path that reaches it.
+    assert_eq!(names.len(), 2, "{found:?}");
+    assert_eq!(names[0], ("".into(), "a.pdf".into(), 2));
+    assert_eq!(names[1].1, "k1.pdf");
+    let mut ids = vec![mine, cut];
+    ids.sort();
+    assert_eq!(found[0].ids, ids);
+}
+
+#[test]
+fn login_args_default_is_login_with_no_flags() {
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        login: LoginArgs,
+    }
+    let parsed = Cli::parse_from(["login"]).login;
+    let default = LoginArgs::default();
+    assert_eq!(default.wait, parsed.wait);
+    assert_eq!(default.wait, 5);
+    assert_eq!(default.no_browser, parsed.no_browser);
+    assert_eq!(default.client_stdin, parsed.client_stdin);
+    assert_eq!(default.client_file, parsed.client_file);
+    assert_eq!(default.account, parsed.account);
+    assert_eq!(default.scopes, parsed.scopes);
 }

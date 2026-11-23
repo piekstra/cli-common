@@ -2,7 +2,7 @@
 //! the same interface as the rclone [`crate::Remote`], so the read cache and
 //! [`crate::Backend`] work over it unchanged.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
@@ -135,6 +135,23 @@ pub struct TreeCopy {
     pub replaced: usize,
     pub unchanged: usize,
     pub bytes: u64,
+}
+
+/// Items that share one name in one folder ([`Drive::duplicates`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Duplicate {
+    /// The folder holding them, relative to the store's root; `""` for the
+    /// root itself. Two folders of one name share a path, so `dir_id`
+    /// tells them apart.
+    pub dir: String,
+    /// The Drive id of the folder holding them.
+    pub dir_id: String,
+    /// The name they share.
+    pub name: String,
+    /// Whether they are folders (or shortcuts to folders).
+    pub folders: bool,
+    /// Their Drive ids, sorted.
+    pub ids: Vec<String>,
 }
 
 /// A file under the store with its Drive md5: a hash listing.
@@ -721,6 +738,91 @@ impl Drive {
         }
         tree.files.sort_by(|a, b| a.under.cmp(&b.under));
         Ok(tree)
+    }
+
+    /// Every name that two or more items share in one folder under `rel`
+    /// (recursive): the groups that make a listing or a path stop with
+    /// `duplicate_name`. Drive allows them; a path cannot name one. The walk
+    /// goes on past each group, into every folder of it, so one call finds
+    /// them all. Items group as a listing reads them: by name and by whether
+    /// each is a folder, and under [`Listing::Whole`] a shortcut counts as
+    /// an item, a shortcut to a folder being walked once (by id). Empty when
+    /// `rel` is not there.
+    pub fn duplicates(&self, rel: &str) -> Result<Vec<Duplicate>, CliError> {
+        let rel = rel.trim_matches('/');
+        let Some(root) = self.folder_node(rel, false)? else {
+            return Ok(Vec::new());
+        };
+        let follow = self.follows();
+        let what = format!("listing {}", self.shown(rel));
+        let mut found = Vec::new();
+        let mut walked: HashSet<String> = HashSet::from([root.id.clone()]);
+        let mut level = vec![(root.id, String::new())];
+        while !level.is_empty() {
+            let mut next = Vec::new();
+            for batch in level.chunks(PARENTS_PER_QUERY) {
+                // Each folder is walked once, so it has one path here.
+                let holders: HashMap<&str, &str> = batch
+                    .iter()
+                    .map(|(id, under)| (id.as_str(), under.as_str()))
+                    .collect();
+                let parents: Vec<String> = holders
+                    .keys()
+                    .map(|id| format!("{} in parents", quote(id)))
+                    .collect();
+                let q = format!("({}) and trashed = false", parents.join(" or "));
+                // By the folder's id, not its path: two folders of one name
+                // share a path but are two folders.
+                let mut groups: BTreeMap<(String, String, bool, String), Vec<DriveFile>> =
+                    BTreeMap::new();
+                for f in self.api.list(&what, &q)? {
+                    if f.is_shortcut() && !follow {
+                        continue;
+                    }
+                    let folder = f.is_folder_or_points_at_one();
+                    // Every parent the batch holds: a file in two of them
+                    // is in each.
+                    for p in &f.parents {
+                        if let Some(under) = holders.get(p.as_str()) {
+                            groups
+                                .entry((under.to_string(), p.clone(), folder, f.name.clone()))
+                                .or_default()
+                                .push(f.clone());
+                        }
+                    }
+                }
+                for ((under, dir_id, folder, name), files) in groups {
+                    if files.len() > 1 {
+                        let mut ids: Vec<String> = files.iter().map(|f| f.id.clone()).collect();
+                        ids.sort();
+                        found.push(Duplicate {
+                            dir: Self::join(rel, &under),
+                            dir_id,
+                            name: name.clone(),
+                            folders: folder,
+                            ids,
+                        });
+                    }
+                    if !folder {
+                        continue;
+                    }
+                    for f in files {
+                        let id = match &f.shortcut_details {
+                            Some(d) if f.is_shortcut() => d.target_id.clone(),
+                            _ => f.id,
+                        };
+                        if walked.insert(id.clone()) {
+                            next.push((id, Self::join(&under, &name)));
+                        }
+                    }
+                }
+            }
+            level = next;
+        }
+        found.sort_by(|a, b| {
+            (&a.dir, &a.name, a.folders, &a.dir_id).cmp(&(&b.dir, &b.name, b.folders, &b.dir_id))
+        });
+        Ok(found)
     }
 
     /// Every file under `rel` (recursive) with its size and md5: one

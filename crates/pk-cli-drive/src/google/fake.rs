@@ -371,6 +371,14 @@ impl FakeDrive {
         id
     }
 
+    /// Give the item `id` another parent, as a file made before Drive's
+    /// 2020 single-parent change can have.
+    pub fn add_parent(&self, id: &str, parent: &str) {
+        if let Some(f) = self.state().files.get_mut(id) {
+            f.parents.push(parent.into());
+        }
+    }
+
     /// Move the item `id` to the trash, as another app might.
     pub fn trash(&self, id: &str) {
         if let Some(f) = self.state().files.get_mut(id) {
