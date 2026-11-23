@@ -127,6 +127,12 @@ struct State {
     revoked: Vec<String>,
     foreign_sessions: bool,
     corrupt_md5: usize,
+    /// Files whose next download comes with one byte changed.
+    damaged: std::collections::HashSet<String>,
+    /// How long each Drive request waits before it is answered.
+    latency: std::time::Duration,
+    in_flight: usize,
+    peak_in_flight: usize,
 }
 
 impl State {
@@ -185,6 +191,10 @@ impl FakeDrive {
             revoked: Vec::new(),
             foreign_sessions: false,
             corrupt_md5: 0,
+            damaged: std::collections::HashSet::new(),
+            latency: std::time::Duration::ZERO,
+            in_flight: 0,
+            peak_in_flight: 0,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -315,13 +325,35 @@ impl FakeDrive {
         self.state().corrupt_md5 += times;
     }
 
+    /// Change one byte of the next download of the file `id` (a whole read,
+    /// or its first piece), as a transfer damaged on the way would arrive.
+    /// Its md5 in a listing stays right, so the reader's check catches it.
+    pub fn damage_next_download(&self, id: &str) {
+        self.state().damaged.insert(id.to_string());
+    }
+
+    /// Hold every request this long before answering it, so requests a
+    /// client sends side by side overlap here.
+    pub fn latency(&self, each: std::time::Duration) {
+        self.state().latency = each;
+    }
+
+    /// The most requests the fake was answering at once since it started or
+    /// since [`FakeDrive::clear_requests`].
+    pub fn peak_in_flight(&self) -> usize {
+        self.state().peak_in_flight
+    }
+
     /// Every request so far, as `METHOD /path?query` (no headers or body).
     pub fn requests(&self) -> Vec<String> {
         self.state().log.clone()
     }
 
+    /// Forget the requests logged so far, and the peak of those in flight.
     pub fn clear_requests(&self) {
-        self.state().log.clear();
+        let mut s = self.state();
+        s.log.clear();
+        s.peak_in_flight = s.in_flight;
     }
 
     /// The tokens revoked through the revoke endpoint.
@@ -541,7 +573,17 @@ fn serve(conn: TcpStream, addr: SocketAddr, state: &Mutex<State>) {
     let mut reader = BufReader::new(read_half);
     let mut writer = conn;
     while let Some(req) = read_request(&mut reader) {
+        let latency = {
+            let mut s = state.lock().unwrap_or_else(|p| p.into_inner());
+            s.in_flight += 1;
+            s.peak_in_flight = s.peak_in_flight.max(s.in_flight);
+            s.latency
+        };
+        if !latency.is_zero() {
+            std::thread::sleep(latency);
+        }
         let resp = handle(&req, addr, state);
+        state.lock().unwrap_or_else(|p| p.into_inner()).in_flight -= 1;
         let reason = match resp.status {
             200 => "OK",
             204 => "No Content",
@@ -709,6 +751,12 @@ fn handle(req: &Request, addr: SocketAddr, state: &Mutex<State>) -> Response {
     let mut resp = route(req, addr, &mut s);
     if s.corrupt_md5 > 0 && corrupt(&mut resp) {
         s.corrupt_md5 -= 1;
+    }
+    if req.method == "GET" && req.query.iter().any(|(k, v)| k == "alt" && v == "media") {
+        let id = req.path.rsplit('/').next().unwrap_or_default().to_string();
+        if !resp.body.is_empty() && s.damaged.remove(&id) {
+            resp.body[0] ^= 0xff;
+        }
     }
     match fault {
         Some(f) => failed(&f),

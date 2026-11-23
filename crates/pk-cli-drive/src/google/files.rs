@@ -518,7 +518,7 @@ impl Api {
         &self,
         what: &str,
         file: &DriveFile,
-        out: &mut File,
+        out: &mut dyn Write,
     ) -> Result<(), CliError> {
         if !file.is_blob() {
             return Err(CliError::Usage(format!(
@@ -529,7 +529,7 @@ impl Api {
         }
         let url = format!("{}/files/{}", self.endpoints.api, file.id);
         let mut hash = Md5::new();
-        let write = |out: &mut File, hash: &mut Md5, body: &[u8]| {
+        let write = |out: &mut dyn Write, hash: &mut Md5, body: &[u8]| {
             hash.update(body);
             out.write_all(body)
                 .map_err(|e| CliError::Other(format!("{what}: writing the download: {e}")))
