@@ -3,7 +3,7 @@
 //! The remote is Google Drive's own API (feature `google`), or rclone
 //! (deprecated for Drive).
 
-use pk_cli_core::CliError;
+use pk_cli_core::{CliError, Reason};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
@@ -467,6 +467,7 @@ pub(crate) fn occupied(target: &str) -> CliError {
     CliError::Usage(format!(
         "refusing to overwrite {target} — a document is already there; nothing was moved"
     ))
+    .because(Reason::Provider("occupied"))
 }
 
 /// The check every backend's delete makes before anything runs: `rel` names

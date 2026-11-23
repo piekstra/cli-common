@@ -796,7 +796,7 @@ text). The rules:
 |---|---|
 | A Drive profile is one Google account | its Desktop app OAuth client (imported from Google's JSON, by file or stdin) and its token set are vault entries (`drive/<profile>/client`, `…/token`); the account's email verified at sign-in, the scopes granted and the client id are in `drive.json` beside the config. No default profile; a sign-in landing on another account is refused |
 | Mountable commands | `drive login --profile <NAME>` (PKCE, loopback redirect, the browser opened by the command), `status` (`auth-status/v1`), `logout [--revoke] [--forget]`, `about`, `client import`, `folder create\|list`, `profiles list\|remove`, run by `DriveCli::run` with the profile the CLI resolved |
-| A store is a spec | `gdrive:<profile>/<folder-id>[/<path>]`; the folder and the path are checked once, so a wrong id or a missing path is exit 4, never an empty store or a second folder (`mkdir`, or `Backend::ensure_dir`, makes the path) |
+| A store is a spec | `gdrive:<profile>/<folder-id>[/<path>]` (`root` for My Drive); the folder and the path are checked once, so a wrong id or a missing path is exit 4, never an empty store or a second folder (`mkdir`, or `Backend::ensure_dir`, makes the path) |
 | Paths, never guesses | paths resolve to ids through a map cached for the command; two items of one name are an error naming both (reason `duplicate_name`) |
 | Writes replace in place | `files.update` keeps the id; never a second file of one name; every upload checked against Drive's md5; above 5 MiB a resumable session |
 | Retries | 429, rate-limit 403s and 5xx, with backoff; a create whose answer was lost is looked up, not repeated |

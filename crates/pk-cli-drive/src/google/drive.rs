@@ -20,6 +20,7 @@ use crate::remote::{RemoteRead, RemoteStore};
 /// and optionally a path under it that is the store's root. Written
 /// `gdrive:<profile>/<folder id>[/<path>]`, which is what the cache keys its
 /// directory on and what a background refresh is handed (`--remote-spec`).
+/// The folder id `root` is the account's My Drive.
 ///
 /// Built only through [`DriveSpec::new`], [`DriveSpec::parse`] and
 /// [`DriveSpec::join`], which check the folder id and the path, so two specs
@@ -221,7 +222,10 @@ pub struct Drive {
     temp_prefix: String,
     listing: Listing,
     nodes: Mutex<HashMap<String, Node>>,
-    root_checked: std::sync::OnceLock<()>,
+    /// The spec's folder's own id, once checked: the spec's id, or for an
+    /// alias (`root`, My Drive) the id Drive answered it with, which is the
+    /// one its children name in `parents`.
+    root_checked: std::sync::OnceLock<String>,
     /// The id of the store's root: the spec's folder, or the folder at its
     /// path, once found.
     base: std::sync::OnceLock<String>,
@@ -495,9 +499,14 @@ impl Drive {
     /// value. Drive lists the children of an unknown id as nothing, so
     /// without this a wrong id, or a folder `drive.file` does not cover,
     /// reads as an empty store.
-    fn check_root(&self) -> Result<(), CliError> {
-        if self.root_checked.get().is_some() {
-            return Ok(());
+    ///
+    /// Returns the folder's own id. Drive takes `root` for My Drive wherever
+    /// a file id goes, but names My Drive by its own id in every child's
+    /// `parents`, so the store works on that id from here on: a listing
+    /// that matched children to `root` would find none.
+    fn check_root(&self) -> Result<String, CliError> {
+        if let Some(id) = self.root_checked.get() {
+            return Ok(id.clone());
         }
         let what = format!("opening {}", self.spec_text());
         let found = self.api.get_meta(&what, &self.spec.folder)?;
@@ -515,8 +524,12 @@ impl Drive {
                 ),
             );
         }
-        let _ = self.root_checked.set(());
-        Ok(())
+        let own = found.map(|f| f.id).filter(|id| check_folder_id(id).is_ok());
+        let id = own.unwrap_or_else(|| self.spec.folder.clone());
+        let _ = self.root_checked.set(id);
+        let id = self.root_checked.get().expect("set above").clone();
+        self.remember("", &id, true, false);
+        Ok(id)
     }
 
     /// The id of the store's root, once per value: the spec's folder, or the
@@ -530,11 +543,10 @@ impl Drive {
 
     /// [`Drive::base_id`], with `None` for a missing part of the path.
     fn find_base(&self, make: bool) -> Result<Option<String>, CliError> {
-        self.check_root()?;
-        if let Some(id) = self.base.get() {
-            return Ok(Some(id.clone()));
+        let mut id = self.check_root()?;
+        if let Some(base) = self.base.get() {
+            return Ok(Some(base.clone()));
         }
-        let mut id = self.spec.folder.clone();
         let mut path = String::new();
         for part in Self::segments(&self.spec.path)? {
             let next = Self::join(&path, part);
@@ -961,7 +973,8 @@ impl Drive {
                     .map(|s| s.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
-            )));
+            ))
+            .because(Reason::Provider("google_document")));
         }
         for under in files {
             let path = local.join(&under);
@@ -986,7 +999,8 @@ impl Drive {
                     .collect::<Vec<_>>()
                     .join(", "),
                 if conflicts.len() > 3 { ", …" } else { "" }
-            )));
+            ))
+            .because(Reason::Provider("existing_differs")));
         }
         for (under, path, id) in plan {
             let dest = Self::join(rel, &under);
@@ -1020,10 +1034,47 @@ impl Drive {
 
     /// Download everything under `rel` into `local` (made `0700`), skipping
     /// files already there with the same md5. Files are written owner-only.
+    ///
+    /// Every path comes from the names of items in Drive, which another
+    /// account can choose when the folder is shared or reached through a
+    /// shortcut. One that is not a plain relative path once joined onto
+    /// `local` (an item named `..`, or one whose name starts with `/`), or two
+    /// items that land on one local path (a name holding `/` beside the
+    /// folders it spells, or two names that differ only in case, which
+    /// macOS's file system holds as one), refuses the whole copy before
+    /// anything is written, with reason `unsafe_name`.
     pub fn fetch_tree(&self, rel: &str, local: &Path) -> Result<usize, CliError> {
         let rel = &self.abs(rel);
+        let files = self.tree(rel)?.files;
+        let mut landing = HashSet::new();
+        for Listed { under, .. } in &files {
+            let plain = !under.is_empty()
+                && Path::new(under)
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)));
+            let key: Vec<String> = Path::new(under)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+                .collect();
+            if !plain || !landing.insert(key) {
+                return Err(CliError::Other(format!(
+                    "{} holds an item whose name would land at `{}` under {}, {}; nothing was \
+                     downloaded",
+                    self.shown(rel),
+                    under.escape_debug(),
+                    local.display(),
+                    if plain {
+                        "where another item lands too"
+                    } else {
+                        "outside it or on no file at all"
+                    }
+                ))
+                .because(Reason::Provider("unsafe_name"))
+                .with_remedy("rename the item in Google Drive, then copy again"));
+            }
+        }
         let mut fetched = 0;
-        for Listed { under, file: f, .. } in self.tree(rel)?.files {
+        for Listed { under, file: f, .. } in files {
             if !f.is_blob() {
                 continue;
             }
