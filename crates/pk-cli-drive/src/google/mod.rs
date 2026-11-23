@@ -53,7 +53,7 @@ pub use commands::{
     ProfilesCommand, Scope, StatusArgs,
 };
 pub use drive::{
-    check_folder_id, Drive, DriveSpec, Existing, Hashed, Listing, TreeCopy, SPEC_PREFIX,
+    check_folder_id, Drive, DriveSpec, Duplicate, Existing, Hashed, Listing, TreeCopy, SPEC_PREFIX,
 };
 pub use endpoints::Endpoints;
 pub use files::{md5_file, About, DriveFile, ShortcutDetails, RESUMABLE_ABOVE};
