@@ -172,6 +172,12 @@ make verify            # the whole Rust gate CI runs
 make connector-check   # connector/: typecheck, tests, local OAuth + MCP e2e (needs Node 22.18+)
 ```
 
+## Privacy
+
+[PRIVACY.md](PRIVACY.md) is the privacy policy for the Google user data the
+CLIs on `pk-cli-drive` read through their OAuth client. A Cloud project's
+consent screen links to it.
+
 ## License
 
 MIT OR Apache-2.0, at your option.

@@ -22,6 +22,11 @@ under `drive.file`, files one client of the project makes are visible to
 its others (another CLI's Desktop client, a web app's Web client), and a
 revoke through any of them ends them all ([Scope](#scope-drivefile-or-full-drive)).
 
+A Cloud project published In production needs an application home page and a
+privacy policy link on its Branding page before Google enables "Publish app".
+The repository's [PRIVACY.md](../../../PRIVACY.md) is written for that link: it
+covers what a CLI on this crate reads from Google and where it keeps it.
+
 1. In the owner's Google Cloud project, enable the Google Drive API.
 2. Configure the OAuth consent screen (Google Auth Platform → Branding,
    Audience, Data Access). Under Data Access, add the scopes the CLI asks for
