@@ -155,6 +155,35 @@ pub struct Duplicate {
     pub ids: Vec<String>,
 }
 
+/// What an item of [`Drive::list_items`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemKind {
+    Folder,
+    /// A file with bytes of its own, and an md5.
+    File,
+    /// One of Google's own documents (Docs, Sheets, Slides …): no bytes of
+    /// its own, so no size or md5.
+    Document,
+}
+
+/// One item of a listing for showing ([`Drive::list_items`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ListedItem {
+    /// Its path under the listed folder. Two items can share one.
+    pub rel: String,
+    /// Its Drive id; for a shortcut that was followed, its target's.
+    pub id: String,
+    pub kind: ItemKind,
+    pub size: Option<u64>,
+    /// Unix seconds.
+    pub modified: Option<i64>,
+    pub md5: Option<String>,
+    /// Reached through a shortcut: the item is one, or a folder on its path
+    /// is (under [`Listing::Whole`]).
+    pub via_shortcut: bool,
+}
+
 /// A file under the store with its Drive md5: a hash listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hashed {
@@ -835,6 +864,96 @@ impl Drive {
             (&a.dir, &a.name, a.folders, &a.dir_id).cmp(&(&b.dir, &b.name, b.folders, &b.dir_id))
         });
         Ok(found)
+    }
+
+    /// The items in the folder `rel`, or with `recursive` every item below
+    /// it, for showing. Every item is listed with its id, even one that
+    /// shares its name with another: a path cannot name such an item, so
+    /// `list_here`, `list_entries`, the tree copies and the writes refuse it
+    /// (`duplicate_name`), but a listing shows them all, as `rclone lsjson`
+    /// does. What is listed follows [`Listing`]: under `Whole`, Google's
+    /// documents and shortcuts, each shortcut as its target (one whose
+    /// target is gone stops the listing); under `Bytes`, only folders and
+    /// files with bytes. A recursive listing walks each folder once, so a
+    /// shortcut to a folder already walked is listed but not walked again.
+    /// Sorted by path, then id. Empty when `rel` is not there.
+    pub fn list_items(&self, rel: &str, recursive: bool) -> Result<Vec<ListedItem>, CliError> {
+        let abs = self.abs(rel);
+        let abs = abs.trim_matches('/');
+        let Some(root) = self.folder_node(abs, false)? else {
+            return Ok(Vec::new());
+        };
+        let follow = self.follows();
+        let what = format!("listing {}", self.shown(abs));
+        let mut out = Vec::new();
+        let mut walked: HashSet<String> = HashSet::from([root.id.clone()]);
+        let mut level = vec![(root.id, String::new(), root.via)];
+        while !level.is_empty() {
+            let mut next = Vec::new();
+            for batch in level.chunks(PARENTS_PER_QUERY) {
+                // Each folder is walked once, so it has one path here.
+                let holders: HashMap<&str, (&str, bool)> = batch
+                    .iter()
+                    .map(|(id, under, via)| (id.as_str(), (under.as_str(), *via)))
+                    .collect();
+                let parents: Vec<String> = holders
+                    .keys()
+                    .map(|id| format!("{} in parents", quote(id)))
+                    .collect();
+                let q = format!("({}) and trashed = false", parents.join(" or "));
+                for f in self.api.list(&what, &q)? {
+                    let shortcut = f.is_shortcut();
+                    if shortcut && !follow {
+                        continue;
+                    }
+                    if !follow && !f.is_folder() && !f.is_blob() {
+                        continue;
+                    }
+                    // Every parent the batch holds: a file in two of them
+                    // is in each.
+                    let places: Vec<(&str, bool)> = f
+                        .parents
+                        .iter()
+                        .filter_map(|p| holders.get(p.as_str()).copied())
+                        .collect();
+                    let Some(&(first_under, _)) = places.first() else {
+                        continue;
+                    };
+                    let item = if shortcut {
+                        let at = Self::join(abs, &Self::join(first_under, &f.name));
+                        self.follow(&at, &f)?
+                    } else {
+                        f.clone()
+                    };
+                    let kind = if item.is_folder() {
+                        ItemKind::Folder
+                    } else if item.is_blob() {
+                        ItemKind::File
+                    } else {
+                        ItemKind::Document
+                    };
+                    for (under, via) in places {
+                        let rel = Self::join(under, &f.name);
+                        let via = via || shortcut;
+                        if kind == ItemKind::Folder && recursive && walked.insert(item.id.clone()) {
+                            next.push((item.id.clone(), rel.clone(), via));
+                        }
+                        out.push(ListedItem {
+                            rel,
+                            id: item.id.clone(),
+                            kind,
+                            size: item.size(),
+                            modified: item.modified(),
+                            md5: item.md5(),
+                            via_shortcut: via,
+                        });
+                    }
+                }
+            }
+            level = next;
+        }
+        out.sort_by(|a, b| (&a.rel, &a.id).cmp(&(&b.rel, &b.id)));
+        Ok(out)
     }
 
     /// Every file under `rel` (recursive) with its size and md5: one
