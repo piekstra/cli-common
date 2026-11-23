@@ -755,7 +755,7 @@ impl DriveCli {
         }
         let api = self.api(&profile)?;
         let what = format!("making the folder `{name}` in Drive profile `{profile}`");
-        let mut found = api.named(&what, "root", name, true)?;
+        let mut found = api.named(&what, "root", name, Some(true))?;
         let (folder, existing) =
             match found.len() {
                 0 => (api.create_folder(&what, "root", name)?, false),

@@ -14,8 +14,10 @@ use serde_json::{json, Value};
 use super::api::{is_ambiguous, is_transient, Answer, Api};
 
 pub(crate) const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
+pub(crate) const SHORTCUT_MIME: &str = "application/vnd.google-apps.shortcut";
 /// The fields every file answer carries.
-pub(crate) const FIELDS: &str = "id,name,mimeType,parents,size,md5Checksum,modifiedTime";
+pub(crate) const FIELDS: &str =
+    "id,name,mimeType,parents,size,md5Checksum,modifiedTime,shortcutDetails";
 /// Larger files go up in a resumable session, in [`CHUNK`] pieces.
 pub const RESUMABLE_ABOVE: u64 = 5 * 1024 * 1024;
 /// A resumable upload's piece: a multiple of 256 KiB, as Drive requires.
@@ -44,11 +46,36 @@ pub struct DriveFile {
     /// Only a metadata read asks for it; listings exclude trashed items.
     #[serde(default)]
     pub trashed: bool,
+    /// What a shortcut points at; `None` for anything else.
+    #[serde(default)]
+    pub shortcut_details: Option<ShortcutDetails>,
+}
+
+/// A shortcut's target, as Drive describes it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutDetails {
+    pub target_id: String,
+    #[serde(default)]
+    pub target_mime_type: Option<String>,
 }
 
 impl DriveFile {
     pub fn is_folder(&self) -> bool {
         self.mime_type == FOLDER_MIME
+    }
+
+    pub fn is_shortcut(&self) -> bool {
+        self.mime_type == SHORTCUT_MIME
+    }
+
+    /// A folder, or a shortcut to one.
+    pub(crate) fn is_folder_or_points_at_one(&self) -> bool {
+        self.is_folder()
+            || self
+                .shortcut_details
+                .as_ref()
+                .is_some_and(|d| d.target_mime_type.as_deref() == Some(FOLDER_MIME))
     }
 
     /// A file with bytes of its own: not a folder, a shortcut or one of
@@ -213,20 +240,24 @@ impl Api {
         answer.json(what).map(Some)
     }
 
-    /// The children of `parent` named `name`, of the kind asked for.
+    /// The children of `parent` named `name`: folders (`Some(true)`),
+    /// anything else (`Some(false)`), or every kind (`None`).
     pub(crate) fn named(
         &self,
         what: &str,
         parent: &str,
         name: &str,
-        folders: bool,
+        folders: Option<bool>,
     ) -> Result<Vec<DriveFile>, CliError> {
-        let kind = if folders { "=" } else { "!=" };
+        let kind = match folders {
+            Some(true) => format!(" and mimeType = {}", quote(FOLDER_MIME)),
+            Some(false) => format!(" and mimeType != {}", quote(FOLDER_MIME)),
+            None => String::new(),
+        };
         let q = format!(
-            "name = {} and {} in parents and trashed = false and mimeType {kind} {}",
+            "name = {} and {} in parents and trashed = false{kind}",
             quote(name),
             quote(parent),
-            quote(FOLDER_MIME)
         );
         Ok(self
             .list(what, &q)?
@@ -255,7 +286,11 @@ impl Api {
             }) {
                 Ok(answer) => return answer.json(what),
                 Err(e) if is_ambiguous(&e) && attempt < 2 => {
-                    if let Some(made) = self.named(what, parent, name, true)?.into_iter().next() {
+                    if let Some(made) = self
+                        .named(what, parent, name, Some(true))?
+                        .into_iter()
+                        .next()
+                    {
                         return Ok(made);
                     }
                 }
@@ -342,7 +377,7 @@ impl Api {
                             // at all. A file of the name with other bytes is
                             // another writer's: never replaced, never joined
                             // by a second of the name.
-                            let found = self.named(what, parent, name, false)?;
+                            let found = self.named(what, parent, name, Some(false))?;
                             if let Some(f) = found.iter().find(|f| f.md5().as_deref() == Some(md5))
                             {
                                 return Ok(f.clone());

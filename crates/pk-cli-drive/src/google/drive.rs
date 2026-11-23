@@ -145,10 +145,50 @@ pub struct Hashed {
     pub md5: Option<String>,
 }
 
+/// What a listing of a [`Drive`] store shows, set with [`Drive::listing`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Listing {
+    /// Files with bytes of their own. Google's own documents (Docs, Sheets)
+    /// and shortcuts are left out, and paths do not go through shortcuts.
+    #[default]
+    Bytes,
+    /// Everything in the tree, as rclone's default listing shows it:
+    /// Google's own documents with no size or md5, and each shortcut as its
+    /// target under the shortcut's path (a shortcut to a folder is walked).
+    /// Reads follow shortcuts; a write, move or delete through one is exit 2
+    /// with reason `shortcut`. A shortcut whose target is gone stops the
+    /// listing (`shortcut_target_missing`), as does one inside the folder it
+    /// points at (`shortcut_loop`): the listing is whole or an error.
+    Whole,
+}
+
 #[derive(Debug, Clone)]
 struct Node {
     id: String,
     folder: bool,
+    /// Reached through a shortcut: this one, or a folder above it.
+    via: bool,
+}
+
+/// An item at a path: its own, or the target of the shortcut there.
+struct Found {
+    file: DriveFile,
+    via: bool,
+}
+
+/// One file of a tree listing, by its path under the listed folder.
+struct Listed {
+    under: String,
+    file: DriveFile,
+    via: bool,
+}
+
+#[derive(Default)]
+struct Tree {
+    files: Vec<Listed>,
+    /// Folders reached through a shortcut, by their path under the listed
+    /// folder.
+    via_dirs: Vec<String>,
 }
 
 /// A folder in one Google account, addressed by store-relative paths.
@@ -162,6 +202,7 @@ pub struct Drive {
     api: Api,
     spec: DriveSpec,
     temp_prefix: String,
+    listing: Listing,
     nodes: Mutex<HashMap<String, Node>>,
     root_checked: std::sync::OnceLock<()>,
     /// The id of the store's root: the spec's folder, or the folder at its
@@ -184,12 +225,14 @@ impl Drive {
             Node {
                 id: spec.folder.clone(),
                 folder: true,
+                via: false,
             },
         );
         Drive {
             api,
             spec,
             temp_prefix: crate::rclone::DEFAULT_TEMP_PREFIX.into(),
+            listing: Listing::default(),
             nodes: Mutex::new(nodes),
             root_checked: std::sync::OnceLock::new(),
             base: std::sync::OnceLock::new(),
@@ -201,6 +244,17 @@ impl Drive {
     pub fn temp_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.temp_prefix = prefix.into();
         self
+    }
+
+    /// What listings show, and whether paths follow shortcuts: see
+    /// [`Listing`]. [`Listing::Bytes`] unless set.
+    pub fn listing(mut self, listing: Listing) -> Self {
+        self.listing = listing;
+        self
+    }
+
+    fn follows(&self) -> bool {
+        self.listing == Listing::Whole
     }
 
     pub fn spec(&self) -> &DriveSpec {
@@ -286,12 +340,13 @@ impl Drive {
             .cloned()
     }
 
-    fn remember(&self, rel: &str, id: &str, folder: bool) {
+    fn remember(&self, rel: &str, id: &str, folder: bool, via: bool) {
         self.nodes.lock().unwrap_or_else(|p| p.into_inner()).insert(
             rel.to_string(),
             Node {
                 id: id.to_string(),
                 folder,
+                via,
             },
         );
     }
@@ -320,22 +375,101 @@ impl Drive {
         )
     }
 
+    fn through_shortcut(&self, rel: &str) -> CliError {
+        CliError::Usage(format!(
+            "{} is a Google Drive shortcut, or inside a folder one points at; writes, moves \
+             and deletes do not go through shortcuts",
+            self.shown(rel)
+        ))
+        .because(Reason::Provider("shortcut"))
+        .with_remedy(
+            "change the item where it is in Google Drive, or replace the shortcut with a copy",
+        )
+    }
+
+    fn shortcut_missing(&self, rel: &str, shortcut: &DriveFile) -> CliError {
+        CliError::Other(format!(
+            "{} is a shortcut (id {}) to an item that is gone or that this sign-in cannot \
+             see; a whole listing leaves nothing out, so it stopped",
+            self.shown(rel),
+            shortcut.id
+        ))
+        .because(Reason::Provider("shortcut_target_missing"))
+        .with_remedy(
+            "open the folder in Google Drive and remove the shortcut, or restore what it points at",
+        )
+    }
+
+    fn shortcut_loop(&self, rel: &str) -> CliError {
+        CliError::Other(format!(
+            "{} is a shortcut to a folder that holds it, so a whole listing would never end",
+            self.shown(rel)
+        ))
+        .because(Reason::Provider("shortcut_loop"))
+        .with_remedy("open the folder in Google Drive and remove the shortcut")
+    }
+
+    /// The item the shortcut at `rel` points at: there, out of the trash,
+    /// and of the kind the shortcut says.
+    fn follow(&self, rel: &str, shortcut: &DriveFile) -> Result<DriveFile, CliError> {
+        let missing = || self.shortcut_missing(rel, shortcut);
+        let Some(details) = &shortcut.shortcut_details else {
+            return Err(missing());
+        };
+        if check_folder_id(&details.target_id).is_err() {
+            return Err(missing());
+        }
+        let what = format!("following the shortcut {}", self.shown(rel));
+        match self.api.get_meta(&what, &details.target_id)? {
+            Some(t)
+                if !t.trashed
+                    && !t.is_shortcut()
+                    && t.is_folder() == shortcut.is_folder_or_points_at_one() =>
+            {
+                Ok(t)
+            }
+            _ => Err(missing()),
+        }
+    }
+
     /// The one child of `parent_id` named `name` of the kind asked for.
+    /// With `follow`, a shortcut counts as the kind it points at and comes
+    /// back as its target, marked `via`; without, shortcuts are not there.
     fn child(
         &self,
         parent_rel: &str,
         parent_id: &str,
         name: &str,
         folder: bool,
-    ) -> Result<Option<DriveFile>, CliError> {
-        let what = format!("looking up {}", self.shown(&Self::join(parent_rel, name)));
-        let mut found = self.api.named(&what, parent_id, name, folder)?;
-        if !folder {
-            found.retain(|f| f.mime_type != "application/vnd.google-apps.shortcut");
-        }
+        follow: bool,
+    ) -> Result<Option<Found>, CliError> {
+        let at = Self::join(parent_rel, name);
+        let what = format!("looking up {}", self.shown(&at));
+        let mut found = if follow {
+            let mut all = self.api.named(&what, parent_id, name, None)?;
+            all.retain(|f| f.is_folder_or_points_at_one() == folder);
+            all
+        } else {
+            let mut found = self.api.named(&what, parent_id, name, Some(folder))?;
+            found.retain(|f| !f.is_shortcut());
+            found
+        };
         match found.len() {
             0 => Ok(None),
-            1 => Ok(found.pop()),
+            1 => {
+                let f = found.pop().expect("one item");
+                Ok(Some(if f.is_shortcut() {
+                    Found {
+                        file: self.follow(&at, &f)?,
+                        via: true,
+                    }
+                } else {
+                    Found {
+                        file: f,
+                        via: false,
+                    }
+                }))
+            }
             _ => Err(self.duplicate(parent_rel, name, &found)),
         }
     }
@@ -387,15 +521,16 @@ impl Drive {
         let mut path = String::new();
         for part in Self::segments(&self.spec.path)? {
             let next = Self::join(&path, part);
-            id = match self.child(&path, &id, part, true)? {
-                Some(f) => f.id,
+            // The spec's own path never goes through a shortcut.
+            id = match self.child(&path, &id, part, true, false)? {
+                Some(f) => f.file.id,
                 None if make => {
                     let what = format!("making the folder {}", self.shown(&next));
                     self.api.create_folder(&what, &id, part)?.id
                 }
                 None => return Ok(None),
             };
-            self.remember(&next, &id, true);
+            self.remember(&next, &id, true, false);
             path = next;
         }
         let _ = self.base.set(id.clone());
@@ -415,6 +550,12 @@ impl Drive {
     /// The id of the folder at `rel` (a path from [`Drive::abs`]); with
     /// `create`, the missing folders below the store's root are made.
     fn folder_id(&self, rel: &str, create: bool) -> Result<Option<String>, CliError> {
+        Ok(self.folder_node(rel, create)?.map(|n| n.id))
+    }
+
+    /// [`Drive::folder_id`], and whether the path went through a shortcut.
+    /// `create` is for a write, so it refuses such a path.
+    fn folder_node(&self, rel: &str, create: bool) -> Result<Option<Node>, CliError> {
         let parts = Self::segments(rel)?;
         let base = Self::segments(&self.spec.path)?;
         let Some(below) = parts.strip_prefix(base.as_slice()) else {
@@ -424,20 +565,28 @@ impl Drive {
             )));
         };
         let mut id = self.base_id(false)?;
+        let mut via = false;
         let mut path = self.spec.path.clone();
         for part in below {
             let next = Self::join(&path, part);
             match self.cached(&next) {
-                Some(node) if node.folder => id = node.id,
-                _ => match self.child(&path, &id, part, true)? {
+                Some(node) if node.folder => {
+                    id = node.id;
+                    via |= node.via;
+                }
+                _ => match self.child(&path, &id, part, true, self.follows())? {
                     Some(f) => {
-                        self.remember(&next, &f.id, true);
-                        id = f.id;
+                        via |= f.via;
+                        self.remember(&next, &f.file.id, true, via);
+                        id = f.file.id;
                     }
                     None if create => {
+                        if via {
+                            return Err(self.through_shortcut(&next));
+                        }
                         let what = format!("making the folder {}", self.shown(&next));
                         let made = self.api.create_folder(&what, &id, part)?;
-                        self.remember(&next, &made.id, true);
+                        self.remember(&next, &made.id, true, false);
                         id = made.id;
                     }
                     None => return Ok(None),
@@ -445,104 +594,157 @@ impl Drive {
             }
             path = next;
         }
-        Ok(Some(id))
+        if create && via {
+            return Err(self.through_shortcut(rel));
+        }
+        Ok(Some(Node {
+            id,
+            folder: true,
+            via,
+        }))
     }
 
-    /// The file (not folder) at `rel`, looked up afresh.
-    fn file(&self, rel: &str) -> Result<Option<(String, DriveFile)>, CliError> {
+    /// The file (not folder) at `rel`, looked up afresh: its folder's id,
+    /// the file (a shortcut's target, when followed), and whether the path
+    /// went through a shortcut.
+    fn file(&self, rel: &str) -> Result<Option<(String, DriveFile, bool)>, CliError> {
         let (dir, name) = Self::split(rel)?;
-        let Some(parent) = self.folder_id(&dir, false)? else {
+        let Some(parent) = self.folder_node(&dir, false)? else {
             return Ok(None);
         };
-        let found = self.child(&dir, &parent, &name, false)?;
-        if let Some(f) = &found {
-            self.remember(rel, &f.id, false);
-        }
-        Ok(found.map(|f| (parent, f)))
+        let Some(found) = self.child(&dir, &parent.id, &name, false, self.follows())? else {
+            return Ok(None);
+        };
+        let via = parent.via || found.via;
+        self.remember(rel, &found.file.id, false, via);
+        Ok(Some((parent.id, found.file, via)))
     }
 
     // ── reads ───────────────────────────────────────────────────────────
 
-    /// Everything under the folder `rel`, as (path under `rel`, file):
-    /// one query per level of folders, up to 40 folders a query. A missing
-    /// folder is empty.
-    fn tree(&self, rel: &str) -> Result<Vec<(String, DriveFile)>, CliError> {
+    /// Everything under the folder `rel`, by path under `rel`: one query
+    /// per level of folders, up to 40 folders a query. A missing folder is
+    /// empty. Under [`Listing::Whole`], shortcuts are followed.
+    fn tree(&self, rel: &str) -> Result<Tree, CliError> {
+        struct Pending {
+            id: String,
+            under: String,
+            via: bool,
+            /// The folders from the listed one down to this one, by id.
+            chain: Vec<String>,
+        }
         let rel = rel.trim_matches('/');
-        let Some(root) = self.folder_id(rel, false)? else {
-            return Ok(Vec::new());
+        let Some(root) = self.folder_node(rel, false)? else {
+            return Ok(Tree::default());
         };
+        let follow = self.follows();
         let what = format!("listing {}", self.shown(rel));
-        let mut out = Vec::new();
-        // Folders to list next: id → path under `rel`.
-        let mut level: Vec<(String, String)> = vec![(root, String::new())];
+        let mut tree = Tree::default();
+        let mut level = vec![Pending {
+            id: root.id.clone(),
+            under: String::new(),
+            via: root.via,
+            chain: vec![root.id],
+        }];
         while !level.is_empty() {
             let mut next = Vec::new();
             for batch in level.chunks(PARENTS_PER_QUERY) {
-                let paths: HashMap<&str, &str> = batch
-                    .iter()
-                    .map(|(id, p)| (id.as_str(), p.as_str()))
-                    .collect();
-                let parents: Vec<String> = batch
-                    .iter()
-                    .map(|(id, _)| format!("{} in parents", quote(id)))
+                // Two shortcuts can reach one folder: its children are
+                // listed under each path.
+                let mut holders: HashMap<&str, Vec<&Pending>> = HashMap::new();
+                for p in batch {
+                    holders.entry(p.id.as_str()).or_default().push(p);
+                }
+                let parents: Vec<String> = holders
+                    .keys()
+                    .map(|id| format!("{} in parents", quote(id)))
                     .collect();
                 let q = format!("({}) and trashed = false", parents.join(" or "));
                 let mut by_parent: HashMap<(&str, bool, String), Vec<DriveFile>> = HashMap::new();
                 for f in self.api.list(&what, &q)? {
-                    let Some(parent) = f
-                        .parents
-                        .iter()
-                        .find_map(|p| paths.get_key_value(p.as_str()).map(|(k, _)| *k))
-                    else {
+                    let Some(at) = f.parents.iter().find_map(|p| holders.get(p.as_str())) else {
                         continue;
                     };
-                    if f.mime_type == "application/vnd.google-apps.shortcut" {
+                    if f.is_shortcut() && !follow {
                         continue;
                     }
-                    by_parent
-                        .entry((parent, f.is_folder(), f.name.clone()))
-                        .or_default()
-                        .push(f);
+                    let folder = f.is_folder_or_points_at_one();
+                    for p in at {
+                        by_parent
+                            .entry((p.under.as_str(), folder, f.name.clone()))
+                            .or_default()
+                            .push(f.clone());
+                    }
                 }
-                for ((parent, folder, name), mut files) in by_parent {
-                    let under = Self::join(paths[parent], &name);
+                let pending: HashMap<&str, &Pending> =
+                    batch.iter().map(|p| (p.under.as_str(), p)).collect();
+                for ((parent_under, folder, name), mut files) in by_parent {
+                    let p = pending[parent_under];
+                    let under = Self::join(parent_under, &name);
+                    let path = Self::join(rel, &under);
                     if files.len() > 1 {
-                        return Err(self.duplicate(&Self::join(rel, paths[parent]), &name, &files));
+                        return Err(self.duplicate(&Self::join(rel, parent_under), &name, &files));
                     }
                     let f = files.pop().expect("one file");
-                    self.remember(&Self::join(rel, &under), &f.id, folder);
-                    if folder {
-                        next.push((f.id.clone(), under));
+                    let (f, via) = if f.is_shortcut() {
+                        (self.follow(&path, &f)?, true)
                     } else {
-                        out.push((under, f));
+                        (f, p.via)
+                    };
+                    let via = via || p.via;
+                    self.remember(&path, &f.id, folder, via);
+                    if folder {
+                        if p.chain.contains(&f.id) {
+                            return Err(self.shortcut_loop(&path));
+                        }
+                        if via {
+                            tree.via_dirs.push(under.clone());
+                        }
+                        let mut chain = p.chain.clone();
+                        chain.push(f.id.clone());
+                        next.push(Pending {
+                            id: f.id,
+                            under,
+                            via,
+                            chain,
+                        });
+                    } else {
+                        tree.files.push(Listed {
+                            under,
+                            file: f,
+                            via,
+                        });
                     }
                 }
             }
             level = next;
         }
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(out)
+        tree.files.sort_by(|a, b| a.under.cmp(&b.under));
+        Ok(tree)
     }
 
     /// Every file under `rel` (recursive) with its size and md5: one
-    /// listing, Google's own documents left out.
+    /// listing, Google's own documents left out. Under [`Listing::Whole`] a
+    /// shortcut to a file is its target.
     pub fn hashes(&self, rel: &str) -> Result<Vec<Hashed>, CliError> {
         let abs = self.abs(rel);
         let rel = rel.trim_matches('/');
         Ok(self
             .tree(&abs)?
+            .files
             .into_iter()
-            .filter(|(_, f)| f.is_blob())
-            .map(|(under, f)| Hashed {
-                rel: Self::join(rel, &under),
-                size: f.size().unwrap_or(0),
-                md5: f.md5(),
+            .filter(|l| l.file.is_blob())
+            .map(|l| Hashed {
+                rel: Self::join(rel, &l.under),
+                size: l.file.size().unwrap_or(0),
+                md5: l.file.md5(),
             })
             .collect())
     }
 
     /// The files directly in the folder `rel`, not below it, never from a
-    /// cache. Empty when the folder is not there.
+    /// cache. Empty when the folder is not there. What counts as a file
+    /// follows [`Listing`].
     pub fn list_here(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
         let rel = &self.abs(rel);
         let Some(id) = self.folder_id(rel, false)? else {
@@ -554,19 +756,30 @@ impl Drive {
             quote(&id),
             quote(super::files::FOLDER_MIME)
         );
+        let follow = self.follows();
         let mut seen: HashMap<String, Vec<DriveFile>> = HashMap::new();
         for f in self.api.list(&what, &q)? {
-            if f.is_blob() {
+            let file = if follow {
+                !f.is_folder_or_points_at_one()
+            } else {
+                f.is_blob()
+            };
+            if file {
                 seen.entry(f.name.clone()).or_default().push(f);
             }
         }
         let mut out = Vec::new();
-        for (name, files) in seen {
+        for (name, mut files) in seen {
             if files.len() > 1 {
                 return Err(self.duplicate(rel, &name, &files));
             }
-            let f = &files[0];
-            out.push(entry(name, f));
+            let f = files.pop().expect("one file");
+            let f = if f.is_shortcut() {
+                self.follow(&Self::join(rel, &name), &f)?
+            } else {
+                f
+            };
+            out.push(entry(name, &f));
         }
         out.sort_by(|a, b| a.rel.cmp(&b.rel));
         Ok(out)
@@ -575,7 +788,7 @@ impl Drive {
     /// The md5 Drive holds for one file; `None` when it is not there.
     pub fn md5(&self, rel: &str) -> Result<Option<String>, CliError> {
         let rel = &self.abs(rel);
-        Ok(self.file(rel)?.and_then(|(_, f)| f.md5()))
+        Ok(self.file(rel)?.and_then(|(_, f, _)| f.md5()))
     }
 
     /// The account and its storage (replaces `rclone about`).
@@ -598,13 +811,41 @@ impl Drive {
         let mut files = Vec::new();
         walk(local, local, &mut files)?;
         files.sort();
-        let there: HashMap<String, DriveFile> = self.tree(rel)?.into_iter().collect();
+        let tree = self.tree(rel)?;
+        let via_dirs = tree.via_dirs;
+        let there: HashMap<String, (DriveFile, bool)> = tree
+            .files
+            .into_iter()
+            .map(|l| (l.under, (l.file, l.via)))
+            .collect();
+        let through: Vec<&String> = files
+            .iter()
+            .filter(|u| {
+                there.get(*u).is_some_and(|(_, via)| *via)
+                    || via_dirs.iter().any(|d| u.starts_with(&format!("{d}/")))
+            })
+            .collect();
+        if !through.is_empty() {
+            return Err(CliError::Usage(format!(
+                "refusing to copy onto {} path(s) under {} that are Google Drive shortcuts or \
+                 inside a folder one points at ({}); nothing was uploaded",
+                through.len(),
+                self.shown(rel),
+                through
+                    .iter()
+                    .take(3)
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .because(Reason::Provider("shortcut")));
+        }
         let mut plan = Vec::new();
         let mut report = TreeCopy::default();
         let mut conflicts = Vec::new();
         let native: Vec<&String> = files
             .iter()
-            .filter(|u| there.get(*u).is_some_and(|f| !f.is_blob()))
+            .filter(|u| there.get(*u).is_some_and(|(f, _)| !f.is_blob()))
             .collect();
         if !native.is_empty() {
             return Err(CliError::Usage(format!(
@@ -624,9 +865,9 @@ impl Drive {
             let path = local.join(&under);
             let md5 = md5_file(&path)?;
             match there.get(&under) {
-                Some(f) if f.md5().as_deref() == Some(md5.as_str()) => report.unchanged += 1,
+                Some((f, _)) if f.md5().as_deref() == Some(md5.as_str()) => report.unchanged += 1,
                 Some(_) if existing == Existing::Keep => conflicts.push(under.clone()),
-                Some(f) => plan.push((under, path, Some(f.id.clone()))),
+                Some((f, _)) => plan.push((under, path, Some(f.id.clone()))),
                 None => plan.push((under, path, None)),
             }
         }
@@ -666,7 +907,7 @@ impl Drive {
                         },
                         &Source::File(&path),
                     )?;
-                    self.remember(&dest, &made.id, false);
+                    self.remember(&dest, &made.id, false, false);
                     report.uploaded += 1;
                 }
             }
@@ -680,7 +921,7 @@ impl Drive {
     pub fn fetch_tree(&self, rel: &str, local: &Path) -> Result<usize, CliError> {
         let rel = &self.abs(rel);
         let mut fetched = 0;
-        for (under, f) in self.tree(rel)? {
+        for Listed { under, file: f, .. } in self.tree(rel)?.files {
             if !f.is_blob() {
                 continue;
             }
@@ -728,11 +969,12 @@ impl Drive {
         let what = format!("writing {}", self.shown(rel));
         let (dir, name) = Self::split(rel)?;
         let parent = self.folder_id(&dir, true)?.expect("made when missing");
-        let existing = self.child(&dir, &parent, &name, false)?;
+        let existing = self.child(&dir, &parent, &name, false, self.follows())?;
         let made = match existing {
-            Some(f) => {
+            Some(Found { via: true, .. }) => return Err(self.through_shortcut(rel)),
+            Some(Found { file: f, .. }) => {
                 if f.md5() == Some(source.md5()?) {
-                    self.remember(rel, &f.id, false);
+                    self.remember(rel, &f.id, false, false);
                     return Ok(());
                 }
                 self.api
@@ -747,27 +989,31 @@ impl Drive {
                 &source,
             )?,
         };
-        self.remember(rel, &made.id, false);
+        self.remember(rel, &made.id, false, false);
         Ok(())
     }
 
     fn move_file(&self, rel_from: &str, rel_to: &str, clobber: bool) -> Result<(), CliError> {
         let from = self.shown(rel_from);
-        let Some((from_parent, file)) = self.file(rel_from)? else {
+        let Some((from_parent, file, via)) = self.file(rel_from)? else {
             return Err(CliError::NotFound(format!("{from}: nothing to move")));
         };
+        if via {
+            return Err(self.through_shortcut(rel_from));
+        }
         let (dir, name) = Self::split(rel_to)?;
         let to_parent = self.folder_id(&dir, true)?.expect("made when missing");
-        let replaced = match self.child(&dir, &to_parent, &name, false)? {
-            Some(there) if there.id == file.id => return Ok(()),
+        let replaced = match self.child(&dir, &to_parent, &name, false, self.follows())? {
+            Some(there) if there.via => return Err(self.through_shortcut(rel_to)),
+            Some(there) if there.file.id == file.id => return Ok(()),
             Some(_) if !clobber => return Err(occupied(&self.shown(rel_to))),
-            there => there,
+            there => there.map(|t| t.file),
         };
         let what = format!("moving {from} to {}", self.shown(rel_to));
         self.api
             .rename_move(&what, &file.id, &name, &from_parent, &to_parent)?;
         self.forget(rel_from);
-        self.remember(rel_to, &file.id, false);
+        self.remember(rel_to, &file.id, false, false);
         // The old destination goes to the trash only once the move is done,
         // so a failure between leaves two files of the name (reported as
         // such, both ids named) rather than none.
@@ -778,7 +1024,7 @@ impl Drive {
         if !clobber {
             // Another writer may have taken the name meanwhile: put ours back
             // rather than leave two files of one name.
-            let found = self.api.named(&what, &to_parent, &name, false)?;
+            let found = self.api.named(&what, &to_parent, &name, Some(false))?;
             if found.len() > 1 {
                 let (from_dir, from_name) = Self::split(rel_from)?;
                 let _ = from_dir;
@@ -848,7 +1094,7 @@ impl RemoteRead for Drive {
 
     fn cat(&self, rel: &str) -> Result<Option<String>, CliError> {
         let rel = &self.abs(rel);
-        let Some((_, f)) = self.file(rel)? else {
+        let Some((_, f, _)) = self.file(rel)? else {
             return Ok(None);
         };
         let what = format!("reading {}", self.shown(rel));
@@ -868,15 +1114,19 @@ impl RemoteRead for Drive {
         Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
 
-    /// Every file under `rel` with its size, modified time and md5. Google's
-    /// own documents (no bytes of their own) and shortcuts are left out.
+    /// Every file under `rel` with its size, modified time and md5. Under
+    /// [`Listing::Bytes`], Google's own documents (no bytes of their own)
+    /// and shortcuts are left out; under [`Listing::Whole`], a document has
+    /// no size or md5 and a shortcut is its target.
     fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
         let rel = &self.abs(rel);
+        let whole = self.follows();
         Ok(self
             .tree(rel)?
+            .files
             .into_iter()
-            .filter(|(_, f)| f.is_blob())
-            .map(|(under, f)| entry(under, &f))
+            .filter(|l| whole || l.file.is_blob())
+            .map(|l| entry(l.under, &l.file))
             .collect())
     }
 }
@@ -898,7 +1148,7 @@ impl RemoteStore for Drive {
 
     fn copy_out(&self, rel: &str, local: &Path) -> Result<(), CliError> {
         let rel = &self.abs(rel);
-        let Some((_, f)) = self.file(rel)? else {
+        let Some((_, f, _)) = self.file(rel)? else {
             return Err(CliError::NotFound(format!(
                 "{}: no such file",
                 self.shown(rel)
@@ -921,9 +1171,12 @@ impl RemoteStore for Drive {
     fn delete_file(&self, rel: &str) -> Result<bool, CliError> {
         check_deletable(rel)?;
         let rel = &self.abs(rel);
-        let Some((_, f)) = self.file(rel)? else {
+        let Some((_, f, via)) = self.file(rel)? else {
             return Ok(false);
         };
+        if via {
+            return Err(self.through_shortcut(rel));
+        }
         let what = format!("deleting {}", self.shown(rel));
         let gone = self.api.trash(&what, &f.id)?;
         self.forget(rel);
@@ -946,7 +1199,10 @@ impl RemoteStore for Drive {
         let Some(parent) = self.folder_id(&dir, false)? else {
             return Ok(false);
         };
-        if self.child(&dir, &parent, &name, false)?.is_some() {
+        if self
+            .child(&dir, &parent, &name, false, self.follows())?
+            .is_some()
+        {
             return Ok(true);
         }
         Ok(self.folder_id(rel, false)?.is_some())
@@ -960,29 +1216,43 @@ impl RemoteStore for Drive {
 
     fn list_dirs(&self, rel: &str) -> Result<Vec<String>, CliError> {
         let rel = &self.abs(rel);
-        let Some(id) = self.folder_id(rel, false)? else {
+        let Some(dir) = self.folder_node(rel, false)? else {
             return Ok(Vec::new());
         };
         let what = format!("listing {}", self.shown(rel));
+        let follow = self.follows();
+        let kinds = if follow {
+            format!(
+                "(mimeType = {} or mimeType = {})",
+                quote(super::files::FOLDER_MIME),
+                quote(super::files::SHORTCUT_MIME)
+            )
+        } else {
+            format!("mimeType = {}", quote(super::files::FOLDER_MIME))
+        };
         let q = format!(
-            "{} in parents and trashed = false and mimeType = {}",
-            quote(&id),
-            quote(super::files::FOLDER_MIME)
+            "{} in parents and trashed = false and {kinds}",
+            quote(&dir.id)
         );
         let mut seen: HashMap<String, Vec<DriveFile>> = HashMap::new();
         for f in self.api.list(&what, &q)? {
-            seen.entry(f.name.clone()).or_default().push(f);
+            if f.is_folder_or_points_at_one() {
+                seen.entry(f.name.clone()).or_default().push(f);
+            }
         }
         let mut names = Vec::new();
-        for (name, found) in seen {
+        for (name, mut found) in seen {
             if found.len() > 1 {
                 return Err(self.duplicate(rel, &name, &found));
             }
-            self.remember(
-                &Self::join(rel.trim_matches('/'), &name),
-                &found[0].id,
-                true,
-            );
+            let path = Self::join(rel.trim_matches('/'), &name);
+            let f = found.pop().expect("one folder");
+            let (id, via) = if f.is_shortcut() {
+                (self.follow(&path, &f)?.id, true)
+            } else {
+                (f.id, false)
+            };
+            self.remember(&path, &id, true, dir.via || via);
             names.push(name);
         }
         names.sort();

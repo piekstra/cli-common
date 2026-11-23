@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.36.0 — 2026-11-23
+
+- `pk-cli-drive`: `Drive::listing(Listing::Whole)` lists a Drive store as rclone's default
+  listing does, for a CLI whose folder other apps also fill. Google's own documents are listed
+  with no size or md5; a shortcut is its target under the shortcut's path, and a shortcut to a
+  folder is walked. Reads follow shortcuts. Writes, moves and deletes onto or through one are exit
+  2 with reason `shortcut`. A shortcut whose target is gone (`shortcut_target_missing`) or that
+  points at a folder above it (`shortcut_loop`) stops the listing, so it is whole or an error. The
+  default, `Listing::Bytes`, is unchanged.
+- `pk-cli-drive`: `DriveFile::shortcut_details` (a new public field, `ShortcutDetails`) and
+  `DriveFile::is_shortcut`. Every file answer now asks Drive for `shortcutDetails`.
+- `pk-cli-drive`: the fake Drive server has `add_shortcut` and `trash`.
+
 ## v0.35.1 — 2026-11-23
 
 - `pk-cli-drive`: the `drive.file` scope test is settled and in `docs/google-drive.md`, in Google's
