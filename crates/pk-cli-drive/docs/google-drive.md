@@ -107,7 +107,7 @@ nothing, so without that check a wrong id would read as an empty store. A
 spec's path is held to the same rule: a part that is not there (each name
 must match exactly, capitals included) is exit 4 naming it, for reads and
 writes alike, so a typo never reads as empty or makes a second folder.
-`mkdir("")` is the one call that makes the path. A spec is built only through
+`mkdir` (and `Backend::ensure_dir`, since `exists` answers `false` for a missing path) is the one call that makes the path. A spec is built only through
 `DriveSpec::new`, `parse` and `join`, so two specs naming one store are equal
 and print the same text.
 

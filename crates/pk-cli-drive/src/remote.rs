@@ -41,7 +41,12 @@ pub trait RemoteStore: RemoteRead + sealed::Sealed {
     /// Delete one file: `true` when it was deleted, `false` when no file
     /// was there. Never a folder.
     fn delete_file(&self, rel: &str) -> Result<bool, CliError>;
+    /// Whether a file or folder is at `rel` ("" is the store's root).
+    /// `false` for any missing path, the store's own included, never an
+    /// error: [`crate::Backend::ensure_dir`] asks this, then calls `mkdir`.
     fn exists(&self, rel: &str) -> Result<bool, CliError>;
+    /// Make the folder `rel` and any missing parents, the store's own path
+    /// included; nothing when it is there.
     fn mkdir(&self, rel: &str) -> Result<(), CliError>;
     /// The immediate subfolders of `rel`, sorted, without a trailing `/`.
     fn list_dirs(&self, rel: &str) -> Result<Vec<String>, CliError>;

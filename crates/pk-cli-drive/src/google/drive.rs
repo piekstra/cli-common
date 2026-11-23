@@ -169,6 +169,10 @@ pub struct Drive {
     base: std::sync::OnceLock<String>,
 }
 
+/// The remedy for a spec whose path is not in Drive.
+const MISSING_PATH_REMEDY: &str =
+    "check the path in the CLI's settings; each folder name must match exactly, capitals included";
+
 /// Folders asked about in one listing query (`'a' in parents or …`).
 const PARENTS_PER_QUERY: usize = 40;
 
@@ -370,9 +374,14 @@ impl Drive {
     /// empty store and a write never makes a second folder beside the right
     /// one. Only `make` (an explicit `mkdir`) creates the path.
     fn base_id(&self, make: bool) -> Result<String, CliError> {
+        self.find_base(make)?.ok_or_else(|| self.missing_base())
+    }
+
+    /// [`Drive::base_id`], with `None` for a missing part of the path.
+    fn find_base(&self, make: bool) -> Result<Option<String>, CliError> {
         self.check_root()?;
         if let Some(id) = self.base.get() {
-            return Ok(id.clone());
+            return Ok(Some(id.clone()));
         }
         let mut id = self.spec.folder.clone();
         let mut path = String::new();
@@ -384,21 +393,23 @@ impl Drive {
                     let what = format!("making the folder {}", self.shown(&next));
                     self.api.create_folder(&what, &id, part)?.id
                 }
-                None => return Err(CliError::NotFound(format!(
-                    "opening {}: there is no folder `{next}` in the folder {}",
-                    self.spec_text(),
-                    self.spec.folder
-                ))
-                .with_remedy(
-                    "check the path in the CLI's settings; each folder name must match exactly, \
-                         capitals included",
-                )),
+                None => return Ok(None),
             };
             self.remember(&next, &id, true);
             path = next;
         }
         let _ = self.base.set(id.clone());
-        Ok(id)
+        Ok(Some(id))
+    }
+
+    fn missing_base(&self) -> CliError {
+        CliError::NotFound(format!(
+            "opening {}: there is no folder `{}` in the folder {}",
+            self.spec_text(),
+            self.spec.path,
+            self.spec.folder
+        ))
+        .with_remedy(MISSING_PATH_REMEDY)
     }
 
     /// The id of the folder at `rel` (a path from [`Drive::abs`]); with
@@ -919,10 +930,16 @@ impl RemoteStore for Drive {
         Ok(gone)
     }
 
-    /// A file or a folder at `rel`.
+    /// A file or a folder at `rel`. `false`, not exit 4, when the store's own
+    /// path is missing, as for any missing path: `Backend::ensure_dir` asks
+    /// this before it makes the folder.
     fn exists(&self, rel: &str) -> Result<bool, CliError> {
-        if Self::segments(rel)?.is_empty() {
-            return self.base_id(false).map(|_| true);
+        let empty = Self::segments(rel)?.is_empty();
+        if self.find_base(false)?.is_none() {
+            return Ok(false);
+        }
+        if empty {
+            return Ok(true);
         }
         let rel = &self.abs(rel);
         let (dir, name) = Self::split(rel)?;

@@ -828,9 +828,20 @@ fn a_spec_with_a_path_is_a_store_under_that_folder() {
     let d = h.cli().drive(&inbox).unwrap().without_backoff();
     assert_eq!(d.write("scan.pdf", "s").unwrap_err().exit_code(), 4);
     assert_eq!(h.fake.count("", "inbox"), 0);
-    // mkdir makes it.
+    // exists answers false, as for any missing path, so the backend's
+    // ensure_dir makes it, below the path too.
     let d = h.cli().drive(&inbox).unwrap().without_backoff();
-    d.mkdir("").unwrap();
+    assert!(!d.exists("").unwrap());
+    assert!(!d.exists("sub").unwrap());
+    let backend = Backend::Drive(h.cli().drive(&inbox).unwrap().without_backoff());
+    assert!(backend.ensure_dir("sub").unwrap());
+    assert!(h.fake.find("inbox/sub").is_some());
+    assert!(!backend.ensure_dir("").unwrap());
+    let fresh = DriveSpec::parse(&format!("{base}/new")).unwrap();
+    let backend = Backend::Drive(h.cli().drive(&fresh).unwrap().without_backoff());
+    assert!(backend.ensure_dir("").unwrap());
+    assert!(h.fake.find("new").is_some());
+    let d = h.cli().drive(&inbox).unwrap().without_backoff();
     assert!(d.exists("").unwrap());
     d.write("scan.pdf", "s").unwrap();
     assert_eq!(h.fake.content("inbox/scan.pdf").unwrap(), b"s");
