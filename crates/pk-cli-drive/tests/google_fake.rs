@@ -13,8 +13,8 @@ use pk_cli_core::{CliError, Reason};
 use pk_cli_drive::google::fake::{FakeDrive, When, ACCOUNT, MY_DRIVE, ROOT_ID};
 use pk_cli_drive::google::{
     token_entry, ClientCommand, Drive, DriveCli, DriveCommand, DriveSpec, Duplicate, Existing,
-    FolderCommand, Listing, LoginArgs, LogoutArgs, ProfileStore, ProfilesCommand, Retry, Scope,
-    StatusArgs,
+    FolderCommand, ItemKind, Listing, LoginArgs, LogoutArgs, ProfileStore, ProfilesCommand, Retry,
+    Scope, StatusArgs,
 };
 use pk_cli_drive::{reason, Backend, CachePolicy, CachedRemote, RemoteRead, RemoteStore};
 
@@ -1332,4 +1332,153 @@ fn a_tree_download_refuses_names_that_leave_the_folder_or_land_twice() {
     h.fake.add_google_doc(&shared, "Fine.TXT");
     assert_eq!(h.drive().fetch_tree("shared", &down).unwrap(), 2);
     assert_eq!(std::fs::read(down.join("a/b.txt")).unwrap(), b"one");
+}
+
+#[test]
+fn only_an_empty_folder_is_trashed_and_never_through_a_shortcut() {
+    let h = Harness::new();
+    h.signed_in();
+    let d = h.drive();
+    let empty = h.fake.add_folder(ROOT_ID, "empty");
+    let full = h.fake.add_folder(ROOT_ID, "full");
+    let kept = h.fake.add_file(&full, "kept.txt", b"kept");
+    let leftover = h.fake.add_folder(ROOT_ID, "leftover");
+    let old = h.fake.add_file(&leftover, "old.txt", b"old");
+    h.fake.trash(&old);
+    let theirs = h.fake.add_folder(MY_DRIVE, "Theirs");
+    let inner = h.fake.add_folder(&theirs, "inner");
+    h.fake.add_shortcut(ROOT_ID, "linked", &theirs);
+    h.fake.add_file(ROOT_ID, "plain.txt", b"p");
+
+    assert!(d.trash_empty_folder("empty").unwrap());
+    assert!(h.fake.is_trashed(&empty));
+    assert!(!d.exists("empty").unwrap());
+    // What is already in the trash does not count.
+    assert!(d.trash_empty_folder("leftover").unwrap());
+    assert!(h.fake.is_trashed(&leftover));
+
+    let e = d.trash_empty_folder("full").unwrap_err();
+    assert_eq!((e.exit_code(), reason(&e)), (2, Some(reason::NOT_EMPTY)));
+    assert!(!h.fake.is_trashed(&full) && !h.fake.is_trashed(&kept));
+
+    // A shortcut is refused under either listing. Under the whole listing
+    // a path through one is refused too; under the bytes listing it is not
+    // there at all.
+    let whole = h.drive().listing(Listing::Whole);
+    for through in ["linked", "linked/inner"] {
+        let e = whole.trash_empty_folder(through).unwrap_err();
+        assert_eq!(
+            (e.exit_code(), reason(&e)),
+            (2, Some(reason::SHORTCUT)),
+            "{through}"
+        );
+    }
+    let e = d.trash_empty_folder("linked").unwrap_err();
+    assert_eq!(reason(&e), Some(reason::SHORTCUT));
+    assert!(!d.trash_empty_folder("linked/inner").unwrap());
+    assert!(!h.fake.is_trashed(&theirs) && !h.fake.is_trashed(&inner));
+
+    assert!(!d.trash_empty_folder("missing").unwrap());
+    assert!(
+        !d.trash_empty_folder("plain.txt").unwrap(),
+        "a file is no folder"
+    );
+    assert_eq!(d.trash_empty_folder("").unwrap_err().exit_code(), 2);
+
+    let top = h.fake.add_folder(MY_DRIVE, "top-empty");
+    let at_root = h.drive_at(&DriveSpec::parse(&format!("gdrive:{PROFILE}/root")).unwrap());
+    assert!(at_root.trash_empty_folder("top-empty").unwrap());
+    assert!(h.fake.is_trashed(&top));
+}
+
+#[test]
+fn a_listing_shows_every_item_with_its_id_even_one_that_shares_a_name() {
+    use ItemKind::{Document, File, Folder};
+    let h = Harness::new();
+    h.signed_in();
+    let f = &h.fake;
+    let one = f.add_file(ROOT_ID, "same.pdf", b"one");
+    let two = f.add_file(ROOT_ID, "same.pdf", b"two");
+    let dir1 = f.add_folder(ROOT_ID, "dir");
+    let dir2 = f.add_folder(ROOT_ID, "dir");
+    let x1 = f.add_file(&dir1, "x.txt", b"x1");
+    let x2 = f.add_file(&dir2, "x.txt", b"x2");
+    let doc = f.add_google_doc(ROOT_ID, "notes");
+    let target = f.add_file(MY_DRIVE, "elsewhere.pdf", b"%PDF");
+    f.add_shortcut(ROOT_ID, "link.pdf", &target);
+    // A shortcut back up to the listed folder: listed, not walked again.
+    f.add_shortcut(&dir1, "up", ROOT_ID);
+    let old = f.add_file(&dir2, "old.txt", b"old");
+    f.trash(&old);
+
+    let whole = h.drive().listing(Listing::Whole);
+    // The strict reads refuse the shared name; the listing shows both.
+    let e = whole.list_here("").unwrap_err();
+    assert_eq!(reason(&e), Some(reason::DUPLICATE_NAME));
+
+    // The listing's own order: by path, then id.
+    let sorted = |mut v: Vec<(String, String, ItemKind)>| {
+        v.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        v
+    };
+    let rows = |items: &[pk_cli_drive::google::ListedItem]| {
+        items
+            .iter()
+            .map(|i| (i.rel.clone(), i.id.clone(), i.kind))
+            .collect::<Vec<_>>()
+    };
+    let row = |rel: &str, id: &str, kind| (rel.to_string(), id.to_string(), kind);
+
+    let here = whole.list_items("", false).unwrap();
+    assert_eq!(
+        rows(&here),
+        sorted(vec![
+            row("dir", &dir1, Folder),
+            row("dir", &dir2, Folder),
+            row("link.pdf", &target, File),
+            row("notes", &doc, Document),
+            row("same.pdf", &one, File),
+            row("same.pdf", &two, File),
+        ])
+    );
+    let link = here.iter().find(|i| i.rel == "link.pdf").unwrap();
+    assert!(link.via_shortcut);
+    assert_eq!(link.size, Some(4));
+    let first = here.iter().find(|i| i.id == one).unwrap();
+    assert_eq!(
+        first.md5.as_deref(),
+        Some("f97c5d29941bfb1b2fdab0874906ab82")
+    );
+    assert!(here.iter().find(|i| i.id == doc).unwrap().md5.is_none());
+
+    let deep = whole.list_items("", true).unwrap();
+    assert_eq!(
+        rows(&deep),
+        sorted(vec![
+            row("dir", &dir1, Folder),
+            row("dir", &dir2, Folder),
+            row("dir/up", ROOT_ID, Folder),
+            row("dir/x.txt", &x1, File),
+            row("dir/x.txt", &x2, File),
+            row("link.pdf", &target, File),
+            row("notes", &doc, Document),
+            row("same.pdf", &one, File),
+            row("same.pdf", &two, File),
+        ])
+    );
+
+    // The bytes listing: no documents, no shortcuts.
+    let bytes = h.drive().list_items("", true).unwrap();
+    assert_eq!(
+        rows(&bytes),
+        sorted(vec![
+            row("dir", &dir1, Folder),
+            row("dir", &dir2, Folder),
+            row("dir/x.txt", &x1, File),
+            row("dir/x.txt", &x2, File),
+            row("same.pdf", &one, File),
+            row("same.pdf", &two, File),
+        ])
+    );
+    assert!(whole.list_items("nothing", true).unwrap().is_empty());
 }

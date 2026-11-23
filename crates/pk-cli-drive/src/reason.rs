@@ -31,6 +31,10 @@ pub const DUPLICATE_NAME: Reason = Reason::Provider("duplicate_name");
 /// A write, move or delete onto or through a Google Drive shortcut. Exit 2.
 pub const SHORTCUT: Reason = Reason::Provider("shortcut");
 
+/// `Drive::trash_empty_folder` found the folder holding something outside
+/// the trash, and trashed nothing. Exit 2.
+pub const NOT_EMPTY: Reason = Reason::Provider("not_empty");
+
 /// A whole listing met a shortcut whose target is gone or out of the
 /// sign-in's sight.
 pub const SHORTCUT_TARGET_MISSING: Reason = Reason::Provider("shortcut_target_missing");

@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.37.3 — 2026-11-23
+
+- `pk-cli-drive`: `Drive::trash_empty_folder` moves an empty folder to Drive's trash, where it is
+  recoverable for 30 days, as `rclone rmdir` removes an empty directory. It returns `false` when no
+  folder is at the path. It refuses, with nothing trashed, the store's own folder (exit 2), a
+  folder holding anything outside the trash (exit 2, reason `not_empty`), and a shortcut or a path
+  through one under the whole listing (exit 2, reason `shortcut`), so neither a shortcut nor the
+  folder it points at is trashed. `pk_cli_drive::reason::NOT_EMPTY` is the new reason.
+- `pk-cli-drive`: `Drive::list_items(rel, recursive)` lists a folder, or everything below it, for
+  showing. Every item is a `ListedItem` with its path, Drive id, kind (`ItemKind::Folder`, `File`
+  or `Document`), size, modified time, md5 and whether a shortcut led to it. Items that share a
+  name are each listed, as `rclone lsjson` lists them. `list_here`, `list_entries` and the other
+  listings that paths and copies are built from still stop with `duplicate_name`, and so did every
+  listing of a folder holding such a pair, which a real My Drive often does. It follows `Listing`
+  as the others do, and walks each folder once, so a shortcut back to a folder already walked is
+  listed but not walked again.
+- `pk-cli-drive`: `profiles remove`'s help named a `profiles add` command that does not exist. It
+  now says the profile is NAME, or else the one the profile flag names.
+
 ## v0.37.2 — 2026-11-23
 
 - `pk-cli-drive`: the folder id `root` is My Drive. `gdrive:<profile>/root` is the top of the
