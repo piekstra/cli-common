@@ -9,6 +9,8 @@
   says every client of the project sees the files. The docs say where vault entries rest:
   owner-only files under `~/.config/<bin>/vault/`, sealed with the key the CLI's keychain item
   holds.
+- `cookie` 0.18.3 for RUSTSEC-2026-0594 (private cookie nonces could repeat in a process that
+  forks).
 
 ## v0.35.0 — 2026-11-23
 
