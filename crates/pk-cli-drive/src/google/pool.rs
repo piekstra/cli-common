@@ -86,29 +86,64 @@ mod tests {
 
     #[test]
     fn a_halting_answer_starts_no_later_job() {
-        for workers in [1, 4] {
-            let started = AtomicUsize::new(0);
-            let answers = run(
-                (0..100).collect(),
-                workers,
-                |i: i32| {
-                    started.fetch_add(1, Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(2));
-                    if i == 3 {
-                        Err(i)
-                    } else {
-                        Ok(i)
-                    }
-                },
-                |r| r.is_err(),
-            );
-            assert_eq!(answers[3], Some(Err(3)), "{workers}");
-            assert!(answers[..3].iter().all(Option::is_some), "{workers}");
-            // At most the jobs already running when item 3 failed ran after it.
-            let ran = started.load(Ordering::SeqCst);
-            assert!(ran <= 4 + workers, "{workers}: {ran} started");
-            assert!(answers[50..].iter().all(Option::is_none), "{workers}");
-        }
+        // One at a time: exactly the items up to the failure run.
+        let started = AtomicUsize::new(0);
+        let answers = run(
+            (0..100).collect(),
+            1,
+            |i: i32| {
+                started.fetch_add(1, Ordering::SeqCst);
+                if i == 3 {
+                    Err(i)
+                } else {
+                    Ok(i)
+                }
+            },
+            |r| r.is_err(),
+        );
+        assert_eq!(started.load(Ordering::SeqCst), 4);
+        assert_eq!(answers[3], Some(Err(3)));
+        assert!(answers[4..].iter().all(Option::is_none));
+
+        // Side by side: the jobs before the failure wait until it is seen,
+        // so the failure lands while they are still running. A job that
+        // starts after that has slipped through the moment between the
+        // failure and the halt; each worker can start at most one, since
+        // such a job holds its worker far longer than that moment lasts.
+        let workers = 4;
+        let failed = AtomicBool::new(false);
+        let late = AtomicUsize::new(0);
+        let answers = run(
+            (0..100).collect(),
+            workers,
+            |i: i32| {
+                if i == 3 {
+                    return Err(i);
+                }
+                if failed.load(Ordering::SeqCst) {
+                    late.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(200));
+                    return Ok(i);
+                }
+                while !failed.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(i)
+            },
+            |r| {
+                let halts = r.is_err();
+                if halts {
+                    failed.store(true, Ordering::SeqCst);
+                }
+                halts
+            },
+        );
+        assert_eq!(answers[3], Some(Err(3)));
+        assert!(answers[..3].iter().all(Option::is_some));
+        let late = late.load(Ordering::SeqCst);
+        assert!(late < workers, "{late} jobs started after the failure");
+        let answered = answers.iter().filter(|a| a.is_some()).count();
+        assert!(answered <= 4 + late, "{answered} answered");
     }
 
     #[test]

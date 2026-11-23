@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use pk_cli_config::profile::ProfileName;
@@ -260,6 +260,28 @@ pub struct Drive {
     base: std::sync::OnceLock<String>,
     /// The most downloads in flight at once ([`Drive::transfers`]).
     transfers: usize,
+    /// Held from a folder found missing until it is made and remembered, so
+    /// two threads writing into one new folder make it once.
+    making: Mutex<()>,
+    /// The paths a single write on this `Drive` is under way at, so two
+    /// threads writing one new path make one file ([`Drive::claim`]).
+    writing: Mutex<HashSet<String>>,
+    /// Signalled whenever a path in `writing` is let go.
+    written: Condvar,
+}
+
+/// A path held for one write; see [`Drive::claim`].
+struct Claim<'a> {
+    drive: &'a Drive,
+    rel: String,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        let mut busy = self.drive.writing.lock().unwrap_or_else(|p| p.into_inner());
+        busy.remove(&self.rel);
+        self.drive.written.notify_all();
+    }
 }
 
 /// The most transfers a [`Drive`] runs at once: downloads in
@@ -303,6 +325,9 @@ impl Drive {
             root_checked: std::sync::OnceLock::new(),
             base: std::sync::OnceLock::new(),
             transfers: MAX_TRANSFERS,
+            making: Mutex::new(()),
+            writing: Mutex::new(HashSet::new()),
+            written: Condvar::new(),
         }
     }
 
@@ -612,10 +637,7 @@ impl Drive {
             // The spec's own path never goes through a shortcut.
             id = match self.child(&path, &id, part, true, false)? {
                 Some(f) => f.file.id,
-                None if make => {
-                    let what = format!("making the folder {}", self.shown(&next));
-                    self.api.create_folder(&what, &id, part)?.id
-                }
+                None if make => self.make_folder(&next, &id, part)?,
                 None => return Ok(None),
             };
             self.remember(&next, &id, true, false);
@@ -672,10 +694,7 @@ impl Drive {
                         if via {
                             return Err(self.through_shortcut(&next));
                         }
-                        let what = format!("making the folder {}", self.shown(&next));
-                        let made = self.api.create_folder(&what, &id, part)?;
-                        self.remember(&next, &made.id, true, false);
-                        id = made.id;
+                        id = self.make_folder(&next, &id, part)?;
                     }
                     None => return Ok(None),
                 },
@@ -690,6 +709,22 @@ impl Drive {
             folder: true,
             via,
         }))
+    }
+
+    /// Make the folder `name` in `parent`, at `rel`, and remember it, unless
+    /// another thread on this `Drive` made it since it was found missing.
+    /// Only one thread makes folders at a time, and each looks again once
+    /// it holds the turn, so two writers into one new folder never make two
+    /// folders of the name.
+    fn make_folder(&self, rel: &str, parent: &str, name: &str) -> Result<String, CliError> {
+        let _turn = self.making.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(node) = self.cached(rel).filter(|n| n.folder) {
+            return Ok(node.id);
+        }
+        let what = format!("making the folder {}", self.shown(rel));
+        let made = self.api.create_folder(&what, parent, name)?;
+        self.remember(rel, &made.id, true, false);
+        Ok(made.id)
     }
 
     /// The file (not folder) at `rel`, looked up afresh: its folder's id,
@@ -986,9 +1021,6 @@ impl Drive {
         Ok(out)
     }
 
-    /// Every file under `rel` (recursive) with its size and md5: one
-    /// listing, Google's own documents left out. Under [`Listing::Whole`] a
-    /// shortcut to a file is its target.
     /// The bytes of many files, in `rels`' order, each path with its own
     /// answer: `Ok(None)` when no file is there, as [`RemoteRead::cat`]
     /// answers, and an error that is that path's alone (two items of one
@@ -1149,6 +1181,9 @@ impl Drive {
         }
     }
 
+    /// Every file under `rel` (recursive) with its size and md5: one
+    /// listing, Google's own documents left out. Under [`Listing::Whole`] a
+    /// shortcut to a file is its target.
     pub fn hashes(&self, rel: &str) -> Result<Vec<Hashed>, CliError> {
         let abs = self.abs(rel);
         let rel = rel.trim_matches('/');
@@ -1537,7 +1572,24 @@ impl Drive {
         })
     }
 
+    /// Wait until no other thread on this `Drive` is writing `rel`, then
+    /// hold it until the claim is dropped. A write looks for the file and
+    /// then makes it, so two at once would each find none and make two files
+    /// of the name; held, the second finds the first's file and replaces it.
+    fn claim(&self, rel: &str) -> Claim<'_> {
+        let mut busy = self.writing.lock().unwrap_or_else(|p| p.into_inner());
+        while busy.contains(rel) {
+            busy = self.written.wait(busy).unwrap_or_else(|p| p.into_inner());
+        }
+        busy.insert(rel.to_string());
+        Claim {
+            drive: self,
+            rel: rel.to_string(),
+        }
+    }
+
     fn upload_to(&self, rel: &str, source: Source<'_>) -> Result<(), CliError> {
+        let _held = self.claim(rel);
         let what = format!("writing {}", self.shown(rel));
         let (dir, name) = Self::split(rel)?;
         let parent = self.folder_id(&dir, true)?.expect("made when missing");
@@ -1574,6 +1626,7 @@ impl Drive {
             return Err(self.through_shortcut(rel_from));
         }
         let (dir, name) = Self::split(rel_to)?;
+        let _held = self.claim(rel_to);
         let to_parent = self.folder_id(&dir, true)?.expect("made when missing");
         let replaced = match self.child(&dir, &to_parent, &name, false, self.follows())? {
             Some(there) if there.via => return Err(self.through_shortcut(rel_to)),

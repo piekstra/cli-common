@@ -1542,9 +1542,8 @@ fn many_files_are_found_in_one_listing_and_read_side_by_side_each_with_its_own_a
     let log = f.requests();
 
     assert_eq!(got.len(), rels.len());
-    for ((rel, answer), asked) in got.iter().zip(&rels) {
+    for ((rel, _), asked) in got.iter().zip(&rels) {
         assert_eq!(rel, asked, "answers come in the order asked");
-        let _ = answer;
     }
     for (i, (rel, bytes)) in want.iter().enumerate() {
         assert_eq!(&got[i].0, rel);
@@ -1767,7 +1766,10 @@ fn an_upload_that_fails_stops_the_tree_and_a_rerun_finishes_it_without_doubles()
     let h = Harness::new();
     h.signed_in();
     let local = h.tmp.path().join("up");
-    let files = local_tree(&local, 6, 8);
+    // 8 folders of 10 files, each with a nested folder of 2: 96 files.
+    let files = local_tree(&local, 8, 10);
+    h.fake.latency(std::time::Duration::from_millis(5));
+    h.fake.clear_requests();
     h.fake.fail_next(
         "uploadType=multipart",
         403,
@@ -1780,9 +1782,20 @@ fn an_upload_that_fails_stops_the_tree_and_a_rerun_finishes_it_without_doubles()
         .put_tree(&local, "inbox", Existing::Keep)
         .unwrap_err();
     assert!(err.to_string().contains("uploading"), "{err}");
+    // The failure stopped the tree: only the uploads already under way
+    // when it came were sent, not the rest of the 96.
+    let sent = h
+        .fake
+        .requests()
+        .iter()
+        .filter(|l| l.contains("uploadType=multipart"))
+        .count();
+    // Without the stop all 96 are sent; with it, the few in flight when the
+    // failure came. Half is a bound a loaded machine stays well inside.
+    assert!(sent < files.len() / 2, "{sent} of 96 uploads sent");
     let up = h.drive().put_tree(&local, "inbox", Existing::Keep).unwrap();
     assert_eq!(up.uploaded + up.unchanged, files.len());
-    assert!(up.uploaded >= 1, "the refused file is uploaded now");
+    assert!(up.uploaded >= files.len() - sent, "{up:?}");
     for (rel, bytes) in &files {
         let (dir, name) = rel.rsplit_once('/').unwrap();
         assert_eq!(h.fake.count(&format!("inbox/{dir}"), name), 1, "{rel}");
@@ -1798,14 +1811,19 @@ fn a_download_that_fails_stops_the_tree_and_keeps_no_partial_file() {
     let h = Harness::new();
     h.signed_in();
     let local = h.tmp.path().join("up");
-    let files = local_tree(&local, 4, 6);
+    let files = local_tree(&local, 8, 10);
     h.drive().put_tree(&local, "inbox", Existing::Keep).unwrap();
-    let damaged = h.fake.find("inbox/d02/f03.txt").unwrap();
+    // The first file in the tree's order.
+    let damaged = h.fake.find("inbox/d00/deep/f00.txt").unwrap();
     h.fake.damage_next_download(&damaged);
+    h.fake.latency(std::time::Duration::from_millis(5));
+    h.fake.clear_requests();
     let down = h.tmp.path().join("down");
     let err = h.drive().fetch_tree("inbox", &down).unwrap_err();
     assert!(err.to_string().contains("md5"), "{err}");
-    assert!(!down.join("d02/f03.txt").exists());
+    assert!(!down.join("d00/deep/f00.txt").exists());
+    let read = downloads(&h.fake.requests());
+    assert!(read < files.len() / 2, "{read} of 96 downloads sent");
     let parts: Vec<_> = walk_names(&down)
         .into_iter()
         .filter(|n| n.ends_with(".part"))
@@ -1831,4 +1849,46 @@ fn walk_names(dir: &Path) -> Vec<String> {
         }
     }
     out
+}
+
+#[test]
+fn threads_writing_into_one_new_folder_make_it_once() {
+    let h = Harness::new();
+    h.signed_in();
+    h.fake.latency(std::time::Duration::from_millis(5));
+    let d = h.drive();
+    std::thread::scope(|s| {
+        for i in 0..8 {
+            let d = &d;
+            s.spawn(move || {
+                d.write(&format!("new/deep/f{i}.txt"), &format!("file {i}"))
+                    .unwrap();
+            });
+        }
+    });
+    assert_eq!(h.fake.count("", "new"), 1);
+    assert_eq!(h.fake.count("new", "deep"), 1);
+    for i in 0..8 {
+        assert_eq!(
+            h.fake.content(&format!("new/deep/f{i}.txt")).unwrap(),
+            format!("file {i}").into_bytes()
+        );
+    }
+}
+
+#[test]
+fn threads_writing_one_new_file_make_one_file() {
+    let h = Harness::new();
+    h.signed_in();
+    h.fake.latency(std::time::Duration::from_millis(5));
+    let d = h.drive();
+    std::thread::scope(|s| {
+        for i in 0..6 {
+            let d = &d;
+            s.spawn(move || d.write("inbox/same.txt", &format!("writer {i}")).unwrap());
+        }
+    });
+    assert_eq!(h.fake.count("inbox", "same.txt"), 1);
+    let last = String::from_utf8(h.fake.content("inbox/same.txt").unwrap()).unwrap();
+    assert!(last.starts_with("writer "), "{last}");
 }

@@ -18,7 +18,12 @@
   tree's order, stops the copy: no further transfer starts, and what was already copied stays, as
   before. `Drive::transfers(n)` lowers both limits, `1` being one at a time;
   `pk_cli_drive::google::MAX_TRANSFERS` is 8.
-- `pk-cli-drive`: `Drive` is `Send` and `Sync`, so one store can be shared between threads.
+- `pk-cli-drive`: `Drive` is `Send` and `Sync`, so one store can be shared between threads. Threads
+  writing into one new folder make it once, and threads writing one file (`write`, `copy_in`, a
+  move's destination) take turns, so the later write replaces the earlier one in place rather than
+  making a second file of the name. A tree copy plans from one listing and is not guarded against
+  another thread writing the same paths during it, and nothing guards against another process or
+  machine.
 - `pk-cli-drive` fake server: `FakeDrive::latency` holds each request before answering it,
   `FakeDrive::peak_in_flight` reports the most requests answered at once, and
   `FakeDrive::damage_next_download` changes a byte of one file's next download.
