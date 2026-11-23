@@ -338,7 +338,9 @@ impl Capture {
     /// the window ends (it runs out, [`finish`](crate::finish), the owner
     /// closes the window, or the wait's deadline), what was kept is handed
     /// over, with what the earlier gates last read, even when the tab has
-    /// left the capture's hosts by then.
+    /// left the capture's hosts by then, as long as the confirm hook (if
+    /// any) passes it. If it does not, nothing is handed over, a status
+    /// line says why, and the wait ends as it would have.
     ///
     /// Bounded: 500 responses, 10 MiB a body and 200 MiB in all. A load is
     /// counted in [`Captured::responses_skipped`] when it does not fit, when
