@@ -14,7 +14,7 @@ use pk_cli_drive::google::fake::{FakeDrive, When, ACCOUNT, MY_DRIVE, ROOT_ID};
 use pk_cli_drive::google::{
     token_entry, ClientCommand, Drive, DriveCli, DriveCommand, DriveSpec, Duplicate, Existing,
     FolderCommand, ItemKind, Listing, LoginArgs, LogoutArgs, ProfileStore, ProfilesCommand, Retry,
-    Scope, StatusArgs,
+    Scope, StatusArgs, MAX_TRANSFERS,
 };
 use pk_cli_drive::{reason, Backend, CachePolicy, CachedRemote, RemoteRead, RemoteStore};
 
@@ -1481,4 +1481,414 @@ fn a_listing_shows_every_item_with_its_id_even_one_that_shares_a_name() {
         ])
     );
     assert!(whole.list_items("nothing", true).unwrap().is_empty());
+}
+
+#[test]
+fn a_drive_can_be_shared_between_threads() {
+    fn shared<T: Send + Sync>() {}
+    shared::<Drive>();
+}
+
+/// The requests that list files (`files.list`), as against reading one.
+fn listings(log: &[String]) -> usize {
+    log.iter()
+        .filter(|l| l.starts_with("GET /drive/v3/files?"))
+        .count()
+}
+
+fn downloads(log: &[String]) -> usize {
+    log.iter().filter(|l| l.contains("alt=media")).count()
+}
+
+#[test]
+fn many_files_are_found_in_one_listing_and_read_side_by_side_each_with_its_own_answer() {
+    let h = Harness::new();
+    h.signed_in();
+    let f = &h.fake;
+    let caps = f.add_folder(ROOT_ID, "caps");
+    let mut want: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..300 {
+        let name = format!("c{i:03}.json");
+        let bytes = format!("{{\"capture\": {i}}}").into_bytes();
+        f.add_file(&caps, &name, &bytes);
+        want.push((format!("caps/{name}"), bytes));
+    }
+    f.add_file(ROOT_ID, "a.txt", b"alpha");
+    f.add_file(ROOT_ID, "twin.txt", b"one");
+    f.add_file(ROOT_ID, "twin.txt", b"two");
+    f.add_file(ROOT_ID, "torn.json", b"caf\xe9");
+    let bad = f.add_file(&caps, "bad.bin", b"damaged on the way");
+    f.add_google_doc(&caps, "plan");
+    f.damage_next_download(&bad);
+
+    let mut rels: Vec<String> = want.iter().map(|(r, _)| r.clone()).collect();
+    rels.extend(
+        [
+            "a.txt",
+            "caps/nope.txt",
+            "nofolder/x.txt",
+            "twin.txt",
+            "torn.json",
+            "caps/bad.bin",
+            "caps/plan",
+            "a.txt",
+            "../escape.txt",
+        ]
+        .map(String::from),
+    );
+    f.latency(std::time::Duration::from_millis(5));
+    f.clear_requests();
+    let got = h.drive().cat_many(&rels);
+    let log = f.requests();
+
+    assert_eq!(got.len(), rels.len());
+    for ((rel, _), asked) in got.iter().zip(&rels) {
+        assert_eq!(rel, asked, "answers come in the order asked");
+    }
+    for (i, (rel, bytes)) in want.iter().enumerate() {
+        assert_eq!(&got[i].0, rel);
+        assert_eq!(
+            got[i].1.as_ref().unwrap().as_deref(),
+            Some(&bytes[..]),
+            "{rel}"
+        );
+    }
+    let tail = |name: &str| {
+        got[300..]
+            .iter()
+            .find(|(r, _)| r == name)
+            .map(|(_, a)| a.clone())
+            .unwrap()
+    };
+    assert_eq!(tail("a.txt").unwrap().as_deref(), Some(&b"alpha"[..]));
+    assert_eq!(got[300].1, got[307].1, "a path asked twice has one answer");
+    assert_eq!(tail("caps/nope.txt").unwrap(), None);
+    assert_eq!(tail("nofolder/x.txt").unwrap(), None);
+    let twin = tail("twin.txt").unwrap_err();
+    assert_eq!(reason(&twin), Some(reason::DUPLICATE_NAME), "{twin}");
+    assert_eq!(
+        tail("torn.json").unwrap().as_deref(),
+        Some(&b"caf\xe9"[..]),
+        "bytes that are not UTF-8 come back as they are"
+    );
+    let damaged = tail("caps/bad.bin").unwrap_err();
+    assert!(damaged.to_string().contains("md5"), "{damaged}");
+    assert_eq!(tail("caps/plan").unwrap_err().exit_code(), 2);
+    assert_eq!(tail("../escape.txt").unwrap_err().exit_code(), 2);
+
+    // Looking the paths up took a handful of listings, not one per file:
+    // the store's folder, `caps` and `nofolder` by name, then one query for
+    // the files of the two folders that are there.
+    assert!(listings(&log) <= 4, "{} listings", listings(&log));
+    // 300 captures, a.txt once, torn.json, bad.bin.
+    assert_eq!(downloads(&log), 303);
+    let peak = f.peak_in_flight();
+    assert!((2..=MAX_TRANSFERS).contains(&peak), "peak {peak}");
+
+    // The damaged file reads fine once the damage is gone.
+    let again = h.drive().cat_many(&["caps/bad.bin"]);
+    assert_eq!(
+        again[0].1.as_ref().unwrap().as_deref(),
+        Some(&b"damaged on the way"[..])
+    );
+}
+
+#[test]
+fn transfers_one_reads_one_file_at_a_time() {
+    let h = Harness::new();
+    h.signed_in();
+    let rels: Vec<String> = (0..12)
+        .map(|i| {
+            let name = format!("f{i}.txt");
+            h.fake.add_file(ROOT_ID, &name, name.as_bytes());
+            name
+        })
+        .collect();
+    h.fake.latency(std::time::Duration::from_millis(5));
+    h.fake.clear_requests();
+    let got = h.drive().transfers(1).cat_many(&rels);
+    assert!(got
+        .iter()
+        .all(|(r, a)| a.as_ref().unwrap().as_deref() == Some(r.as_bytes())));
+    assert_eq!(h.fake.peak_in_flight(), 1);
+}
+
+#[test]
+fn a_batch_follows_a_shortcut_to_a_file_only_under_the_whole_listing() {
+    let h = Harness::new();
+    h.signed_in();
+    let elsewhere = h.fake.add_folder(MY_DRIVE, "elsewhere");
+    let target = h.fake.add_file(&elsewhere, "real.txt", b"through the link");
+    h.fake.add_shortcut(ROOT_ID, "link.txt", &target);
+    h.fake.add_file(ROOT_ID, "plain.txt", b"plain");
+    let rels = ["link.txt", "plain.txt"];
+    let bytes = h.drive().cat_many(&rels);
+    assert_eq!(
+        bytes[0].1.as_ref().unwrap(),
+        &None,
+        "bytes listing: no shortcuts"
+    );
+    assert_eq!(bytes[1].1.as_ref().unwrap().as_deref(), Some(&b"plain"[..]));
+    let whole = h.drive().listing(Listing::Whole).cat_many(&rels);
+    assert_eq!(
+        whole[0].1.as_ref().unwrap().as_deref(),
+        Some(&b"through the link"[..])
+    );
+
+    // Two shortcuts to one folder: the file reads through each.
+    let shared = h.fake.add_folder(MY_DRIVE, "shared");
+    h.fake.add_file(&shared, "x.txt", b"one file");
+    h.fake.add_shortcut(ROOT_ID, "l1", &shared);
+    h.fake.add_shortcut(ROOT_ID, "l2", &shared);
+    let both = h
+        .drive()
+        .listing(Listing::Whole)
+        .cat_many(&["l1/x.txt", "l2/x.txt"]);
+    for (rel, answer) in &both {
+        assert_eq!(
+            answer.as_ref().unwrap().as_deref(),
+            Some(&b"one file"[..]),
+            "{rel}"
+        );
+    }
+}
+
+/// A local tree of `dirs` folders (each with a nested one) holding `per`
+/// files each, by path, with its bytes.
+fn local_tree(root: &Path, dirs: usize, per: usize) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    for d in 0..dirs {
+        for (sub, n) in [("", per), ("/deep", 2)] {
+            let dir = format!("d{d:02}{sub}");
+            std::fs::create_dir_all(root.join(&dir)).unwrap();
+            for i in 0..n {
+                let rel = format!("{dir}/f{i:02}.txt");
+                let bytes = format!("{rel} bytes").into_bytes();
+                std::fs::write(root.join(&rel), &bytes).unwrap();
+                files.push((rel, bytes));
+            }
+        }
+    }
+    files
+}
+
+#[test]
+fn a_large_tree_goes_up_and_down_side_by_side_and_makes_each_folder_once() {
+    let h = Harness::new();
+    h.signed_in();
+    let local = h.tmp.path().join("up");
+    // 20 folders of 13 files, each with a nested folder of 2: 300 files.
+    let files = local_tree(&local, 20, 13);
+    assert_eq!(files.len(), 300);
+    h.fake.latency(std::time::Duration::from_millis(2));
+    h.fake.clear_requests();
+    let up = h
+        .drive()
+        .put_tree(&local, "move/inbox", Existing::Keep)
+        .unwrap();
+    assert_eq!((up.uploaded, up.replaced, up.unchanged), (300, 0, 0));
+    assert_eq!(
+        up.bytes,
+        files.iter().map(|(_, b)| b.len() as u64).sum::<u64>()
+    );
+    let log = h.fake.requests();
+    let folder_creates = log
+        .iter()
+        .filter(|l| l.starts_with("POST /drive/v3/files?"))
+        .count();
+    // move, move/inbox, 20 folders and 20 nested ones: each made once.
+    assert_eq!(folder_creates, 42);
+    assert_eq!(h.fake.count("", "move"), 1);
+    assert_eq!(h.fake.count("move", "inbox"), 1);
+    for d in 0..20 {
+        let dir = format!("d{d:02}");
+        assert_eq!(h.fake.count("move/inbox", &dir), 1, "{dir}");
+        assert_eq!(
+            h.fake.count(&format!("move/inbox/{dir}"), "deep"),
+            1,
+            "{dir}/deep"
+        );
+    }
+    for (rel, bytes) in &files {
+        assert_eq!(
+            h.fake.content(&format!("move/inbox/{rel}")).as_deref(),
+            Some(&bytes[..]),
+            "{rel}"
+        );
+    }
+    let peak = h.fake.peak_in_flight();
+    assert!((2..=4).contains(&peak), "uploads at once: {peak}");
+
+    let again = h
+        .drive()
+        .put_tree(&local, "move/inbox", Existing::Keep)
+        .unwrap();
+    assert_eq!(
+        (again.uploaded, again.replaced, again.unchanged),
+        (0, 0, 300)
+    );
+    for (rel, _) in files.iter().take(5) {
+        std::fs::write(local.join(rel), b"changed").unwrap();
+    }
+    let replaced = h
+        .drive()
+        .put_tree(&local, "move/inbox", Existing::Replace)
+        .unwrap();
+    assert_eq!(
+        (replaced.uploaded, replaced.replaced, replaced.unchanged),
+        (0, 5, 295)
+    );
+
+    let down = h.tmp.path().join("down");
+    h.fake.clear_requests();
+    assert_eq!(h.drive().fetch_tree("move/inbox", &down).unwrap(), 300);
+    for (rel, _) in &files {
+        assert_eq!(
+            std::fs::read(down.join(rel)).unwrap(),
+            std::fs::read(local.join(rel)).unwrap(),
+            "{rel}"
+        );
+    }
+    let peak = h.fake.peak_in_flight();
+    assert!(
+        (2..=MAX_TRANSFERS).contains(&peak),
+        "downloads at once: {peak}"
+    );
+    assert_eq!(
+        h.drive().fetch_tree("move/inbox", &down).unwrap(),
+        0,
+        "every md5 matches"
+    );
+}
+
+#[test]
+fn an_upload_that_fails_stops_the_tree_and_a_rerun_finishes_it_without_doubles() {
+    let h = Harness::new();
+    h.signed_in();
+    let local = h.tmp.path().join("up");
+    // 8 folders of 10 files, each with a nested folder of 2: 96 files.
+    let files = local_tree(&local, 8, 10);
+    h.fake.latency(std::time::Duration::from_millis(5));
+    h.fake.clear_requests();
+    h.fake.fail_next(
+        "uploadType=multipart",
+        403,
+        "insufficientFilePermissions",
+        1,
+        When::Before,
+    );
+    let err = h
+        .drive()
+        .put_tree(&local, "inbox", Existing::Keep)
+        .unwrap_err();
+    assert!(err.to_string().contains("uploading"), "{err}");
+    // The failure stopped the tree: only the uploads already under way
+    // when it came were sent, not the rest of the 96.
+    let sent = h
+        .fake
+        .requests()
+        .iter()
+        .filter(|l| l.contains("uploadType=multipart"))
+        .count();
+    // Without the stop all 96 are sent; with it, the few in flight when the
+    // failure came. Half is a bound a loaded machine stays well inside.
+    assert!(sent < files.len() / 2, "{sent} of 96 uploads sent");
+    let up = h.drive().put_tree(&local, "inbox", Existing::Keep).unwrap();
+    assert_eq!(up.uploaded + up.unchanged, files.len());
+    assert!(up.uploaded >= files.len() - sent, "{up:?}");
+    for (rel, bytes) in &files {
+        let (dir, name) = rel.rsplit_once('/').unwrap();
+        assert_eq!(h.fake.count(&format!("inbox/{dir}"), name), 1, "{rel}");
+        assert_eq!(
+            h.fake.content(&format!("inbox/{rel}")).as_deref(),
+            Some(&bytes[..])
+        );
+    }
+}
+
+#[test]
+fn a_download_that_fails_stops_the_tree_and_keeps_no_partial_file() {
+    let h = Harness::new();
+    h.signed_in();
+    let local = h.tmp.path().join("up");
+    let files = local_tree(&local, 8, 10);
+    h.drive().put_tree(&local, "inbox", Existing::Keep).unwrap();
+    // The first file in the tree's order.
+    let damaged = h.fake.find("inbox/d00/deep/f00.txt").unwrap();
+    h.fake.damage_next_download(&damaged);
+    h.fake.latency(std::time::Duration::from_millis(5));
+    h.fake.clear_requests();
+    let down = h.tmp.path().join("down");
+    let err = h.drive().fetch_tree("inbox", &down).unwrap_err();
+    assert!(err.to_string().contains("md5"), "{err}");
+    assert!(!down.join("d00/deep/f00.txt").exists());
+    let read = downloads(&h.fake.requests());
+    assert!(read < files.len() / 2, "{read} of 96 downloads sent");
+    let parts: Vec<_> = walk_names(&down)
+        .into_iter()
+        .filter(|n| n.ends_with(".part"))
+        .collect();
+    assert!(parts.is_empty(), "{parts:?}");
+    let fetched = h.drive().fetch_tree("inbox", &down).unwrap();
+    assert!(fetched >= 1);
+    for (rel, bytes) in &files {
+        assert_eq!(&std::fs::read(down.join(rel)).unwrap(), bytes, "{rel}");
+    }
+}
+
+fn walk_names(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(read) = std::fs::read_dir(dir) {
+        for e in read.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk_names(&p));
+            } else {
+                out.push(p.file_name().unwrap().to_string_lossy().into_owned());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn threads_writing_into_one_new_folder_make_it_once() {
+    let h = Harness::new();
+    h.signed_in();
+    h.fake.latency(std::time::Duration::from_millis(5));
+    let d = h.drive();
+    std::thread::scope(|s| {
+        for i in 0..8 {
+            let d = &d;
+            s.spawn(move || {
+                d.write(&format!("new/deep/f{i}.txt"), &format!("file {i}"))
+                    .unwrap();
+            });
+        }
+    });
+    assert_eq!(h.fake.count("", "new"), 1);
+    assert_eq!(h.fake.count("new", "deep"), 1);
+    for i in 0..8 {
+        assert_eq!(
+            h.fake.content(&format!("new/deep/f{i}.txt")).unwrap(),
+            format!("file {i}").into_bytes()
+        );
+    }
+}
+
+#[test]
+fn threads_writing_one_new_file_make_one_file() {
+    let h = Harness::new();
+    h.signed_in();
+    h.fake.latency(std::time::Duration::from_millis(5));
+    let d = h.drive();
+    std::thread::scope(|s| {
+        for i in 0..6 {
+            let d = &d;
+            s.spawn(move || d.write("inbox/same.txt", &format!("writer {i}")).unwrap());
+        }
+    });
+    assert_eq!(h.fake.count("inbox", "same.txt"), 1);
+    let last = String::from_utf8(h.fake.content("inbox/same.txt").unwrap()).unwrap();
+    assert!(last.starts_with("writer "), "{last}");
 }

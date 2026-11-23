@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use pk_cli_config::profile::ProfileName;
@@ -258,7 +258,45 @@ pub struct Drive {
     /// The id of the store's root: the spec's folder, or the folder at its
     /// path, once found.
     base: std::sync::OnceLock<String>,
+    /// The most downloads in flight at once ([`Drive::transfers`]).
+    transfers: usize,
+    /// Held from a folder found missing until it is made and remembered, so
+    /// two threads writing into one new folder make it once.
+    making: Mutex<()>,
+    /// The paths a single write on this `Drive` is under way at, so two
+    /// threads writing one new path make one file ([`Drive::claim`]).
+    writing: Mutex<HashSet<String>>,
+    /// Signalled whenever a path in `writing` is let go.
+    written: Condvar,
 }
+
+/// A path held for one write; see [`Drive::claim`].
+struct Claim<'a> {
+    drive: &'a Drive,
+    rel: String,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        let mut busy = self.drive.writing.lock().unwrap_or_else(|p| p.into_inner());
+        busy.remove(&self.rel);
+        self.drive.written.notify_all();
+    }
+}
+
+/// The most transfers a [`Drive`] runs at once: downloads in
+/// [`Drive::cat_many`] and [`Drive::fetch_tree`]. [`Drive::transfers`]
+/// lowers it.
+pub const MAX_TRANSFERS: usize = 8;
+
+/// One path's answer in [`Drive::cat_many`]: the file's bytes, `None` when
+/// no file is there, or the error that path alone met.
+pub type FileRead = Result<Option<Vec<u8>>, CliError>;
+
+/// The most uploads at once in [`Drive::put_tree`]. Drive takes about three
+/// writes a second per user, so more workers add 429s, not speed; the
+/// backoff on 429 absorbs a burst.
+const MAX_UPLOADS: usize = 4;
 
 /// The remedy for a spec whose path is not in Drive.
 const MISSING_PATH_REMEDY: &str =
@@ -286,7 +324,24 @@ impl Drive {
             nodes: Mutex::new(nodes),
             root_checked: std::sync::OnceLock::new(),
             base: std::sync::OnceLock::new(),
+            transfers: MAX_TRANSFERS,
+            making: Mutex::new(()),
+            writing: Mutex::new(HashSet::new()),
+            written: Condvar::new(),
         }
+    }
+
+    /// Run at most `n` transfers at once, `1` being one after another:
+    /// downloads in [`Drive::cat_many`] and [`Drive::fetch_tree`] (at most
+    /// [`MAX_TRANSFERS`], the default), and uploads in [`Drive::put_tree`]
+    /// (at most 4).
+    pub fn transfers(mut self, n: usize) -> Self {
+        self.transfers = n.clamp(1, MAX_TRANSFERS);
+        self
+    }
+
+    fn uploads(&self) -> usize {
+        self.transfers.min(MAX_UPLOADS)
     }
 
     /// Name this CLI's temp files `<prefix>-doc-…` (a download's private
@@ -582,10 +637,7 @@ impl Drive {
             // The spec's own path never goes through a shortcut.
             id = match self.child(&path, &id, part, true, false)? {
                 Some(f) => f.file.id,
-                None if make => {
-                    let what = format!("making the folder {}", self.shown(&next));
-                    self.api.create_folder(&what, &id, part)?.id
-                }
+                None if make => self.make_folder(&next, &id, part)?,
                 None => return Ok(None),
             };
             self.remember(&next, &id, true, false);
@@ -642,10 +694,7 @@ impl Drive {
                         if via {
                             return Err(self.through_shortcut(&next));
                         }
-                        let what = format!("making the folder {}", self.shown(&next));
-                        let made = self.api.create_folder(&what, &id, part)?;
-                        self.remember(&next, &made.id, true, false);
-                        id = made.id;
+                        id = self.make_folder(&next, &id, part)?;
                     }
                     None => return Ok(None),
                 },
@@ -660,6 +709,22 @@ impl Drive {
             folder: true,
             via,
         }))
+    }
+
+    /// Make the folder `name` in `parent`, at `rel`, and remember it, unless
+    /// another thread on this `Drive` made it since it was found missing.
+    /// Only one thread makes folders at a time, and each looks again once
+    /// it holds the turn, so two writers into one new folder never make two
+    /// folders of the name.
+    fn make_folder(&self, rel: &str, parent: &str, name: &str) -> Result<String, CliError> {
+        let _turn = self.making.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(node) = self.cached(rel).filter(|n| n.folder) {
+            return Ok(node.id);
+        }
+        let what = format!("making the folder {}", self.shown(rel));
+        let made = self.api.create_folder(&what, parent, name)?;
+        self.remember(rel, &made.id, true, false);
+        Ok(made.id)
     }
 
     /// The file (not folder) at `rel`, looked up afresh: its folder's id,
@@ -956,6 +1021,166 @@ impl Drive {
         Ok(out)
     }
 
+    /// The bytes of many files, in `rels`' order, each path with its own
+    /// answer: `Ok(None)` when no file is there, as [`RemoteRead::cat`]
+    /// answers, and an error that is that path's alone (two items of one
+    /// name, a Google document, a download whose md5 does not match Drive's).
+    /// One file's failure never costs another its bytes.
+    ///
+    /// The paths are found through one listing of the folders that hold
+    /// them, 40 folders a query, not a lookup per file. The downloads run up
+    /// to [`Drive::transfers`] at a time (8 unless set). The bytes are
+    /// Drive's own, so a file that is not valid UTF-8 reads as such. A path
+    /// asked for twice is downloaded once.
+    pub fn cat_many<S: AsRef<str>>(&self, rels: &[S]) -> Vec<(String, FileRead)> {
+        let mut answers: HashMap<String, FileRead> = HashMap::new();
+        let mut by_dir: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        let abs: Vec<String> = rels.iter().map(|r| self.abs(r.as_ref())).collect();
+        let mut seen = HashSet::new();
+        for a in &abs {
+            if !seen.insert(a.clone()) {
+                continue;
+            }
+            match Self::split(a) {
+                Ok((dir, name)) => by_dir.entry(dir).or_default().push((a.clone(), name)),
+                Err(e) => {
+                    answers.insert(a.clone(), Err(e));
+                }
+            }
+        }
+        let mut folders: Vec<(String, Node)> = Vec::new();
+        for (dir, wanted) in &by_dir {
+            match self.folder_node(dir, false) {
+                Ok(Some(node)) => folders.push((dir.clone(), node)),
+                found => {
+                    for (a, _) in wanted {
+                        answers.insert(a.clone(), found.clone().map(|_| None));
+                    }
+                }
+            }
+        }
+        let mut fetch: Vec<(String, DriveFile)> = Vec::new();
+        for batch in folders.chunks(PARENTS_PER_QUERY) {
+            match self.files_in(batch) {
+                Err(e) => {
+                    for (dir, _) in batch {
+                        for (a, _) in &by_dir[dir] {
+                            answers.insert(a.clone(), Err(e.clone()));
+                        }
+                    }
+                }
+                Ok(held) => {
+                    for (dir, node) in batch {
+                        for (a, name) in &by_dir[dir] {
+                            // Two paths can reach one folder through
+                            // shortcuts, so each looks its file up afresh.
+                            let found = held.get(&(node.id.clone(), name.clone())).cloned();
+                            match self.one_file(dir, name, node.via, found.unwrap_or_default()) {
+                                Ok(Some((f, via))) => {
+                                    self.remember(a, &f.id, false, via);
+                                    fetch.push((a.clone(), f));
+                                }
+                                other => {
+                                    answers.insert(a.clone(), other.map(|_| None));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let fetched = super::pool::run(
+            fetch,
+            self.transfers,
+            |(a, f)| {
+                let what = format!("reading {}", self.shown(&a));
+                let mut bytes = Vec::new();
+                let got = match self.api.download(&what, &f, &mut bytes) {
+                    Ok(()) => Ok(Some(bytes)),
+                    Err(e) if e.exit_code() == 4 => {
+                        self.forget(&a);
+                        Ok(None)
+                    }
+                    Err(e) => Err(e),
+                };
+                (a, got)
+            },
+            |_| false,
+        );
+        answers.extend(fetched.into_iter().flatten());
+        rels.iter()
+            .zip(&abs)
+            .map(|(rel, a)| {
+                let answer = answers.get(a).cloned().unwrap_or(Ok(None));
+                (rel.as_ref().to_string(), answer)
+            })
+            .collect()
+    }
+
+    /// The files (not folders) directly in each of `folders`, by the
+    /// folder's id and the file's name: one query, all pages. Shortcuts are
+    /// kept only when paths follow them, and only those to a file.
+    fn files_in(
+        &self,
+        folders: &[(String, Node)],
+    ) -> Result<HashMap<(String, String), Vec<DriveFile>>, CliError> {
+        let ids: HashSet<&str> = folders.iter().map(|(_, n)| n.id.as_str()).collect();
+        let parents: Vec<String> = ids
+            .iter()
+            .map(|id| format!("{} in parents", quote(id)))
+            .collect();
+        let q = format!(
+            "({}) and trashed = false and mimeType != {}",
+            parents.join(" or "),
+            quote(super::files::FOLDER_MIME)
+        );
+        let what = match folders {
+            [(dir, _)] => format!("listing {}", self.shown(dir)),
+            _ => format!(
+                "listing {} folders under {}",
+                folders.len(),
+                self.spec_text()
+            ),
+        };
+        let follow = self.follows();
+        let mut held: HashMap<(String, String), Vec<DriveFile>> = HashMap::new();
+        for f in self.api.list(&what, &q)? {
+            if f.is_shortcut() && (!follow || f.is_folder_or_points_at_one()) {
+                continue;
+            }
+            for p in f.parents.iter().filter(|p| ids.contains(p.as_str())) {
+                held.entry((p.clone(), f.name.clone()))
+                    .or_default()
+                    .push(f.clone());
+            }
+        }
+        Ok(held)
+    }
+
+    /// The one file named `name` in the folder `dir` among `found`, a
+    /// shortcut followed to its target, and whether a shortcut led to it.
+    fn one_file(
+        &self,
+        dir: &str,
+        name: &str,
+        via: bool,
+        mut found: Vec<DriveFile>,
+    ) -> Result<Option<(DriveFile, bool)>, CliError> {
+        match found.len() {
+            0 => Ok(None),
+            1 => {
+                let f = found.pop().expect("one file");
+                if f.is_shortcut() {
+                    let at = Self::join(dir, name);
+                    Ok(Some((self.follow(&at, &f)?, true)))
+                } else {
+                    Ok(Some((f, via)))
+                }
+            }
+            _ => Err(self.duplicate(dir, name, &found)),
+        }
+    }
+
     /// Every file under `rel` (recursive) with its size and md5: one
     /// listing, Google's own documents left out. Under [`Listing::Whole`] a
     /// shortcut to a file is its target.
@@ -1164,30 +1389,62 @@ impl Drive {
             ))
             .because(crate::reason::EXISTING_DIFFERS));
         }
-        for (under, path, id) in plan {
-            let dest = Self::join(rel, &under);
-            let what = format!("uploading {}", self.shown(&dest));
-            let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            match id {
-                Some(id) => {
-                    self.api
-                        .upload(&what, Target::Existing { id: &id }, &Source::File(&path))?;
-                    report.replaced += 1;
+        // Every folder a new file goes into is made here, once, shallowest
+        // first, so no two uploads ever race to make one.
+        let mut dirs: Vec<String> = Vec::new();
+        for (under, _, id) in &plan {
+            if id.is_none() {
+                dirs.push(Self::split(&Self::join(rel, under))?.0);
+            }
+        }
+        dirs.sort_by(|a, b| (a.matches('/').count(), a).cmp(&(b.matches('/').count(), b)));
+        dirs.dedup();
+        let mut made_dirs: HashMap<String, String> = HashMap::new();
+        for dir in dirs {
+            let id = self.folder_id(&dir, true)?.expect("made when missing");
+            made_dirs.insert(dir, id);
+        }
+        let done = super::pool::run(
+            plan,
+            self.uploads(),
+            |(under, path, id)| -> Result<(bool, u64), CliError> {
+                let dest = Self::join(rel, &under);
+                let what = format!("uploading {}", self.shown(&dest));
+                let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                match id {
+                    Some(id) => {
+                        self.api.upload(
+                            &what,
+                            Target::Existing { id: &id },
+                            &Source::File(&path),
+                        )?;
+                        Ok((true, len))
+                    }
+                    None => {
+                        let (dir, name) = Self::split(&dest)?;
+                        let made = self.api.upload(
+                            &what,
+                            Target::New {
+                                parent: &made_dirs[&dir],
+                                name: &name,
+                            },
+                            &Source::File(&path),
+                        )?;
+                        self.remember(&dest, &made.id, false, false);
+                        Ok((false, len))
+                    }
                 }
-                None => {
-                    let (dir, name) = Self::split(&dest)?;
-                    let parent = self.folder_id(&dir, true)?.expect("made when missing");
-                    let made = self.api.upload(
-                        &what,
-                        Target::New {
-                            parent: &parent,
-                            name: &name,
-                        },
-                        &Source::File(&path),
-                    )?;
-                    self.remember(&dest, &made.id, false, false);
-                    report.uploaded += 1;
-                }
+            },
+            Result::is_err,
+        );
+        // The first failure in the plan's order is the one reported. Files
+        // uploaded before it stay, as one at a time would have left them.
+        for answer in done.into_iter().flatten() {
+            let (replaced, len) = answer?;
+            if replaced {
+                report.replaced += 1;
+            } else {
+                report.uploaded += 1;
             }
             report.bytes += len;
         }
@@ -1253,18 +1510,38 @@ impl Drive {
             }
             landing.insert(key);
         }
-        let mut fetched = 0;
+        // The directories first, one after another, then the downloads side
+        // by side.
+        let mut jobs = Vec::new();
+        let mut made: HashSet<std::path::PathBuf> = HashSet::new();
         for Listed { under, file: f, .. } in files {
             let dest = local.join(&under);
-            if dest.is_file() && f.md5().is_some_and(|m| md5_file(&dest).ok() == Some(m)) {
-                continue;
-            }
             if let Some(parent) = dest.parent() {
-                pk_cli_core::private_file::create_dir_all(parent)
-                    .map_err(|e| CliError::Other(format!("creating {}: {e}", parent.display())))?;
+                if made.insert(parent.to_path_buf()) {
+                    pk_cli_core::private_file::create_dir_all(parent).map_err(|e| {
+                        CliError::Other(format!("creating {}: {e}", parent.display()))
+                    })?;
+                }
             }
-            self.download_to(&Self::join(rel.trim_matches('/'), &under), &f, &dest)?;
-            fetched += 1;
+            jobs.push((under, f, dest));
+        }
+        let done = super::pool::run(
+            jobs,
+            self.transfers,
+            |(under, f, dest)| -> Result<bool, CliError> {
+                if dest.is_file() && f.md5().is_some_and(|m| md5_file(&dest).ok() == Some(m)) {
+                    return Ok(false);
+                }
+                self.download_to(&Self::join(rel.trim_matches('/'), &under), &f, &dest)?;
+                Ok(true)
+            },
+            Result::is_err,
+        );
+        let mut fetched = 0;
+        for answer in done.into_iter().flatten() {
+            if answer? {
+                fetched += 1;
+            }
         }
         Ok(fetched)
     }
@@ -1295,7 +1572,24 @@ impl Drive {
         })
     }
 
+    /// Wait until no other thread on this `Drive` is writing `rel`, then
+    /// hold it until the claim is dropped. A write looks for the file and
+    /// then makes it, so two at once would each find none and make two files
+    /// of the name; held, the second finds the first's file and replaces it.
+    fn claim(&self, rel: &str) -> Claim<'_> {
+        let mut busy = self.writing.lock().unwrap_or_else(|p| p.into_inner());
+        while busy.contains(rel) {
+            busy = self.written.wait(busy).unwrap_or_else(|p| p.into_inner());
+        }
+        busy.insert(rel.to_string());
+        Claim {
+            drive: self,
+            rel: rel.to_string(),
+        }
+    }
+
     fn upload_to(&self, rel: &str, source: Source<'_>) -> Result<(), CliError> {
+        let _held = self.claim(rel);
         let what = format!("writing {}", self.shown(rel));
         let (dir, name) = Self::split(rel)?;
         let parent = self.folder_id(&dir, true)?.expect("made when missing");
@@ -1332,6 +1626,7 @@ impl Drive {
             return Err(self.through_shortcut(rel_from));
         }
         let (dir, name) = Self::split(rel_to)?;
+        let _held = self.claim(rel_to);
         let to_parent = self.folder_id(&dir, true)?.expect("made when missing");
         let replaced = match self.child(&dir, &to_parent, &name, false, self.follows())? {
             Some(there) if there.via => return Err(self.through_shortcut(rel_to)),

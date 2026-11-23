@@ -14,8 +14,10 @@ use super::endpoints::Endpoints;
 use super::error::GoogleError;
 
 /// Where an [`Api`] gets its access token. The account behind a Drive
-/// profile, or a fixed token in a test.
-pub(crate) trait Tokens {
+/// profile, or a fixed token in a test. Shared by the workers of a batch
+/// ([`super::Drive::cat_many`], the tree copies), so it is `Send + Sync`;
+/// a renewal is serialized by the refresh lock.
+pub(crate) trait Tokens: Send + Sync {
     /// A token believed current: the stored one, renewed first when it is
     /// about to expire.
     fn access(&self) -> Result<Secret, CliError>;
