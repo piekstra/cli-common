@@ -4,7 +4,7 @@ use pk_cli_core::{CliError, Reason};
 use serde_json::Value;
 
 /// The account's storage is full (`storageQuotaExceeded`).
-pub(crate) const QUOTA: Reason = Reason::Provider("drive_storage_full");
+pub(crate) const QUOTA: Reason = crate::reason::DRIVE_STORAGE_FULL;
 
 /// What a Google API refusal said: `{"error": {"code", "message",
 /// "errors": [{"reason"}]}}`, or a body that is not that.

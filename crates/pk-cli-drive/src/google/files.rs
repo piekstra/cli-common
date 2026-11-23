@@ -7,7 +7,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use md5::{Digest, Md5};
-use pk_cli_core::{CliError, Reason};
+use pk_cli_core::CliError;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -394,7 +394,7 @@ impl Api {
                                         .collect::<Vec<_>>()
                                         .join(", ")
                                 ))
-                                .because(Reason::Provider("duplicate_name")));
+                                .because(crate::reason::DUPLICATE_NAME));
                             }
                         }
                         Err(e) => return Err(e),

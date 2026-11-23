@@ -444,6 +444,17 @@ impl FakeDrive {
             .count()
     }
 
+    /// The ids of the untrashed items named `name` directly in the folder
+    /// with id `parent` ([`MY_DRIVE`] for the top of My Drive).
+    pub fn children(&self, parent: &str, name: &str) -> Vec<String> {
+        self.state()
+            .files
+            .values()
+            .filter(|f| !f.trashed && f.name == name && f.parents.iter().any(|p| p == parent))
+            .map(|f| f.id.clone())
+            .collect()
+    }
+
     /// Whether the item with `id` is in the trash.
     pub fn is_trashed(&self, id: &str) -> bool {
         self.state().files.get(id).is_some_and(|f| f.trashed)
@@ -783,6 +794,21 @@ fn route(req: &Request, addr: SocketAddr, s: &mut State) -> Response {
         };
     }
     if let Some(id) = path.strip_prefix("/drive/v3/files/") {
+        // `root` is My Drive's alias wherever a file id goes. Drive answers
+        // it with My Drive's own id, which is also what its children name
+        // in `parents`.
+        if id == "root" || id == MY_DRIVE {
+            return match req.method.as_str() {
+                "GET" if req.param("alt") == Some("media") => {
+                    Response::error(403, "fileNotDownloadable", "My Drive is a folder")
+                }
+                "GET" => Response::json(
+                    200,
+                    json!({"id": MY_DRIVE, "name": "My Drive", "mimeType": FOLDER_MIME}),
+                ),
+                _ => Response::error(403, "insufficientFilePermissions", "My Drive"),
+            };
+        }
         let Some(file) = s
             .files
             .get(id)
@@ -807,8 +833,16 @@ fn route(req: &Request, addr: SocketAddr, s: &mut State) -> Response {
                 if let (Some(add), Some(remove)) =
                     (req.param("addParents"), req.param("removeParents"))
                 {
-                    f.parents.retain(|p| p != remove);
-                    f.parents.push(add.into());
+                    let my_drive = |p: &str| {
+                        if p == "root" {
+                            MY_DRIVE.to_string()
+                        } else {
+                            p.to_string()
+                        }
+                    };
+                    let remove = my_drive(remove);
+                    f.parents.retain(|p| *p != remove);
+                    f.parents.push(my_drive(add));
                 }
                 f.modified = tick;
                 Response::json(200, f.to_json())

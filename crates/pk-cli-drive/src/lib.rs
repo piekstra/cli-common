@@ -84,6 +84,7 @@ pub mod cache;
 pub mod google;
 pub mod private_file;
 pub mod rclone;
+pub mod reason;
 pub mod remote;
 
 pub use backend::{private_temp_dir, Backend, FileEntry, LocalCopy, TempDir};

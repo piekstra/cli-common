@@ -16,7 +16,7 @@ use pk_cli_drive::google::{
     FolderCommand, Listing, LoginArgs, LogoutArgs, ProfileStore, ProfilesCommand, Retry, Scope,
     StatusArgs,
 };
-use pk_cli_drive::{Backend, CachePolicy, CachedRemote, RemoteRead, RemoteStore};
+use pk_cli_drive::{reason, Backend, CachePolicy, CachedRemote, RemoteRead, RemoteStore};
 
 const PROFILE: &str = "adult1";
 
@@ -81,6 +81,10 @@ impl Harness {
     fn drive(&self) -> Drive {
         let spec = DriveSpec::new(ProfileName::parse(PROFILE).unwrap(), ROOT_ID).unwrap();
         self.cli().drive(&spec).unwrap().without_backoff()
+    }
+
+    fn drive_at(&self, spec: &DriveSpec) -> Drive {
+        self.cli().drive(spec).unwrap().without_backoff()
     }
 
     fn profiles(&self) -> ProfileStore {
@@ -337,6 +341,7 @@ fn moves_deletes_folders_and_existence() {
         .move_no_clobber("inbox/b.txt", "filed/2026/a.txt")
         .unwrap_err();
     assert_eq!(err.exit_code(), 2, "{err}");
+    assert_eq!(reason(&err), Some(reason::OCCUPIED));
     assert!(err.to_string().contains("filed/2026/a.txt"), "{err}");
     assert!(d.exists("inbox/b.txt").unwrap());
     assert_eq!(h.fake.content("filed/2026/a.txt").unwrap(), b"a");
@@ -377,6 +382,7 @@ fn a_tree_copy_skips_what_matches_and_keep_refuses_other_bytes() {
         .put_tree(&local, "copy", Existing::Keep)
         .unwrap_err();
     assert!(err.to_string().contains("sub/c.json"), "{err}");
+    assert_eq!(reason(&err), Some(reason::EXISTING_DIFFERS));
     assert_eq!(h.fake.content("copy/sub/c.json").unwrap(), b"c");
     let replaced = h
         .drive()
@@ -809,6 +815,7 @@ fn a_tree_copy_refuses_to_land_on_a_google_document() {
         .put_tree(&local, "", Existing::Replace)
         .unwrap_err();
     assert_eq!(err.exit_code(), 2, "{err}");
+    assert_eq!(reason(&err), Some(reason::GOOGLE_DOCUMENT));
     assert_eq!(h.fake.count("", "a.json"), 0, "nothing was uploaded");
 }
 
@@ -1216,4 +1223,113 @@ fn login_args_default_is_login_with_no_flags() {
     assert_eq!(default.client_file, parsed.client_file);
     assert_eq!(default.account, parsed.account);
     assert_eq!(default.scopes, parsed.scopes);
+}
+
+/// The ids of the untrashed items named `name` at the top of My Drive.
+fn in_my_drive(h: &Harness, name: &str) -> Vec<String> {
+    h.fake.children(MY_DRIVE, name)
+}
+
+#[test]
+fn root_names_my_drive_for_every_operation() {
+    let h = Harness::new();
+    h.signed_in();
+    h.fake.add_file(MY_DRIVE, "top.txt", b"top");
+    let spec = DriveSpec::parse(&format!("gdrive:{PROFILE}/root")).unwrap();
+    assert_eq!(spec.folder(), "root");
+    assert_eq!(spec.to_string(), format!("gdrive:{PROFILE}/root"));
+    let d = h.cli().drive(&spec).unwrap().without_backoff();
+    assert!(d.exists("").unwrap());
+    assert!(d.exists("top.txt").unwrap());
+    // The fake's store folder is a folder at the top of My Drive.
+    assert!(d.exists("Store").unwrap());
+    d.write("scratch/a.txt", "a").unwrap();
+    assert_eq!(in_my_drive(&h, "scratch").len(), 1, "made in My Drive");
+    assert_eq!(
+        rels(d.list_entries("").unwrap()),
+        vec!["scratch/a.txt", "top.txt"]
+    );
+    assert_eq!(d.list_dirs("").unwrap(), vec!["Store", "scratch"]);
+    assert_eq!(rels(d.list_here("").unwrap()), vec!["top.txt"]);
+    assert_eq!(d.cat("top.txt").unwrap().as_deref(), Some("top"));
+    assert_eq!(d.md5("top.txt").unwrap(), Some(md5_hex(b"top")));
+    let hashed: Vec<String> = d.hashes("").unwrap().into_iter().map(|h| h.rel).collect();
+    assert_eq!(hashed, vec!["scratch/a.txt", "top.txt"]);
+    // A move into and out of My Drive's top level, then a delete there.
+    d.move_no_clobber("scratch/a.txt", "a.txt").unwrap();
+    assert_eq!(in_my_drive(&h, "a.txt").len(), 1);
+    d.move_no_clobber("a.txt", "scratch/a.txt").unwrap();
+    assert!(in_my_drive(&h, "a.txt").is_empty());
+    // Trees both ways.
+    let local = h.tmp.path().join("up");
+    std::fs::create_dir_all(local.join("deep")).unwrap();
+    std::fs::write(local.join("deep/b.txt"), b"b").unwrap();
+    let copied = d.put_tree(&local, "scratch", Existing::Keep).unwrap();
+    assert_eq!(copied.uploaded, 1);
+    let again = h
+        .drive_at(&spec)
+        .put_tree(&local, "scratch", Existing::Keep)
+        .unwrap();
+    assert_eq!((again.uploaded, again.unchanged), (0, 1));
+    let down = h.tmp.path().join("down");
+    assert_eq!(d.fetch_tree("scratch", &down).unwrap(), 2);
+    assert_eq!(std::fs::read(down.join("deep/b.txt")).unwrap(), b"b");
+    // Duplicates at the top of My Drive name My Drive's own id.
+    let second = h.fake.add_file(MY_DRIVE, "top.txt", b"other");
+    let found = h.drive_at(&spec).duplicates("").unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].dir, "");
+    assert_eq!(found[0].dir_id, MY_DRIVE);
+    assert!(found[0].ids.contains(&second));
+    assert!(h.drive_at(&spec).delete_file("scratch/a.txt").unwrap());
+    // A store at a path under My Drive.
+    let sub = DriveSpec::parse(&format!("gdrive:{PROFILE}/root/scratch")).unwrap();
+    assert_eq!(
+        rels(h.drive_at(&sub).list_entries("").unwrap()),
+        vec!["deep/b.txt"]
+    );
+    let store = DriveSpec::parse(&format!("gdrive:{PROFILE}/root/Store")).unwrap();
+    h.drive_at(&store).write("x.txt", "x").unwrap();
+    assert_eq!(h.fake.content("x.txt").unwrap(), b"x");
+}
+
+#[test]
+fn a_tree_download_refuses_names_that_leave_the_folder_or_land_twice() {
+    let h = Harness::new();
+    h.signed_in();
+    let shared = h.fake.add_folder(ROOT_ID, "shared");
+    h.fake.add_file(&shared, "fine.txt", b"fine");
+    let down = h.tmp.path().join("down");
+    for name in ["..", "/escaped.txt"] {
+        let id = h.fake.add_file(&shared, name, b"theirs");
+        let err = h.drive().fetch_tree("shared", &down).unwrap_err();
+        assert_eq!(reason(&err), Some(reason::UNSAFE_NAME), "{name}: {err}");
+        assert!(!down.exists(), "{name}: nothing was written");
+        h.fake.trash(&id);
+    }
+    // A name holding `/` that spells a path another item already takes,
+    // and two names that differ only in case.
+    let sub = h.fake.add_folder(&shared, "a");
+    h.fake.add_file(&sub, "b.txt", b"one");
+    let slash = h.fake.add_file(&shared, "a/b.txt", b"two");
+    let err = h.drive().fetch_tree("shared", &down).unwrap_err();
+    assert_eq!(reason(&err), Some(reason::UNSAFE_NAME), "{err}");
+    h.fake.trash(&slash);
+    let upper = h.fake.add_file(&shared, "FINE.txt", b"other");
+    let err = h.drive().fetch_tree("shared", &down).unwrap_err();
+    assert_eq!(reason(&err), Some(reason::UNSAFE_NAME), "{err}");
+    assert!(!down.exists());
+    h.fake.trash(&upper);
+    // A file named like the folder another file lands in.
+    let file_a = h.fake.add_file(&shared, "A", b"in the way");
+    let err = h.drive().fetch_tree("shared", &down).unwrap_err();
+    assert_eq!(reason(&err), Some(reason::UNSAFE_NAME), "{err}");
+    assert!(!down.exists());
+    h.fake.trash(&file_a);
+    // Google's own documents are never written, so their names do not
+    // refuse the copy.
+    h.fake.add_google_doc(&shared, "..");
+    h.fake.add_google_doc(&shared, "Fine.TXT");
+    assert_eq!(h.drive().fetch_tree("shared", &down).unwrap(), 2);
+    assert_eq!(std::fs::read(down.join("a/b.txt")).unwrap(), b"one");
 }

@@ -467,6 +467,7 @@ pub(crate) fn occupied(target: &str) -> CliError {
     CliError::Usage(format!(
         "refusing to overwrite {target} — a document is already there; nothing was moved"
     ))
+    .because(crate::reason::OCCUPIED)
 }
 
 /// The check every backend's delete makes before anything runs: `rel` names

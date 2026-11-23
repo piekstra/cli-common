@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.37.2 — 2026-11-23
+
+- `pk-cli-drive`: the folder id `root` is My Drive. `gdrive:<profile>/root` is the top of the
+  account's My Drive, and `gdrive:<profile>/root/<path>` a folder under it. Drive takes `root`
+  wherever a file id goes, but each child names My Drive by its own id in `parents`, so on v0.37.1
+  a whole-tree listing of such a store matched no child and read as empty, and `hashes`,
+  `put_tree`, `fetch_tree` and `duplicates` with it. The store now reads My Drive's own id from
+  its folder check and works on that id. The spec still prints `root`.
+- `pk-cli-drive`: `Drive::fetch_tree` refuses, before writing anything, a tree in which an item's
+  path would not land under the local folder (an item named `..`, or one whose name starts with
+  `/`), or in which two items land on one local path (a name holding `/` that spells another
+  item's path, two names that differ only in case, which macOS's file system holds as one, or a
+  file named like the folder another file lands in). Only files with bytes are checked, since
+  Google's own documents are skipped. The reason is `unsafe_name`. Names in a shared folder, or one reached through a shortcut, are
+  another account's to choose, and v0.37.1 joined them onto the local folder as they came.
+- `pk-cli-drive`: refusals carry a typed reason: `Drive::put_tree`'s file with other bytes under
+  `Existing::Keep` is `existing_differs`, its Google document in the way is `google_document`, and
+  every backend's occupied destination for `move_no_clobber` is `occupied`. Exit codes and
+  messages are unchanged.
+- `pk-cli-drive`: `pk_cli_drive::reason` names every cause the crate's errors give as a `Reason`
+  constant (`OCCUPIED`, `EXISTING_DIFFERS`, `GOOGLE_DOCUMENT`, `UNSAFE_NAME`, `DUPLICATE_NAME`,
+  `SHORTCUT`, `SHORTCUT_TARGET_MISSING`, `SHORTCUT_LOOP`, `DRIVE_STORAGE_FULL`, `NO_CLIENT`), so a
+  caller compares `err.reason() == Some(reason::OCCUPIED)` rather than a slug it spells itself.
+  The slugs are unchanged.
+- `pk-cli-drive`: the fake Drive server answers `root` as My Drive (`MY_DRIVE`) for a metadata
+  read and for `addParents`/`removeParents`, as Drive does, and has `children(parent, name)`.
+
 ## v0.37.1 — 2026-11-23
 
 - `pk-cli-drive`: `Drive::duplicates(rel)` returns every name two or more items share in one folder
