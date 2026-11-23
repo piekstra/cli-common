@@ -9,12 +9,18 @@ unchanged (`Backend::Drive`, `Backend::CachedDrive`).
 It replaces rclone for Google Drive. rclone's shared Google sign-in client is
 being retired, so every Drive writer needs a client of its own, and rclone
 keeps its tokens in plain text in `rclone.conf`. Here the OAuth client and the
-tokens are vault entries under the CLI's one keychain item. The rclone
+tokens are vault entries (`pk_cli_auth::vault`): owner-only files under
+`~/.config/<bin>/vault/`, each sealed with a key that only the CLI's one
+keychain item holds. The rclone
 backend stays for other providers, and for Drive until its last user moves.
 
 ## Registering the OAuth client
 
-One client serves every profile and every machine of one owner.
+One client serves every profile and every machine of one owner. Google
+keeps one grant per account for the whole Cloud project, not per client:
+under `drive.file`, files one client of the project makes are visible to
+its others (another CLI's Desktop client, a web app's Web client), and a
+revoke through any of them ends them all ([Scope](#scope-drivefile-or-full-drive)).
 
 1. In the owner's Google Cloud project, enable the Google Drive API.
 2. Configure the OAuth consent screen (Google Auth Platform → Branding,
@@ -45,8 +51,8 @@ A Drive profile is one Google account. There is no default profile.
 |---|---|
 | The account's email, as Drive's `about` named it at sign-in | `drive.json` beside the CLI's config |
 | The scopes Google granted, the client id, when it signed in | `drive.json` |
-| The OAuth client (id and secret) | vault entry `drive/<profile>/client` |
-| The token set (access and refresh) | vault entry `drive/<profile>/token` |
+| The OAuth client (id and secret) | vault entry `drive/<profile>/client`: a sealed file under `~/.config/<bin>/vault/` |
+| The token set (access and refresh) | vault entry `drive/<profile>/token`, sealed the same way |
 
 `drive.json` is owner-only and holds nothing secret. A profile's account is
 fixed by its first sign-in: a later sign-in that lands on another account is
@@ -82,7 +88,7 @@ is `<PREFIX>_DRIVE_PROFILE`.
 |---|---|---|
 | `login --profile <NAME>` | Opens the browser to Google's consent (PKCE, loopback redirect on 127.0.0.1), checks a refresh token came back and every scope asked for was granted, reads the account's email from Drive, then stores the client, the tokens and the profile together. `--no-browser` prints the address; `--wait <MINUTES>` (default 5) | `auth-login/v1` plus `profile`, `username`, `scopes` |
 | `status [--local]` | The stored sign-in, and one `about` call to Drive unless `--local` (which reads no keychain) | `auth-status/v1` plus `profile`, `scopes`, `client`, `signed_in_at` |
-| `logout [--revoke] [--forget]` | Removes the token set. `--revoke` also revokes the grant at Google, which ends every sign-in of that account through that client, on every machine. `--forget` removes the profile and its client too | `drive-logout/v1` |
+| `logout [--revoke] [--forget]` | Removes the token set. `--revoke` also revokes the grant at Google, which ends every sign-in of that account through any client of the Cloud project (a web app's too), on every machine. `--forget` removes the profile and its client too | `drive-logout/v1` |
 | `about` | The account's email and storage quota (replaces `rclone about`) | `drive-about/v1` |
 | `client import --file <PATH> \| --stdin [--overwrite]` | Stores a Desktop client's JSON (`--client-file`, `--client-stdin` as on `login` work too). Replacing a different client needs `--overwrite` and drops the profile's sign-in | `drive-client/v1` |
 | `folder create <NAME>` | Makes a folder at the top of My Drive for a store and prints its id and spec; one of that name already there (that this sign-in can see) is reused, two are an error. Under `drive.file` a store must be a folder the app's client made | `drive-folder/v1` |
@@ -157,8 +163,27 @@ From [Sensitive and restricted scope requirements](https://support.google.com/cl
 - "You must only request the **narrowest scope(s)** your app needs to
   function".
 
-None of Google's pages says whether "the app" is one OAuth client or the
-Cloud project. Hence the test below.
+Google's Drive pages do not say whether "the app" is one OAuth client or
+the Cloud project. Its OAuth pages say a grant is the project's:
+
+From [Cross-client identity](https://developers.google.com/identity/protocols/oauth2/cross-client-identity)
+("Cross-client authorization goals" and "Cross-client access tokens"):
+
+- "…the grant indicates the user's trust in the whole application for that
+  scope."
+- "…the Google authorization infrastructure can use information about user
+  approvals for a client ID within a given project when evaluating whether
+  to authorize others in the same project."
+
+From [OAuth 2.0 for iOS & Desktop Apps](https://developers.google.com/identity/protocols/oauth2/native-app)
+("Token revocation"):
+
+- "Revocation removes all OAuth 2.0 scopes previously granted to a
+  project, invalidating any issued access or refresh…" "…for all clients
+  registered under that project."
+
+Neither says what that means for the files `drive.file` reaches. Hence the
+test below.
 
 ### The test
 
@@ -176,6 +201,28 @@ scope confirmed through Google's `tokeninfo`):
 4. The Desktop client gets and reads the Web client's file.
 5. Both clients try to get the control file.
 6. Everything is deleted and both grants revoked.
+
+### The result (2026-11-23)
+
+| Step | Answer |
+|---|---|
+| Web client: the Desktop client's folder, its listing, its file and the file's bytes | 200 each; the listing holds the Desktop client's file |
+| Web client: create a file in that folder | 200 |
+| Desktop client: the Web client's file and its bytes | 200 each |
+| Either client: the third app's control file | 404 `notFound` |
+| Desktop client: delete the folder, which still holds the control file | 403 |
+| Revoke the Web client's token, then the Desktop client's | 200, then 400: the Desktop client's token was already revoked |
+| Desktop client: read the folder after the revoke | 401 |
+
+So under `drive.file` the clients of one Cloud project share access: a
+file one of them creates is open to the others, and a file another app
+creates is open to none. A CLI moving off rclone therefore copies its
+files once into a folder its own client makes (`folder create`), and the
+owner's web app, a Web client of the same project, reads that folder under
+`drive.file` as well. And one revoke ends the grant for every client of the
+project: `logout --revoke` in one CLI signs the owner out of the others
+and of the web app, on every machine. Plain `logout` removes only this
+machine's tokens.
 
 ## Tests
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.35.1 — 2026-11-23
+
+- `pk-cli-drive`: the `drive.file` scope test is settled and in `docs/google-drive.md`, in Google's
+  wording and the test's answers. Clients of one Cloud project share `drive.file` access: a file
+  one creates is open to the others, a file another app creates to none. A revoke ends the grant
+  for every client of the project. `logout --revoke`'s help says so, and `--scope file`'s help
+  says every client of the project sees the files. The docs say where vault entries rest:
+  owner-only files under `~/.config/<bin>/vault/`, sealed with the key the CLI's keychain item
+  holds.
+- `cookie` 0.18.3 for RUSTSEC-2026-0594 (private cookie nonces could repeat in a process that
+  forks).
+
 ## v0.35.0 — 2026-11-23
 
 - `pk-cli-drive`: a Google Drive API backend and Drive profiles (feature `google`), replacing
