@@ -99,17 +99,20 @@ jobs:
       contents: read
       pull-requests: write
       security-events: write
-      checks: write # rustsec/audit-check publishes a check run; without this it dies with "Resource not accessible by integration"
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Plain cargo-audit, not rustsec/audit-check: the action publishes its
+      # findings as a check run, and once cargo-audit reports unmaintained
+      # warnings it fails updating that run ("Not Found"). This fails on any
+      # vulnerability, as the action did, and prints the warnings.
       - name: cargo-audit
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
       - name: cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
