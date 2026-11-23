@@ -16,7 +16,7 @@ use pk_cli_drive::google::{
     FolderCommand, Listing, LoginArgs, LogoutArgs, ProfileStore, ProfilesCommand, Retry, Scope,
     StatusArgs,
 };
-use pk_cli_drive::{Backend, CachePolicy, CachedRemote, RemoteRead, RemoteStore};
+use pk_cli_drive::{reason, Backend, CachePolicy, CachedRemote, RemoteRead, RemoteStore};
 
 const PROFILE: &str = "adult1";
 
@@ -341,7 +341,7 @@ fn moves_deletes_folders_and_existence() {
         .move_no_clobber("inbox/b.txt", "filed/2026/a.txt")
         .unwrap_err();
     assert_eq!(err.exit_code(), 2, "{err}");
-    assert_eq!(reason(&err), Some(Reason::Provider("occupied")));
+    assert_eq!(reason(&err), Some(reason::OCCUPIED));
     assert!(err.to_string().contains("filed/2026/a.txt"), "{err}");
     assert!(d.exists("inbox/b.txt").unwrap());
     assert_eq!(h.fake.content("filed/2026/a.txt").unwrap(), b"a");
@@ -382,7 +382,7 @@ fn a_tree_copy_skips_what_matches_and_keep_refuses_other_bytes() {
         .put_tree(&local, "copy", Existing::Keep)
         .unwrap_err();
     assert!(err.to_string().contains("sub/c.json"), "{err}");
-    assert_eq!(reason(&err), Some(Reason::Provider("existing_differs")));
+    assert_eq!(reason(&err), Some(reason::EXISTING_DIFFERS));
     assert_eq!(h.fake.content("copy/sub/c.json").unwrap(), b"c");
     let replaced = h
         .drive()
@@ -815,7 +815,7 @@ fn a_tree_copy_refuses_to_land_on_a_google_document() {
         .put_tree(&local, "", Existing::Replace)
         .unwrap_err();
     assert_eq!(err.exit_code(), 2, "{err}");
-    assert_eq!(reason(&err), Some(Reason::Provider("google_document")));
+    assert_eq!(reason(&err), Some(reason::GOOGLE_DOCUMENT));
     assert_eq!(h.fake.count("", "a.json"), 0, "nothing was uploaded");
 }
 
@@ -1303,11 +1303,7 @@ fn a_tree_download_refuses_names_that_leave_the_folder_or_land_twice() {
     for name in ["..", "/escaped.txt"] {
         let id = h.fake.add_file(&shared, name, b"theirs");
         let err = h.drive().fetch_tree("shared", &down).unwrap_err();
-        assert_eq!(
-            reason(&err),
-            Some(Reason::Provider("unsafe_name")),
-            "{name}: {err}"
-        );
+        assert_eq!(reason(&err), Some(reason::UNSAFE_NAME), "{name}: {err}");
         assert!(!down.exists(), "{name}: nothing was written");
         h.fake.trash(&id);
     }
@@ -1317,13 +1313,23 @@ fn a_tree_download_refuses_names_that_leave_the_folder_or_land_twice() {
     h.fake.add_file(&sub, "b.txt", b"one");
     let slash = h.fake.add_file(&shared, "a/b.txt", b"two");
     let err = h.drive().fetch_tree("shared", &down).unwrap_err();
-    assert_eq!(reason(&err), Some(Reason::Provider("unsafe_name")), "{err}");
+    assert_eq!(reason(&err), Some(reason::UNSAFE_NAME), "{err}");
     h.fake.trash(&slash);
     let upper = h.fake.add_file(&shared, "FINE.txt", b"other");
     let err = h.drive().fetch_tree("shared", &down).unwrap_err();
-    assert_eq!(reason(&err), Some(Reason::Provider("unsafe_name")), "{err}");
+    assert_eq!(reason(&err), Some(reason::UNSAFE_NAME), "{err}");
     assert!(!down.exists());
     h.fake.trash(&upper);
+    // A file named like the folder another file lands in.
+    let file_a = h.fake.add_file(&shared, "A", b"in the way");
+    let err = h.drive().fetch_tree("shared", &down).unwrap_err();
+    assert_eq!(reason(&err), Some(reason::UNSAFE_NAME), "{err}");
+    assert!(!down.exists());
+    h.fake.trash(&file_a);
+    // Google's own documents are never written, so their names do not
+    // refuse the copy.
+    h.fake.add_google_doc(&shared, "..");
+    h.fake.add_google_doc(&shared, "Fine.TXT");
     assert_eq!(h.drive().fetch_tree("shared", &down).unwrap(), 2);
     assert_eq!(std::fs::read(down.join("a/b.txt")).unwrap(), b"one");
 }

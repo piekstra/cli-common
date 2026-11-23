@@ -55,7 +55,7 @@ impl Account {
                 "Drive profile `{}` has no OAuth client",
                 self.profile
             ))
-            .because(Reason::Provider("no_client"))
+            .because(crate::reason::NO_CLIENT)
             .with_remedy(format!(
                 "import the Desktop app client's JSON with `{} client import {} {} --file <PATH>`, then `{}`",
                 self.command,

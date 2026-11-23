@@ -790,7 +790,7 @@ impl DriveCli {
                      nothing was made",
                     found.iter().map(|f| f.id.as_str()).collect::<Vec<_>>().join(", ")
                 ))
-                    .because(Reason::Provider("duplicate_name"))
+                    .because(crate::reason::DUPLICATE_NAME)
                     .with_remedy("keep one of them in Google Drive, or choose another name"))
                 }
             };

@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use pk_cli_config::profile::ProfileName;
-use pk_cli_core::{CliError, Reason};
+use pk_cli_core::CliError;
 
 use super::api::Api;
 use super::files::{md5_file, quote, About, DriveFile, Source, Target};
@@ -390,7 +390,7 @@ impl Drive {
             found.len(),
             ids.join(", ")
         ))
-        .because(Reason::Provider("duplicate_name"))
+        .because(crate::reason::DUPLICATE_NAME)
         .with_remedy(
             "open the folder in Google Drive, keep one of them and remove or rename the others",
         )
@@ -402,7 +402,7 @@ impl Drive {
              and deletes do not go through shortcuts",
             self.shown(rel)
         ))
-        .because(Reason::Provider("shortcut"))
+        .because(crate::reason::SHORTCUT)
         .with_remedy(
             "change the item where it is in Google Drive, or replace the shortcut with a copy",
         )
@@ -415,7 +415,7 @@ impl Drive {
             self.shown(rel),
             shortcut.id
         ))
-        .because(Reason::Provider("shortcut_target_missing"))
+        .because(crate::reason::SHORTCUT_TARGET_MISSING)
         .with_remedy(
             "open the folder in Google Drive and remove the shortcut, or restore what it points at",
         )
@@ -426,7 +426,7 @@ impl Drive {
             "{} is a shortcut to a folder that holds it, so a whole listing would never end",
             self.shown(rel)
         ))
-        .because(Reason::Provider("shortcut_loop"))
+        .because(crate::reason::SHORTCUT_LOOP)
         .with_remedy("open the folder in Google Drive and remove the shortcut")
     }
 
@@ -952,7 +952,7 @@ impl Drive {
                     .collect::<Vec<_>>()
                     .join(", ")
             ))
-            .because(Reason::Provider("shortcut")));
+            .because(crate::reason::SHORTCUT));
         }
         let mut plan = Vec::new();
         let mut report = TreeCopy::default();
@@ -974,7 +974,7 @@ impl Drive {
                     .collect::<Vec<_>>()
                     .join(", ")
             ))
-            .because(Reason::Provider("google_document")));
+            .because(crate::reason::GOOGLE_DOCUMENT));
         }
         for under in files {
             let path = local.join(&under);
@@ -1000,7 +1000,7 @@ impl Drive {
                     .join(", "),
                 if conflicts.len() > 3 { ", …" } else { "" }
             ))
-            .because(Reason::Provider("existing_differs")));
+            .because(crate::reason::EXISTING_DIFFERS));
         }
         for (under, path, id) in plan {
             let dest = Self::join(rel, &under);
@@ -1045,8 +1045,18 @@ impl Drive {
     /// anything is written, with reason `unsafe_name`.
     pub fn fetch_tree(&self, rel: &str, local: &Path) -> Result<usize, CliError> {
         let rel = &self.abs(rel);
-        let files = self.tree(rel)?.files;
-        let mut landing = HashSet::new();
+        // Only what is written is checked: Google's own documents are skipped.
+        let files: Vec<Listed> = self
+            .tree(rel)?
+            .files
+            .into_iter()
+            .filter(|l| l.file.is_blob())
+            .collect();
+        // Each file's path, by its parts in lower case, and the folders the
+        // files sit in, so a file landing where another lands or where a
+        // folder must be refuses the copy.
+        let mut landing: HashSet<Vec<String>> = HashSet::new();
+        let mut folders: HashSet<Vec<String>> = HashSet::new();
         for Listed { under, .. } in &files {
             let plain = !under.is_empty()
                 && Path::new(under)
@@ -1056,7 +1066,11 @@ impl Drive {
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
                 .collect();
-            if !plain || !landing.insert(key) {
+            let clash = plain
+                && (landing.contains(&key)
+                    || folders.contains(&key)
+                    || (1..key.len()).any(|n| landing.contains(&key[..n])));
+            if !plain || clash {
                 return Err(CliError::Other(format!(
                     "{} holds an item whose name would land at `{}` under {}, {}; nothing was \
                      downloaded",
@@ -1069,15 +1083,16 @@ impl Drive {
                         "outside it or on no file at all"
                     }
                 ))
-                .because(Reason::Provider("unsafe_name"))
+                .because(crate::reason::UNSAFE_NAME)
                 .with_remedy("rename the item in Google Drive, then copy again"));
             }
+            for n in 1..key.len() {
+                folders.insert(key[..n].to_vec());
+            }
+            landing.insert(key);
         }
         let mut fetched = 0;
         for Listed { under, file: f, .. } in files {
-            if !f.is_blob() {
-                continue;
-            }
             let dest = local.join(&under);
             if dest.is_file() && f.md5().is_some_and(|m| md5_file(&dest).ok() == Some(m)) {
                 continue;
