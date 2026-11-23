@@ -31,8 +31,9 @@ use super::profiles::{client_entry, token_entry, DriveProfile, ProfileStore};
 /// A Drive scope a profile asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Scope {
-    /// `drive.file`: only the files this Cloud project's clients created or
-    /// the person opened with them. Not a restricted scope.
+    /// `drive.file`: only the files a client of this Cloud project created
+    /// or the person opened with one; every client of the project sees
+    /// them. Not a restricted scope.
     File,
     /// `drive.readonly`: read every file (restricted).
     Readonly,
@@ -135,7 +136,8 @@ pub struct StatusArgs {
 #[derive(Args, Debug, Clone, Default)]
 pub struct LogoutArgs {
     /// Also revoke the grant at Google. It ends every sign-in of this
-    /// account through this OAuth client, on every machine.
+    /// account through any OAuth client of this Cloud project (another
+    /// CLI's, a web app's), on every machine.
     #[arg(long)]
     pub revoke: bool,
     /// Also remove the profile and its OAuth client.
