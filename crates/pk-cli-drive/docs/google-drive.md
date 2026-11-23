@@ -66,7 +66,12 @@ advance and sends it to Google as `login_hint`.
 
 A vault reads its key from the keychain once and keeps it. On macOS, each
 newly built binary asks once before it may read the item. "Always Allow"
-lasts for that binary, while "Allow" covers one read. A process that builds
+lasts for that binary, while "Allow" covers one read. An upgrade is a new
+binary too, even signed with the same identity: without an Apple team ID
+the item's partition list names each build's code hash. So every install of
+a rebuilt CLI costs the owner one "Always Allow" per item, and until it is
+answered an unattended run waits on the dialog, or gets `KeyLoad::Waiting`
+from a bounded read (below). A process that builds
 several `DriveCli` values (a long-running server, a run that opens its store
 more than once) shares one vault, so it reads the key once: keep
 `Arc::new(DriveCli::default_vault(bin)?)` for the process and give each
