@@ -371,8 +371,8 @@ impl FakeDrive {
         id
     }
 
-    /// Give the item `id` another parent: Drive lets one file sit in two
-    /// folders.
+    /// Give the item `id` another parent, as a file made before Drive's
+    /// 2020 single-parent change can have.
     pub fn add_parent(&self, id: &str, parent: &str) {
         if let Some(f) = self.state().files.get_mut(id) {
             f.parents.push(parent.into());

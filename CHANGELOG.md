@@ -8,8 +8,9 @@
   all, without parsing an error's text. Groups are per folder id: two folders of one name are two
   folders. Under `Listing::Whole` a shortcut counts as an item, and a shortcut to a folder is
   walked once.
-- `pk-cli-drive`: `LoginArgs::default()` waits 5 minutes for the browser, as `login` with no
-  flags does. The derived default waited 0, so a sign-in built from it timed out at once.
+- `pk-cli-drive`: `LoginArgs::default()` is `login` with no flags: it waits `LOGIN_WAIT_MINUTES`
+  (5) for the browser, the constant the flag's default also uses. The derived default waited 0, so
+  a sign-in built from it timed out at once.
 - `pk-cli-drive`: `FakeDrive::add_parent(id, parent)`, for a file in two folders.
 
 ## v0.37.0 — 2026-11-23

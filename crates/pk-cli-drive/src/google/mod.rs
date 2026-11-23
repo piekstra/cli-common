@@ -50,7 +50,7 @@ pub use api::Retry;
 pub use client::{id_hint, DesktopClient};
 pub use commands::{
     ClientCommand, DriveArgs, DriveCli, DriveCommand, FolderCommand, LoginArgs, LogoutArgs,
-    ProfilesCommand, Scope, StatusArgs,
+    ProfilesCommand, Scope, StatusArgs, LOGIN_WAIT_MINUTES,
 };
 pub use drive::{
     check_folder_id, Drive, DriveSpec, Duplicate, Existing, Hashed, Listing, TreeCopy, SPEC_PREFIX,

@@ -1200,7 +1200,20 @@ fn a_whole_listings_duplicates_count_shortcuts_and_walk_their_folders_once() {
 }
 
 #[test]
-fn login_args_default_waits_five_minutes_as_the_flag_does() {
-    assert_eq!(LoginArgs::default().wait, 5);
-    assert!(!LoginArgs::default().no_browser);
+fn login_args_default_is_login_with_no_flags() {
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        login: LoginArgs,
+    }
+    let parsed = Cli::parse_from(["login"]).login;
+    let default = LoginArgs::default();
+    assert_eq!(default.wait, parsed.wait);
+    assert_eq!(default.wait, 5);
+    assert_eq!(default.no_browser, parsed.no_browser);
+    assert_eq!(default.client_stdin, parsed.client_stdin);
+    assert_eq!(default.client_file, parsed.client_file);
+    assert_eq!(default.account, parsed.account);
+    assert_eq!(default.scopes, parsed.scopes);
 }
