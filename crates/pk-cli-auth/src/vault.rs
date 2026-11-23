@@ -26,18 +26,26 @@
 //!   so a crash leaves the old entry or the new one. Serialise writes to one
 //!   entry the way its CLI already does (a session under the refresh lock):
 //!   the vault keeps entries apart, so a write to one never touches another.
-//! - **The key** is read from the keychain once per process, and only when an
-//!   entry exists or is written: a read with nothing stored costs no keychain
-//!   read, so a logged-out run raises no dialog and a test pointed at an
-//!   empty directory reads nothing. It is created by the first write, under a
-//!   lock in the directory so two processes cannot create two keys, and never
-//!   while entries exist: those would be lost to a new key, so a missing key
+//! - **The key** is read from the keychain once per `Vault` value and kept,
+//!   and only when an entry exists or is written: a read with nothing
+//!   stored costs no keychain read, so a logged-out run raises no dialog and
+//!   a test pointed at an empty directory reads nothing. It is created by the
+//!   first write, under a lock in the directory so two processes cannot
+//!   create two keys, and never while entries exist: those would be lost to a new key, so a missing key
 //!   with entries present is an error naming the remedy. A random key id
 //!   beside the entries changes whenever a key is made or the vault cleared:
 //!   a write holds the key lock and checks it, so a long-running process
 //!   whose cached key another process cleared makes a new key rather than
 //!   seal an entry nothing can read, and a read that fails to decrypt
 //!   reloads the key once when the id moved.
+//!
+//! - **One vault per process.** A process that opens its secrets more than
+//!   once (a server, a run that builds several clients) shares one
+//!   `Arc<Vault>`, so it reads the key once. [`Vault::load_key`] makes that
+//!   first read with a bound: on a thread of its own, holding none of the
+//!   vault's locks. A keychain dialog nobody answers is then
+//!   [`KeyLoad::Waiting`], and the vault's reads and writes that need the
+//!   key fail at once (exit 3) until it is answered, rather than block.
 //!
 //! - **Moving in and resetting.** [`Vault::migrate_from`] moves a CLI's
 //!   old keychain items in, deleting each only once its copy reads back.
@@ -54,7 +62,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -233,13 +241,59 @@ struct Cached {
     id: Option<String>,
 }
 
+/// A bounded key read's answer: the key, none, or an error.
+type KeyRead = Result<Option<Key>, CliError>;
+
+/// What [`Vault::load_key`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyLoad {
+    /// The key is in this vault's cache: its reads and writes ask the
+    /// keychain nothing more.
+    Loaded,
+    /// No entries: nothing needs the key, and none was read.
+    Empty,
+    /// Entries, but the keychain holds no key; a read reports the lost key.
+    Missing,
+    /// The keychain did not answer within the wait (on macOS, a dialog
+    /// nobody has answered). The read goes on in the background. Until it
+    /// answers, this vault's reads and writes that need the key fail at once
+    /// (exit 3) instead of asking again or blocking, and a later
+    /// [`Vault::load_key`] waits on the same read.
+    Waiting,
+}
+
+/// Whether a bounded key read is still waiting on the keychain.
+enum Settled {
+    Idle,
+    Waiting,
+}
+
 /// Secrets in owner-only encrypted files, under one keychain key. See the
 /// [module docs](self).
 pub struct Vault {
     keys: Box<dyn KeyStore>,
     dir: PathBuf,
     key: Mutex<Option<Cached>>,
+    /// A [`Vault::load_key`] read still on its way. Locked after `key`.
+    loading: Mutex<Option<mpsc::Receiver<KeyRead>>>,
     wait: Duration,
+}
+
+/// The keychain store `bin`'s vault keeps its key in: the service
+/// `piekstra.<bin>`, or the one `<PREFIX>_KEYCHAIN_SERVICE` names (a test's
+/// empty service), `<PREFIX>` being `bin` uppercased with `-` as `_`.
+pub fn keychain_for(bin: &str) -> CredentialStore {
+    let prefix: String = bin
+        .chars()
+        .map(|c| match c {
+            '-' | '.' | ' ' => '_',
+            c => c.to_ascii_uppercase(),
+        })
+        .collect();
+    match std::env::var(format!("{prefix}_KEYCHAIN_SERVICE")) {
+        Ok(s) if !s.is_empty() => CredentialStore::new(s),
+        _ => CredentialStore::for_binary(bin),
+    }
 }
 
 impl fmt::Debug for Vault {
@@ -251,13 +305,10 @@ impl fmt::Debug for Vault {
 }
 
 impl Vault {
-    /// The CLI's vault: its key in `piekstra.<bin>` at [`KEY_ACCOUNT`], its
-    /// entries in `~/.config/<bin>/vault/`.
+    /// The CLI's vault: its key in [`keychain_for`]`(bin)` at
+    /// [`KEY_ACCOUNT`], its entries in `~/.config/<bin>/vault/`.
     pub fn for_binary(bin: &str) -> Result<Self, CliError> {
-        Ok(Self::new(
-            CredentialStore::for_binary(bin),
-            default_dir(bin)?,
-        ))
+        Ok(Self::new(keychain_for(bin), default_dir(bin)?))
     }
 
     /// A vault with its key in `keys` and its entries in `dir`: a CLI's
@@ -267,7 +318,80 @@ impl Vault {
             keys: Box::new(keys),
             dir: dir.into(),
             key: Mutex::new(None),
+            loading: Mutex::new(None),
             wait: KEY_WAIT,
+        }
+    }
+
+    /// Read the key into this vault's cache now, waiting at most `wait` for
+    /// the keychain. The read runs on a thread of its own and holds no lock
+    /// of the vault's, so a dialog nobody answers is [`KeyLoad::Waiting`],
+    /// never a hang, and never a hang for another thread using this vault.
+    /// Call it on the one `Arc<Vault>` a process shares, before the first
+    /// read: on macOS a person's "Allow" covers that one read, and the
+    /// cached key then serves every later one. Reads nothing when the vault
+    /// has no entries.
+    pub fn load_key(self: &Arc<Self>, wait: Duration) -> Result<KeyLoad, CliError> {
+        let deadline = Instant::now() + wait;
+        {
+            let mut cached = self.key.lock().unwrap();
+            if let Settled::Idle = self.settle(&mut cached)? {
+                if cached.is_some() {
+                    return Ok(KeyLoad::Loaded);
+                }
+                if self.entry_files()?.is_empty() {
+                    return Ok(KeyLoad::Empty);
+                }
+                let (tx, rx) = mpsc::channel();
+                let vault = Arc::clone(self);
+                std::thread::spawn(move || {
+                    let _ = tx.send(vault.read_key());
+                });
+                *self.loading.lock().unwrap() = Some(rx);
+            }
+        }
+        loop {
+            {
+                let mut cached = self.key.lock().unwrap();
+                if let Settled::Idle = self.settle(&mut cached)? {
+                    return Ok(if cached.is_some() {
+                        KeyLoad::Loaded
+                    } else {
+                        KeyLoad::Missing
+                    });
+                }
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(KeyLoad::Waiting);
+            }
+            std::thread::sleep(left.min(Duration::from_millis(20)));
+        }
+    }
+
+    /// Take a [`Vault::load_key`] read that has answered into the cache.
+    /// `Waiting` while it has not.
+    fn settle(&self, cached: &mut Option<Cached>) -> Result<Settled, CliError> {
+        let mut loading = self.loading.lock().unwrap();
+        let Some(rx) = loading.as_ref() else {
+            return Ok(Settled::Idle);
+        };
+        match rx.try_recv() {
+            Ok(read) => {
+                *loading = None;
+                if let Some(key) = read? {
+                    *cached = Some(Cached {
+                        key,
+                        id: self.current_id()?,
+                    });
+                }
+                Ok(Settled::Idle)
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(Settled::Waiting),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                *loading = None;
+                Ok(Settled::Idle)
+            }
         }
     }
 
@@ -519,6 +643,9 @@ impl Vault {
     /// keychain's. `None` when the keychain has none.
     fn read_side_key(&self) -> Result<Option<Key>, CliError> {
         let mut cached = self.key.lock().unwrap();
+        if let Settled::Waiting = self.settle(&mut cached)? {
+            return Err(waiting_for_keychain());
+        }
         if let Some(c) = cached.as_ref() {
             return Ok(Some(c.key.clone()));
         }
@@ -538,6 +665,9 @@ impl Vault {
     /// cleared the vault and made a new one), else `None`.
     fn reload_if_replaced(&self) -> Result<Option<Key>, CliError> {
         let mut cached = self.key.lock().unwrap();
+        if let Settled::Waiting = self.settle(&mut cached)? {
+            return Err(waiting_for_keychain());
+        }
         let id = self.current_id()?;
         if cached.as_ref().is_some_and(|c| c.id == id) {
             return Ok(None);
@@ -558,6 +688,9 @@ impl Vault {
     /// the vault has no entries. Entries without a key are an error.
     fn write_side_key(&self) -> Result<Key, CliError> {
         let mut cached = self.key.lock().unwrap();
+        if let Settled::Waiting = self.settle(&mut cached)? {
+            return Err(waiting_for_keychain());
+        }
         let id = self.current_id()?;
         if let Some(c) = cached.as_ref().filter(|c| c.id == id) {
             return Ok(c.key.clone());
@@ -804,6 +937,18 @@ fn unreadable(path: &Path) -> CliError {
         path.display()
     ))
     .with_remedy(REMEDY_DELETE_ENTRY)
+}
+
+fn waiting_for_keychain() -> CliError {
+    CliError::Auth(
+        "the keychain has not yet answered whether this program may read the vault's key; \
+         on macOS a dialog asking for it is open"
+            .into(),
+    )
+    .with_remedy(
+        "answer the keychain dialog, choosing Always Allow so it does not ask again, then try \
+         again",
+    )
 }
 
 fn key_lost(dir: &Path) -> CliError {

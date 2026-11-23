@@ -49,6 +49,8 @@ struct FakeFile {
     content: Vec<u8>,
     modified: i64,
     trashed: bool,
+    /// A shortcut's target: its id and mime type.
+    shortcut: Option<(String, String)>,
 }
 
 impl FakeFile {
@@ -67,6 +69,9 @@ impl FakeFile {
         if self.is_blob() {
             v["size"] = json!(self.content.len().to_string());
             v["md5Checksum"] = json!(hex(&Md5::digest(&self.content)));
+        }
+        if let Some((id, mime)) = &self.shortcut {
+            v["shortcutDetails"] = json!({"targetId": id, "targetMimeType": mime});
         }
         v
     }
@@ -160,6 +165,7 @@ impl FakeDrive {
                 content: Vec::new(),
                 modified: 1_767_225_600,
                 trashed: false,
+                shortcut: None,
             },
         );
         let state = Arc::new(Mutex::new(State {
@@ -344,6 +350,34 @@ impl FakeDrive {
         )
     }
 
+    /// Add a shortcut under `parent` to the item `target`; its id. The
+    /// target's mime type is taken now, as Drive records it.
+    pub fn add_shortcut(&self, parent: &str, name: &str, target: &str) -> String {
+        let mime = self
+            .state()
+            .files
+            .get(target)
+            .map(|f| f.mime.clone())
+            .unwrap_or_else(|| "application/octet-stream".into());
+        let id = self.add(
+            parent,
+            name,
+            "application/vnd.google-apps.shortcut",
+            Vec::new(),
+        );
+        if let Some(f) = self.state().files.get_mut(&id) {
+            f.shortcut = Some((target.to_string(), mime));
+        }
+        id
+    }
+
+    /// Move the item `id` to the trash, as another app might.
+    pub fn trash(&self, id: &str) {
+        if let Some(f) = self.state().files.get_mut(id) {
+            f.trashed = true;
+        }
+    }
+
     fn add(&self, parent: &str, name: &str, mime: &str, content: Vec<u8>) -> String {
         let mut s = self.state();
         let id = s.id("fake");
@@ -358,6 +392,7 @@ impl FakeDrive {
                 content,
                 modified,
                 trashed: false,
+                shortcut: None,
             },
         );
         id
@@ -645,6 +680,7 @@ fn handle(req: &Request, addr: SocketAddr, state: &Mutex<State>) -> Response {
                 content,
                 modified,
                 trashed: false,
+                shortcut: None,
             },
         );
     }
@@ -852,6 +888,7 @@ fn create(s: &mut State, meta: &Value, content: Vec<u8>) -> Response {
         content,
         modified,
         trashed: false,
+        shortcut: None,
     };
     let v = f.to_json();
     s.files.insert(id, f);
@@ -1284,6 +1321,7 @@ mod tests {
             content: Vec::new(),
             modified: 0,
             trashed: false,
+            shortcut: None,
         };
         let q = super::super::files::quote;
         let yes = [

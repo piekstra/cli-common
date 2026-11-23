@@ -52,7 +52,9 @@ pub use commands::{
     ClientCommand, DriveArgs, DriveCli, DriveCommand, FolderCommand, LoginArgs, LogoutArgs,
     ProfilesCommand, Scope, StatusArgs,
 };
-pub use drive::{check_folder_id, Drive, DriveSpec, Existing, Hashed, TreeCopy, SPEC_PREFIX};
+pub use drive::{
+    check_folder_id, Drive, DriveSpec, Existing, Hashed, Listing, TreeCopy, SPEC_PREFIX,
+};
 pub use endpoints::Endpoints;
-pub use files::{md5_file, About, DriveFile, RESUMABLE_ABOVE};
+pub use files::{md5_file, About, DriveFile, ShortcutDetails, RESUMABLE_ABOVE};
 pub use profiles::{client_entry, token_entry, DriveProfile, ProfileStore};

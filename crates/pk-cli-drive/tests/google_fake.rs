@@ -10,10 +10,10 @@ use std::sync::Arc;
 use pk_cli_auth::vault::{MemoryKeys, Vault};
 use pk_cli_config::profile::ProfileName;
 use pk_cli_core::{CliError, Reason};
-use pk_cli_drive::google::fake::{FakeDrive, When, ACCOUNT, ROOT_ID};
+use pk_cli_drive::google::fake::{FakeDrive, When, ACCOUNT, MY_DRIVE, ROOT_ID};
 use pk_cli_drive::google::{
     token_entry, ClientCommand, Drive, DriveCli, DriveCommand, DriveSpec, Existing, FolderCommand,
-    LoginArgs, LogoutArgs, ProfileStore, ProfilesCommand, Retry, Scope, StatusArgs,
+    Listing, LoginArgs, LogoutArgs, ProfileStore, ProfilesCommand, Retry, Scope, StatusArgs,
 };
 use pk_cli_drive::{Backend, CachePolicy, CachedRemote, RemoteRead, RemoteStore};
 
@@ -850,4 +850,257 @@ fn a_spec_with_a_path_is_a_store_under_that_folder() {
     assert_eq!(d.target("scan.pdf"), format!("{base}/inbox/scan.pdf"));
     d.move_to("scan.pdf", "done/scan.pdf").unwrap();
     assert!(h.fake.find("inbox/done/scan.pdf").is_some());
+}
+
+/// A store holding a file, a Google document, a shortcut to a file and two
+/// shortcuts to one folder, the targets outside the store (as a file shared
+/// from another account is).
+fn store_with_shortcuts(h: &Harness) {
+    h.fake.add_file(ROOT_ID, "real.txt", b"r");
+    h.fake.add_google_doc(ROOT_ID, "notes");
+    let year = h.fake.add_folder(ROOT_ID, "reports");
+    let shared = h.fake.add_file(MY_DRIVE, "report.pdf", b"shared bytes");
+    h.fake.add_shortcut(&year, "shared.pdf", &shared);
+    let folder = h.fake.add_folder(MY_DRIVE, "Shared folder");
+    h.fake.add_file(&folder, "inside.txt", b"inside");
+    h.fake.add_shortcut(ROOT_ID, "shared with me", &folder);
+    h.fake.add_shortcut(&year, "again", &folder);
+}
+
+fn rels(entries: Vec<pk_cli_drive::FileEntry>) -> Vec<String> {
+    entries.into_iter().map(|e| e.rel).collect()
+}
+
+#[test]
+fn a_whole_listing_shows_documents_and_follows_shortcuts_as_rclone_does() {
+    let h = Harness::new();
+    h.signed_in();
+    store_with_shortcuts(&h);
+    assert_eq!(rels(h.drive().list_entries("").unwrap()), vec!["real.txt"]);
+
+    let d = h.drive().listing(Listing::Whole);
+    let entries = d.list_entries("").unwrap();
+    assert_eq!(
+        rels(entries.clone()),
+        vec![
+            "notes",
+            "real.txt",
+            "reports/again/inside.txt",
+            "reports/shared.pdf",
+            "shared with me/inside.txt"
+        ]
+    );
+    let at = |rel: &str| entries.iter().find(|e| e.rel == rel).unwrap().clone();
+    let shared = at("reports/shared.pdf");
+    assert_eq!(
+        shared.md5.as_deref(),
+        Some(md5_hex(b"shared bytes").as_str())
+    );
+    assert_eq!(shared.size, Some(12));
+    assert!(shared.modified.is_some());
+    let notes = at("notes");
+    assert_eq!((notes.md5, notes.size), (None, None));
+    assert!(notes.modified.is_some());
+
+    // What is listed can be read, in this value or a fresh one.
+    let fresh = h.drive().listing(Listing::Whole);
+    for d in [&d, &fresh] {
+        assert_eq!(
+            d.cat("reports/shared.pdf").unwrap().as_deref(),
+            Some("shared bytes")
+        );
+        assert_eq!(
+            d.cat("shared with me/inside.txt").unwrap().as_deref(),
+            Some("inside")
+        );
+        assert!(d.exists("reports/shared.pdf").unwrap());
+        assert!(d.exists("shared with me").unwrap());
+    }
+    assert_eq!(
+        fresh.md5("reports/again/inside.txt").unwrap(),
+        Some(md5_hex(b"inside"))
+    );
+    let out = h.tmp.path().join("shared.pdf");
+    fresh.copy_out("reports/shared.pdf", &out).unwrap();
+    assert_eq!(std::fs::read(&out).unwrap(), b"shared bytes");
+    assert_eq!(
+        rels(fresh.list_here("reports").unwrap()),
+        vec!["shared.pdf"]
+    );
+    assert_eq!(
+        rels(fresh.list_here("").unwrap()),
+        vec!["notes", "real.txt"]
+    );
+    assert_eq!(fresh.list_dirs("reports").unwrap(), vec!["again"]);
+    assert_eq!(
+        fresh.list_dirs("").unwrap(),
+        vec!["reports", "shared with me"]
+    );
+    let hashed: Vec<String> = fresh
+        .hashes("")
+        .unwrap()
+        .into_iter()
+        .map(|h| h.rel)
+        .collect();
+    assert_eq!(
+        hashed,
+        vec![
+            "real.txt",
+            "reports/again/inside.txt",
+            "reports/shared.pdf",
+            "shared with me/inside.txt"
+        ]
+    );
+    let err = fresh
+        .copy_out("notes", &h.tmp.path().join("notes"))
+        .unwrap_err();
+    assert_eq!(err.exit_code(), 2, "{err}");
+    assert!(err.to_string().contains("export it from Drive"), "{err}");
+}
+
+#[test]
+fn writes_moves_and_deletes_do_not_go_through_shortcuts() {
+    let h = Harness::new();
+    h.signed_in();
+    store_with_shortcuts(&h);
+    let d = h.drive().listing(Listing::Whole);
+    let refused = |r: Result<(), CliError>| {
+        let err = r.unwrap_err();
+        assert_eq!(err.exit_code(), 2, "{err}");
+        assert_eq!(reason(&err), Some(Reason::Provider("shortcut")), "{err}");
+    };
+    refused(d.write("reports/shared.pdf", "x"));
+    refused(d.write("shared with me/new.txt", "x"));
+    refused(d.write("reports/again/inside.txt", "x"));
+    refused(d.move_to("reports/shared.pdf", "moved.pdf"));
+    refused(d.move_to("real.txt", "reports/shared.pdf"));
+    refused(d.move_no_clobber("real.txt", "shared with me/real.txt"));
+    refused(d.delete_file("reports/shared.pdf").map(|_| ()));
+    refused(d.mkdir("shared with me/sub"));
+    let local = h.tmp.path().join("tree");
+    std::fs::create_dir_all(local.join("shared with me")).unwrap();
+    std::fs::write(local.join("shared with me/new.txt"), "n").unwrap();
+    std::fs::write(local.join("a.txt"), "a").unwrap();
+    refused(d.put_tree(&local, "", Existing::Replace).map(|_| ()));
+    assert_eq!(h.fake.count("", "a.txt"), 0, "nothing was uploaded");
+
+    // Nothing reached a target, and the store's own files still take writes.
+    assert_eq!(
+        d.cat("reports/shared.pdf").unwrap().as_deref(),
+        Some("shared bytes")
+    );
+    assert_eq!(
+        d.cat("shared with me/inside.txt").unwrap().as_deref(),
+        Some("inside")
+    );
+    assert_eq!(h.fake.count("reports", "shared.pdf"), 1);
+    d.write("real.txt", "new").unwrap();
+    d.write("reports/own.txt", "own").unwrap();
+    assert_eq!(h.fake.content("reports/own.txt").unwrap(), b"own");
+}
+
+#[test]
+fn a_shortcut_whose_target_is_gone_stops_a_whole_listing() {
+    let h = Harness::new();
+    h.signed_in();
+    h.fake.add_file(ROOT_ID, "real.txt", b"r");
+    let target = h.fake.add_file(MY_DRIVE, "gone.pdf", b"g");
+    let shortcut = h.fake.add_shortcut(ROOT_ID, "gone.pdf", &target);
+    h.fake.trash(&target);
+    let err = h
+        .drive()
+        .listing(Listing::Whole)
+        .list_entries("")
+        .unwrap_err();
+    assert_eq!(
+        reason(&err),
+        Some(Reason::Provider("shortcut_target_missing")),
+        "{err}"
+    );
+    assert!(
+        err.to_string().contains(&shortcut),
+        "names the shortcut: {err}"
+    );
+    // The default listing does not look at shortcuts.
+    assert_eq!(rels(h.drive().list_entries("").unwrap()), vec!["real.txt"]);
+}
+
+#[test]
+fn a_shortcut_to_a_folder_above_it_is_an_error_not_an_endless_listing() {
+    let h = Harness::new();
+    h.signed_in();
+    let sub = h.fake.add_folder(ROOT_ID, "sub");
+    h.fake.add_file(&sub, "x.txt", b"x");
+    h.fake.add_shortcut(&sub, "back to the top", ROOT_ID);
+    let err = h
+        .drive()
+        .listing(Listing::Whole)
+        .list_entries("")
+        .unwrap_err();
+    assert_eq!(
+        reason(&err),
+        Some(Reason::Provider("shortcut_loop")),
+        "{err}"
+    );
+    assert_eq!(rels(h.drive().list_entries("").unwrap()), vec!["sub/x.txt"]);
+}
+
+#[test]
+fn a_shortcut_named_like_a_file_beside_it_is_two_items_of_one_name() {
+    let h = Harness::new();
+    h.signed_in();
+    h.fake.add_file(ROOT_ID, "a.pdf", b"mine");
+    let other = h.fake.add_file(MY_DRIVE, "a.pdf", b"theirs");
+    h.fake.add_shortcut(ROOT_ID, "a.pdf", &other);
+    let d = h.drive().listing(Listing::Whole);
+    for err in [
+        d.list_entries("").unwrap_err(),
+        d.cat("a.pdf").unwrap_err(),
+        d.write("a.pdf", "x").unwrap_err(),
+    ] {
+        assert_eq!(
+            reason(&err),
+            Some(Reason::Provider("duplicate_name")),
+            "{err}"
+        );
+    }
+    assert_eq!(h.drive().cat("a.pdf").unwrap().as_deref(), Some("mine"));
+}
+
+#[test]
+fn drive_clis_sharing_one_vault_read_its_key_once() {
+    let h = Harness::new();
+    h.signed_in();
+    h.fake.add_file(ROOT_ID, "a.txt", b"a");
+    let keys = Arc::new(MemoryKeys::default());
+    let dir = h.tmp.path().join("shared-vault");
+    // The sign-in's entries, sealed under a key in `keys` by another run.
+    let writer = Vault::new(Arc::clone(&keys), &dir);
+    for name in [
+        token_entry(&ProfileName::parse(PROFILE).unwrap()),
+        pk_cli_drive::google::client_entry(&ProfileName::parse(PROFILE).unwrap()),
+    ] {
+        let secret = h.vault().get(&name).unwrap().expect("signed in");
+        writer.put(&name, &secret).unwrap();
+    }
+    let spec = DriveSpec::new(ProfileName::parse(PROFILE).unwrap(), ROOT_ID).unwrap();
+    let shared = Arc::new(Vault::new(Arc::clone(&keys), &dir));
+    let before = keys.reads();
+    for _ in 0..3 {
+        let cli = h.cli().with_vault(Arc::clone(&shared));
+        let d = cli.drive(&spec).unwrap().without_backoff();
+        assert_eq!(d.cat("a.txt").unwrap().as_deref(), Some("a"));
+    }
+    assert_eq!(keys.reads() - before, 1, "one key read for three sign-ins");
+    // A vault per DriveCli reads it every time.
+    let fresh_reads = keys.reads();
+    for _ in 0..2 {
+        let cli = h.cli().with_vault(Vault::new(Arc::clone(&keys), &dir));
+        cli.drive(&spec)
+            .unwrap()
+            .without_backoff()
+            .cat("a.txt")
+            .unwrap();
+    }
+    assert_eq!(keys.reads() - fresh_reads, 2);
 }

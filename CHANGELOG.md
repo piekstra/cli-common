@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.36.0 — 2026-11-23
+
+- `pk-cli-drive`: `Drive::listing(Listing::Whole)` lists a Drive store as rclone's default
+  listing does, for a CLI whose folder other apps also fill. Google's own documents are listed
+  with no size or md5; a shortcut is its target under the shortcut's path, and a shortcut to a
+  folder is walked. Reads follow shortcuts. Writes, moves and deletes onto or through one are exit
+  2 with reason `shortcut`. A shortcut whose target is gone (`shortcut_target_missing`) or that
+  points at a folder above it (`shortcut_loop`) stops the listing, so it is whole or an error. The
+  default, `Listing::Bytes`, is unchanged.
+- `pk-cli-drive`: `DriveFile::shortcut_details` (a new public field, `ShortcutDetails`) and
+  `DriveFile::is_shortcut`. Every file answer now asks Drive for `shortcutDetails`.
+- `pk-cli-drive`: the fake Drive server has `add_shortcut` and `trash`.
+- `pk-cli-drive`: `DriveCli::with_vault` takes `impl Into<Arc<Vault>>`, so a process can share
+  one vault across the `DriveCli` values it builds and read its key from the keychain once.
+  `DriveCli::default_vault(bin)` builds the vault `DriveCli::new` would. Callers passing a `Vault`
+  are unchanged.
+- `pk-cli-auth`: `Vault::load_key(wait)` reads the key into the vault's cache with a bound, on a
+  thread of its own that holds none of the vault's locks. A keychain dialog nobody answers is
+  `KeyLoad::Waiting`. Until it is answered, the vault's reads and writes that need the key fail at
+  once (exit 3) instead of blocking or asking again, and a later `load_key` waits on the same read.
+- `pk-cli-auth`: `Vault::for_binary` honours `<PREFIX>_KEYCHAIN_SERVICE` through the new
+  `vault::keychain_for(bin)`, as `DriveCli::new` already did, so the two pick one service for one
+  binary. DESIGN.md §2.5 and the vault docs say the key is read once per `Vault` value.
+
 ## v0.35.1 — 2026-11-23
 
 - `pk-cli-drive`: the `drive.file` scope test is settled and in `docs/google-drive.md`, in Google's
