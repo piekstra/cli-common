@@ -50,6 +50,30 @@ pub trait RemoteStore: RemoteRead + sealed::Sealed {
     fn mkdir(&self, rel: &str) -> Result<(), CliError>;
     /// The immediate subfolders of `rel`, sorted, without a trailing `/`.
     fn list_dirs(&self, rel: &str) -> Result<Vec<String>, CliError>;
+    /// Write many files byte for byte, each replacing whatever file is at
+    /// its `rel`, parent folders made as needed. Every `rel` must name a file
+    /// under the store root, and none may be given twice; otherwise nothing
+    /// is written (exit 2). The first failure, in the order given, stops the
+    /// writes and is returned; the files written before it stay. `Ok(n)`:
+    /// the files whose bytes were sent.
+    ///
+    /// This default writes one file after another, each through an
+    /// owner-only temp file and [`RemoteStore::copy_in`], and sends every
+    /// file. The Drive API's remote sends several at once and skips a file
+    /// that already holds the same bytes.
+    fn write_many(&self, files: &[(&str, &[u8])]) -> Result<usize, CliError> {
+        crate::backend::check_batch(files)?;
+        let dir = crate::backend::private_temp_dir(&format!("{}-put", self.temp_name_prefix()))?;
+        for (i, (rel, bytes)) in files.iter().enumerate() {
+            let tmp = dir.path().join(i.to_string());
+            crate::private_file::write(&tmp, bytes, crate::private_file::Replace::Never)
+                .map_err(|e| CliError::Other(format!("staging {rel} for upload: {e}")))?;
+            let sent = self.copy_in(&tmp, rel);
+            let _ = std::fs::remove_file(&tmp);
+            sent?;
+        }
+        Ok(files.len())
+    }
     /// The prefix of this CLI's temp files (usually the binary name).
     fn temp_name_prefix(&self) -> &str;
     /// This remote with every call it makes bounded to `budget` from now,

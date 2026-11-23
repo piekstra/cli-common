@@ -470,6 +470,18 @@ impl<R: RemoteStore> CachedRemote<R> {
         Ok(())
     }
 
+    /// [`RemoteStore::write_many`] through the cache. Every path given
+    /// loses its cached copy, and every cached listing is dropped, whether
+    /// the writes all went or one failed partway: a failure leaves the files
+    /// before it written.
+    pub fn write_many(&self, files: &[(&str, &[u8])]) -> Result<usize, CliError> {
+        crate::backend::check_batch(files)?;
+        self.confirm_stale_reads()?;
+        let sent = self.remote.write_many(files);
+        self.written(files.iter().map(|(rel, _)| (*rel, None)));
+        sent
+    }
+
     pub fn move_to(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError> {
         self.confirm_stale_reads()?;
         self.remote.move_to(rel_from, rel_to)?;
