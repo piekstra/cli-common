@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.37.6 — 2026-11-23
+
+- `pk-cli-drive`: `drive client import --from-profile <NAME>` copies the OAuth client another
+  Drive profile on the machine holds into the profile being imported into. The client is read from
+  the vault and sealed again under the new profile; no file or stdin is needed. The source keeps
+  its client and its sign-in. The new profile gets the client only, with no sign-in, so
+  `drive login` follows. The output (`drive-client/v1`) adds `from_profile`. A source that is not
+  configured, holds no client, or is the profile being imported into is refused (exit 2), and
+  nothing is written. `--from-profile` cannot be combined with `--file` or `--stdin`. The
+  use case: a second Google account through the same Cloud project's client after the downloaded
+  JSON was deleted, as the guide advises. Under `drive.file`, only that project's clients see the
+  folders its first sign-in made.
+- `pk-cli-drive`: `Backend::write_many(files: &[(&str, &[u8])]) -> Result<usize, CliError>` writes
+  a batch of files byte for byte, each replacing whatever file is at its path, with parent folders
+  made as needed. On Drive, cached or not, every folder the batch needs is made first, once,
+  shallowest first. Then the files go up to 4 at a time, the limit `put_tree` uses, which
+  `Drive::transfers(n)` lowers. Each file replaces the one at its path in place (same id), and a
+  file whose md5 already matches is not sent. A mount writes one after another and skips a file
+  already holding the same bytes. rclone writes one after another, each through an owner-only temp
+  file, and sends every file. The first failure in the order given stops the batch and is returned.
+  The files written before it stay, and on Drive the few already under way finish. `Ok(n)` counts
+  the files sent. A path given twice, or one that does not name a file under the store root (empty,
+  `.`, `..`, or a leading, trailing or doubled `/`), refuses the whole batch with exit 2 before
+  anything is written. Through the cache, every path given loses its cached copy and every cached
+  listing is dropped, even when a failure stopped the batch partway. `RemoteStore` (sealed) gains
+  `write_many`, with the one-after-another default.
+- `pk-cli-drive`: `ClientCommand::Import` gains a `from_profile` field. Code that builds the
+  variant by hand adds `from_profile: None`; a CLI that only parses it with clap needs no change.
+
 ## v0.37.5 — 2026-11-23
 
 - `pk-cli-browser`: a watch window (`Capture::responses`, `request_log`, `optional_request`) that

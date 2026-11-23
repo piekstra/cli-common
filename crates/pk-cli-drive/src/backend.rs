@@ -125,6 +125,7 @@ trait Store {
     fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError>;
     /// A download, never cached.
     fn download(&self, rel: &str) -> Result<LocalCopy, CliError>;
+    fn write_many(&self, files: &[(&str, &[u8])]) -> Result<usize, CliError>;
 }
 
 impl<R: RemoteStore> Store for R {
@@ -161,6 +162,9 @@ impl<R: RemoteStore> Store for R {
     fn download(&self, rel: &str) -> Result<LocalCopy, CliError> {
         download(self, rel)
     }
+    fn write_many(&self, files: &[(&str, &[u8])]) -> Result<usize, CliError> {
+        RemoteStore::write_many(self, files)
+    }
 }
 
 impl<R: RemoteStore> Store for CachedRemote<R> {
@@ -196,6 +200,9 @@ impl<R: RemoteStore> Store for CachedRemote<R> {
     }
     fn download(&self, rel: &str) -> Result<LocalCopy, CliError> {
         download(self.remote(), rel)
+    }
+    fn write_many(&self, files: &[(&str, &[u8])]) -> Result<usize, CliError> {
+        CachedRemote::write_many(self, files)
     }
 }
 
@@ -273,6 +280,43 @@ impl Backend {
                 })
             }
             Ok(s) => s.copy_in(local, rel),
+        }
+    }
+
+    /// Write many files byte for byte, each replacing whatever file is at
+    /// its `rel`, parent folders made as needed, once.
+    ///
+    /// - Every `rel` must name a file under the store root, and none may be
+    ///   given twice; otherwise nothing is written (exit 2).
+    /// - Drive, cached or not, sends up to 4 at a time ([`Drive::transfers`]
+    ///   lowers it, `1` being one after another) and skips a file whose md5
+    ///   already matches. A mount writes one after another and skips a file
+    ///   already holding the same bytes. rclone writes one after another and
+    ///   sends every file.
+    /// - The first failure, in the order given, stops the writes and is
+    ///   returned. The files written before it stay, and with Drive the few
+    ///   already under way finish.
+    /// - `Ok(n)`: the files whose bytes were sent.
+    ///
+    /// [`Drive::transfers`]: crate::google::Drive::transfers
+    pub fn write_many(&self, files: &[(&str, &[u8])]) -> Result<usize, CliError> {
+        check_batch(files)?;
+        match self.store() {
+            Err(root) => {
+                let mut sent = 0;
+                for (rel, bytes) in files {
+                    let path = root.join(rel);
+                    if fs::read(&path).is_ok_and(|there| there == *bytes) {
+                        continue;
+                    }
+                    create_parent(&path)?;
+                    fs::write(&path, bytes)
+                        .map_err(|e| CliError::Other(format!("writing {}: {e}", path.display())))?;
+                    sent += 1;
+                }
+                Ok(sent)
+            }
+            Ok(s) => s.write_many(files),
         }
     }
 
@@ -492,6 +536,32 @@ pub(crate) fn check_deletable(rel: &str) -> Result<(), CliError> {
     }))
 }
 
+/// The check every backend's [`Backend::write_many`] makes before anything
+/// is written: each `rel` names a file under the store root, and no `rel` is
+/// given twice (which would leave it holding whichever bytes went last).
+pub(crate) fn check_batch(files: &[(&str, &[u8])]) -> Result<(), CliError> {
+    let mut seen = std::collections::HashSet::new();
+    for (rel, _) in files {
+        // Split on `/` rather than through `Path::components`, which drops a
+        // `.` in the middle and so would let `a/./b` and `a/b` pass as two.
+        let names_a_file = rel
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..");
+        if !names_a_file {
+            return Err(CliError::Usage(format!(
+                "refusing to write {rel:?}: name a file under the store root, with no `.` or `..` \
+                 and no leading or trailing `/`; nothing was written"
+            )));
+        }
+        if !seen.insert(*rel) {
+            return Err(CliError::Usage(format!(
+                "{rel} is given twice; nothing was written"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn create_parent(path: &Path) -> Result<(), CliError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -645,6 +715,86 @@ mod tests {
         assert!(!stub.file("inbox/a.pdf").exists());
         assert!(!b.delete_file("inbox/a.pdf").unwrap());
         assert_eq!(b.delete_file("").unwrap_err().exit_code(), 2);
+    }
+
+    #[test]
+    fn a_mount_writes_many_byte_for_byte_and_skips_what_it_holds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let b = Backend::Mount(tmp.path().to_path_buf());
+        let binary = [0xff_u8, 0xfe, 0x00, 0x80];
+        let files: [(&str, &[u8]); 3] = [
+            ("views/a.json", b"{}"),
+            ("views/p1/deep/scan.bin", &binary),
+            ("top.txt", b"top"),
+        ];
+        assert_eq!(b.write_many(&files).unwrap(), 3);
+        assert_eq!(
+            fs::read(tmp.path().join("views/p1/deep/scan.bin")).unwrap(),
+            binary
+        );
+        assert_eq!(
+            b.write_many(&files).unwrap(),
+            0,
+            "every file already holds its bytes"
+        );
+        let changed: [(&str, &[u8]); 2] = [("views/a.json", b"{\"n\":1}"), ("top.txt", b"top")];
+        assert_eq!(b.write_many(&changed).unwrap(), 1);
+        assert_eq!(
+            fs::read(tmp.path().join("views/a.json")).unwrap(),
+            b"{\"n\":1}"
+        );
+    }
+
+    #[test]
+    fn a_bad_batch_writes_nothing_on_any_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let b = Backend::Mount(tmp.path().join("store"));
+        for bad in [
+            vec![("a.json", &b"1"[..]), ("a.json", &b"2"[..])],
+            vec![("ok.json", &b"1"[..]), ("../out.json", &b"1"[..])],
+            vec![("", &b"1"[..])],
+            vec![("dir/", &b"1"[..])],
+            vec![("/abs.json", &b"1"[..])],
+            vec![("a/./b.json", &b"1"[..])],
+        ] {
+            let err = b.write_many(&bad).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{bad:?}");
+            assert!(err.to_string().contains("nothing was written"), "{err}");
+        }
+        assert!(!tmp.path().join("store").exists());
+        assert!(!tmp.path().join("out.json").exists());
+        assert_eq!(b.write_many(&[]).unwrap(), 0);
+    }
+
+    /// rclone takes the trait's default: one file after another, each
+    /// through an owner-only temp file, every file sent.
+    #[cfg(unix)]
+    #[test]
+    fn rclone_writes_many_one_after_another_and_stops_at_a_failure() {
+        let stub = crate::stub::Stub::backed();
+        let b = Backend::Remote(stub.remote());
+        let binary = [0xff_u8, 0x00, 0xfe];
+        let files: [(&str, &[u8]); 2] = [("views/a.bin", &binary), ("views/p/b.json", b"{}")];
+        assert_eq!(b.write_many(&files).unwrap(), 2);
+        assert_eq!(fs::read(stub.file("views/a.bin")).unwrap(), binary);
+        assert_eq!(fs::read(stub.file("views/p/b.json")).unwrap(), b"{}");
+        assert_eq!(b.write_many(&files).unwrap(), 2, "rclone sends every file");
+        let uploads = stub
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("copyto "))
+            .count();
+        assert_eq!(uploads, 4);
+
+        let failing = crate::stub::Stub::new("exit 1");
+        let b = Backend::Remote(failing.remote());
+        assert!(b.write_many(&files).is_err());
+        let tried = failing
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("copyto "))
+            .count();
+        assert_eq!(tried, 1, "the first failure stops the rest");
     }
 
     #[test]

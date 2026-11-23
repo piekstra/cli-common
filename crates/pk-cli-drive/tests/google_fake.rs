@@ -12,9 +12,9 @@ use pk_cli_config::profile::ProfileName;
 use pk_cli_core::{CliError, Reason};
 use pk_cli_drive::google::fake::{FakeDrive, When, ACCOUNT, MY_DRIVE, ROOT_ID};
 use pk_cli_drive::google::{
-    token_entry, ClientCommand, Drive, DriveCli, DriveCommand, DriveSpec, Duplicate, Existing,
-    FolderCommand, ItemKind, Listing, LoginArgs, LogoutArgs, ProfileStore, ProfilesCommand, Retry,
-    Scope, StatusArgs, MAX_TRANSFERS,
+    client_entry, token_entry, ClientCommand, Drive, DriveCli, DriveCommand, DriveProfile,
+    DriveSpec, Duplicate, Existing, FolderCommand, ItemKind, Listing, LoginArgs, LogoutArgs,
+    ProfileStore, ProfilesCommand, Retry, Scope, StatusArgs, MAX_TRANSFERS,
 };
 use pk_cli_drive::{reason, Backend, CachePolicy, CachedRemote, RemoteRead, RemoteStore};
 
@@ -618,6 +618,7 @@ fn importing_another_client_needs_overwrite_and_drops_the_sign_in() {
             &DriveCommand::Client(ClientCommand::Import {
                 file: Some(other.clone()),
                 stdin: false,
+                from_profile: None,
                 overwrite,
             }),
             Some(PROFILE),
@@ -631,6 +632,96 @@ fn importing_another_client_needs_overwrite_and_drops_the_sign_in() {
     assert!(!h.vault().contains(&token_entry(&name)).unwrap());
     let record = h.profiles().get(&name).unwrap().unwrap();
     assert!(record.client_id.unwrap().contains("0def"));
+}
+
+#[test]
+fn a_client_is_copied_from_another_profile_without_its_sign_in() {
+    let h = Harness::new();
+    h.signed_in();
+    let import = |into: &str, from: &str| {
+        h.cli().run(
+            &DriveCommand::Client(ClientCommand::Import {
+                file: None,
+                stdin: false,
+                from_profile: Some(from.into()),
+                overwrite: false,
+            }),
+            Some(into),
+            true,
+            false,
+        )
+    };
+    import("synthetic", PROFILE).unwrap();
+    let from = ProfileName::parse(PROFILE).unwrap();
+    let into = ProfileName::parse("synthetic").unwrap();
+    let copied = h.profiles().get(&into).unwrap().unwrap();
+    let source = h.profiles().get(&from).unwrap().unwrap();
+    assert_eq!(copied.client_id, source.client_id);
+    assert!(copied.scopes.is_empty());
+    assert_eq!(copied.signed_in_at, None);
+    assert!(h.vault().contains(&client_entry(&into)).unwrap());
+    assert!(!h.vault().contains(&token_entry(&into)).unwrap());
+    assert!(
+        h.vault().contains(&token_entry(&from)).unwrap(),
+        "the source keeps its sign-in"
+    );
+
+    let nothing_written = |name: &str| {
+        let name = ProfileName::parse(name).unwrap();
+        assert_eq!(h.profiles().get(&name).unwrap(), None, "{name}: no record");
+        assert!(
+            !h.vault().contains(&client_entry(&name)).unwrap(),
+            "{name}: no client"
+        );
+        assert!(
+            !h.vault().contains(&token_entry(&name)).unwrap(),
+            "{name}: no token"
+        );
+    };
+
+    assert_eq!(import("second", "nobody").unwrap_err().exit_code(), 2);
+    nothing_written("second");
+
+    // A configured profile whose vault holds no client.
+    let bare = ProfileName::parse("bare").unwrap();
+    h.profiles().put(&bare, &DriveProfile::default()).unwrap();
+    let err = import("third", "bare").unwrap_err();
+    assert_eq!(err.exit_code(), 2);
+    assert_eq!(reason(&err), Some(reason::NO_CLIENT));
+    nothing_written("third");
+
+    let before = h.profiles().get(&from).unwrap();
+    assert_eq!(import(PROFILE, PROFILE).unwrap_err().exit_code(), 2);
+    assert_eq!(
+        h.profiles().get(&from).unwrap(),
+        before,
+        "a self-copy changes nothing"
+    );
+    assert!(h.vault().contains(&client_entry(&from)).unwrap());
+    assert!(h.vault().contains(&token_entry(&from)).unwrap());
+}
+
+#[test]
+fn from_profile_excludes_a_file_and_stdin() {
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Cli {
+        #[command(subcommand)]
+        client: ClientCommand,
+    }
+    let parse = |args: &[&str]| Cli::try_parse_from(args).map(|c| c.client);
+    assert!(matches!(
+        parse(&["c", "import", "--from-profile", "home"]),
+        Ok(ClientCommand::Import {
+            from_profile: Some(_),
+            file: None,
+            stdin: false,
+            ..
+        })
+    ));
+    assert!(parse(&["c", "import", "--from-profile", "home", "--file", "x.json"]).is_err());
+    assert!(parse(&["c", "import", "--from-profile", "home", "--stdin"]).is_err());
+    assert!(parse(&["c", "import"]).is_err());
 }
 
 #[test]
@@ -1849,6 +1940,142 @@ fn walk_names(dir: &Path) -> Vec<String> {
         }
     }
     out
+}
+
+/// 10 folders of 6 files, each with a nested folder of 6: 120 files, none
+/// of them valid UTF-8.
+fn many_files() -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    for d in 0..10u8 {
+        for i in 0..6u8 {
+            out.push((format!("views/p{d}/f{i}.bin"), vec![0xff, 0xfe, d, i]));
+            out.push((format!("views/p{d}/deep/g{i}.bin"), vec![0x80, d, i, 0x00]));
+        }
+    }
+    out
+}
+
+fn as_batch(files: &[(String, Vec<u8>)]) -> Vec<(&str, &[u8])> {
+    files
+        .iter()
+        .map(|(r, b)| (r.as_str(), b.as_slice()))
+        .collect()
+}
+
+#[test]
+fn write_many_goes_side_by_side_replaces_in_place_and_makes_each_folder_once() {
+    let h = Harness::new();
+    h.signed_in();
+    let files = many_files();
+    h.fake.latency(std::time::Duration::from_millis(2));
+    h.fake.clear_requests();
+    let b = Backend::Drive(h.drive());
+    assert_eq!(b.write_many(&as_batch(&files)).unwrap(), 120);
+    let folder_creates = h
+        .fake
+        .requests()
+        .iter()
+        .filter(|l| l.starts_with("POST /drive/v3/files?"))
+        .count();
+    // views, 10 folders and 10 nested ones: each made once.
+    assert_eq!(folder_creates, 21);
+    for (rel, bytes) in &files {
+        let (dir, name) = rel.rsplit_once('/').unwrap();
+        assert_eq!(h.fake.count(dir, name), 1, "{rel}");
+        assert_eq!(h.fake.content(rel).as_deref(), Some(&bytes[..]), "{rel}");
+    }
+    let peak = h.fake.peak_in_flight();
+    assert!((2..=4).contains(&peak), "uploads at once: {peak}");
+
+    h.fake.clear_requests();
+    assert_eq!(
+        b.write_many(&as_batch(&files)).unwrap(),
+        0,
+        "every md5 matches"
+    );
+    assert!(!h.fake.requests().iter().any(|l| l.contains("/upload/")));
+
+    let ids: Vec<_> = files.iter().take(3).map(|(r, _)| h.fake.find(r)).collect();
+    let mut changed = files.clone();
+    for (_, bytes) in changed.iter_mut().take(3) {
+        bytes.push(1);
+    }
+    assert_eq!(b.write_many(&as_batch(&changed)).unwrap(), 3);
+    for ((rel, bytes), id) in changed.iter().take(3).zip(ids) {
+        let (dir, name) = rel.rsplit_once('/').unwrap();
+        assert_eq!(h.fake.count(dir, name), 1, "{rel}: replaced, not doubled");
+        assert_eq!(h.fake.find(rel), id, "{rel}: the same file");
+        assert_eq!(h.fake.content(rel).as_deref(), Some(&bytes[..]));
+    }
+
+    let one = Backend::Drive(h.drive().transfers(1));
+    let more: Vec<(String, Vec<u8>)> = (0..12u8)
+        .map(|i| (format!("views/one/{i}.bin"), vec![i, 0xff]))
+        .collect();
+    h.fake.clear_requests();
+    assert_eq!(one.write_many(&as_batch(&more)).unwrap(), 12);
+    assert_eq!(
+        h.fake.peak_in_flight(),
+        1,
+        "transfers(1) writes one at a time"
+    );
+}
+
+#[test]
+fn write_many_stops_at_the_first_failure_and_a_rerun_finishes_without_doubles() {
+    let h = Harness::new();
+    h.signed_in();
+    let files = many_files();
+    h.fake.latency(std::time::Duration::from_millis(5));
+    h.fake.clear_requests();
+    h.fake.fail_next(
+        "uploadType=multipart",
+        403,
+        "insufficientFilePermissions",
+        1,
+        When::Before,
+    );
+    let b = Backend::Drive(h.drive());
+    let err = b.write_many(&as_batch(&files)).unwrap_err();
+    assert!(err.to_string().contains("writing"), "{err}");
+    let sent = h
+        .fake
+        .requests()
+        .iter()
+        .filter(|l| l.contains("uploadType=multipart"))
+        .count();
+    assert!(sent < files.len() / 2, "{sent} of 120 uploads sent");
+    let rest = b.write_many(&as_batch(&files)).unwrap();
+    assert!(rest >= files.len() - sent, "{rest} sent on the rerun");
+    for (rel, bytes) in &files {
+        let (dir, name) = rel.rsplit_once('/').unwrap();
+        assert_eq!(h.fake.count(dir, name), 1, "{rel}");
+        assert_eq!(h.fake.content(rel).as_deref(), Some(&bytes[..]));
+    }
+}
+
+#[test]
+fn write_many_through_the_cache_drops_each_cached_copy() {
+    let h = Harness::new();
+    h.signed_in();
+    let cached = CachedRemote::new(
+        h.drive(),
+        h.tmp.path().join("cache"),
+        CachePolicy::default(),
+    );
+    let b = Backend::CachedDrive(cached);
+    b.write_file("state/a.json", "1").unwrap();
+    assert_eq!(b.read_file("state/a.json").unwrap().as_deref(), Some("1"));
+    let batch: [(&str, &[u8]); 2] = [("state/a.json", b"2"), ("state/b.bin", &[0xff, 0x00])];
+    assert_eq!(b.write_many(&batch).unwrap(), 2);
+    assert_eq!(b.read_file("state/a.json").unwrap().as_deref(), Some("2"));
+    assert_eq!(
+        b.list_files_recursive("state").unwrap(),
+        vec!["a.json", "b.bin"]
+    );
+    let bad: [(&str, &[u8]); 2] = [("state/c.json", b"1"), ("state/c.json", b"2")];
+    assert_eq!(b.write_many(&bad).unwrap_err().exit_code(), 2);
+    assert_eq!(h.fake.find("state/c.json"), None);
 }
 
 #[test]

@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 
 use super::account::{now, Account, FixedToken};
 use super::api::{Api, Retry};
-use super::client::{id_hint, DesktopClient};
+use super::client::{id_hint, DesktopClient, StoredClient};
 use super::drive::{Drive, DriveSpec};
 use super::endpoints::Endpoints;
 use super::profiles::{client_entry, token_entry, DriveProfile, ProfileStore};
@@ -171,17 +171,29 @@ pub enum ClientCommand {
             long,
             alias = "client-file",
             value_name = "PATH",
-            required_unless_present = "stdin",
-            conflicts_with = "stdin"
+            required_unless_present_any = ["stdin", "from_profile"],
+            conflicts_with_all = ["stdin", "from_profile"]
         )]
         file: Option<PathBuf>,
         /// Read the JSON from stdin.
-        #[arg(long, alias = "client-stdin")]
+        #[arg(long, alias = "client-stdin", conflicts_with = "from_profile")]
         stdin: bool,
+        /// Copy the client another Drive profile on this machine already holds.
+        /// It stays sealed in the vault; a second account through one app's
+        /// client needs no file.
+        #[arg(long, value_name = "NAME")]
+        from_profile: Option<String>,
         /// Replace a different client already stored; its sign-in is removed.
         #[arg(long)]
         overwrite: bool,
     },
+}
+
+/// Where `client import` takes the client from.
+struct ClientSource<'a> {
+    file: Option<&'a std::path::Path>,
+    stdin: bool,
+    from_profile: Option<&'a str>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -384,8 +396,18 @@ impl DriveCli {
             DriveCommand::Client(ClientCommand::Import {
                 file,
                 stdin,
+                from_profile,
                 overwrite,
-            }) => self.import_client(profile, file.as_deref(), *stdin, *overwrite, json_mode),
+            }) => self.import_client(
+                profile,
+                ClientSource {
+                    file: file.as_deref(),
+                    stdin: *stdin,
+                    from_profile: from_profile.as_deref(),
+                },
+                *overwrite,
+                json_mode,
+            ),
             DriveCommand::Profiles(ProfilesCommand::List) => self.list(json_mode),
             DriveCommand::Profiles(ProfilesCommand::Remove { name, force }) => {
                 let name = match (name.as_deref(), profile) {
@@ -849,18 +871,54 @@ impl DriveCli {
         Ok(())
     }
 
+    /// The client another configured profile holds, read from the vault.
+    fn profile_client(&self, from: &str, into: &ProfileName) -> Result<DesktopClient, CliError> {
+        let from = ProfileName::parse(from)?;
+        if &from == into {
+            return Err(CliError::Usage(format!(
+                "`--from-profile {from}` names the profile being imported into"
+            )));
+        }
+        let configured = self.store.load()?;
+        if !configured.contains(&from) {
+            let names: Vec<&str> = configured.names().map(ProfileName::as_str).collect();
+            return Err(CliError::Usage(format!(
+                "no Drive profile `{from}` to copy a client from; configured: {}",
+                if names.is_empty() {
+                    "none".into()
+                } else {
+                    names.join(", ")
+                }
+            )));
+        }
+        match self.vault.get_json::<StoredClient>(&client_entry(&from))? {
+            Some(stored) => Ok(DesktopClient::from_stored(&stored)),
+            None => Err(CliError::Usage(format!(
+                "Drive profile `{from}` has no OAuth client to copy"
+            ))
+            .because(crate::reason::NO_CLIENT)),
+        }
+    }
+
     fn import_client(
         &self,
         given: Option<&str>,
-        file: Option<&std::path::Path>,
-        stdin: bool,
+        source: ClientSource<'_>,
         overwrite: bool,
         json_mode: bool,
     ) -> Result<(), CliError> {
         let name = self.new_name(given)?;
-        let client = self
-            .read_client(file, stdin)?
-            .ok_or_else(|| CliError::Usage("give `--file <PATH>` or `--stdin`".into()))?;
+        let client = match source.from_profile {
+            Some(from) => self.profile_client(from, &name)?,
+            None => self
+                .read_client(source.file, source.stdin)?
+                .ok_or_else(|| {
+                    CliError::Usage(
+                        "give `--file <PATH>`, `--stdin` or `--from-profile <NAME>`".into(),
+                    )
+                })?,
+        };
+        let file = source.file;
         let mut record = self.store.get(&name)?.unwrap_or_default();
         let changed = record
             .client_id
@@ -891,12 +949,15 @@ impl DriveCli {
             let lock = RefreshLock::at(self.lock_path.clone());
             lock.forget(|| self.vault.delete(&token_entry(&name)))?;
         }
-        let payload = json!({
+        let mut payload = json!({
             "profile": name.as_str(),
             "client": client.id_hint(),
             "project": client.project_id(),
             "stored": true,
         });
+        if let Some(from) = source.from_profile {
+            payload["from_profile"] = json!(from);
+        }
         output::emit(json_mode, "drive-client", payload, |_| {
             println!(
                 "Stored OAuth client {} for Drive profile `{name}`. Sign in with `{}`.",

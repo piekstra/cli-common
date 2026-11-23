@@ -1588,7 +1588,9 @@ impl Drive {
         }
     }
 
-    fn upload_to(&self, rel: &str, source: Source<'_>) -> Result<(), CliError> {
+    /// Write `source` at `rel`: `true` when bytes were sent, `false` when
+    /// the file there already held them.
+    fn upload_to(&self, rel: &str, source: Source<'_>) -> Result<bool, CliError> {
         let _held = self.claim(rel);
         let what = format!("writing {}", self.shown(rel));
         let (dir, name) = Self::split(rel)?;
@@ -1599,7 +1601,7 @@ impl Drive {
             Some(Found { file: f, .. }) => {
                 if f.md5() == Some(source.md5()?) {
                     self.remember(rel, &f.id, false, false);
-                    return Ok(());
+                    return Ok(false);
                 }
                 self.api
                     .upload(&what, Target::Existing { id: &f.id }, &source)?
@@ -1614,7 +1616,7 @@ impl Drive {
             )?,
         };
         self.remember(rel, &made.id, false, false);
-        Ok(())
+        Ok(true)
     }
 
     fn move_file(&self, rel_from: &str, rel_to: &str, clobber: bool) -> Result<(), CliError> {
@@ -1764,11 +1766,50 @@ impl RemoteStore for Drive {
     fn write(&self, rel: &str, content: &str) -> Result<(), CliError> {
         let rel = &self.abs(rel);
         self.upload_to(rel, Source::Bytes(content.as_bytes()))
+            .map(|_| ())
     }
 
     fn copy_in(&self, local: &Path, rel: &str) -> Result<(), CliError> {
         let rel = &self.abs(rel);
-        self.upload_to(rel, Source::File(local))
+        self.upload_to(rel, Source::File(local)).map(|_| ())
+    }
+
+    /// Up to 4 files at a time ([`Drive::transfers`] lowers it), each
+    /// replacing the file at its path in place (same id), never a second file
+    /// of the name. A file whose md5 already matches is not sent and not
+    /// counted. Every folder a file goes into is made first, once.
+    fn write_many(&self, files: &[(&str, &[u8])]) -> Result<usize, CliError> {
+        crate::backend::check_batch(files)?;
+        let plan: Vec<(String, &[u8])> = files
+            .iter()
+            .map(|(rel, bytes)| (self.abs(rel), *bytes))
+            .collect();
+        // Every folder is made here, once, shallowest first, so no two
+        // uploads race to make one.
+        let mut dirs = Vec::new();
+        for (rel, _) in &plan {
+            dirs.push(Self::split(rel)?.0);
+        }
+        dirs.sort_by(|a, b| (a.matches('/').count(), a).cmp(&(b.matches('/').count(), b)));
+        dirs.dedup();
+        for dir in &dirs {
+            self.folder_id(dir, true)?;
+        }
+        let done = super::pool::run(
+            plan,
+            self.uploads(),
+            |(rel, bytes)| self.upload_to(&rel, Source::Bytes(bytes)),
+            Result::is_err,
+        );
+        // The first failure in the order given is the one reported; the
+        // files written before it stay.
+        let mut sent = 0;
+        for answer in done.into_iter().flatten() {
+            if answer? {
+                sent += 1;
+            }
+        }
+        Ok(sent)
     }
 
     fn copy_out(&self, rel: &str, local: &Path) -> Result<(), CliError> {
