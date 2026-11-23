@@ -42,6 +42,12 @@ covers what a CLI on this crate reads from Google and where it keeps it.
    `installed` (Desktop app) client is accepted; a Web client's JSON is
    refused, since its secret would be confidential and a loopback redirect is
    not registered for it.
+5. For a second account through the same client, copy it from a profile that
+   has it: `<cli> drive client import --profile <NEW> --from-profile <NAME>`.
+   The client stays sealed in the vault, so no file is needed once the first
+   import deleted it. Under `drive.file` a folder is visible to every client of
+   the Cloud project that made it, so a second sign-in that must see what a web
+   app of the same project made needs that project's client, not another one.
 
 The client JSON's `auth_uri` and `token_uri` are ignored: the endpoints are
 Google's, compiled in, so a planted file cannot send the client secret
@@ -118,7 +124,7 @@ is `<PREFIX>_DRIVE_PROFILE`.
 | `status [--local]` | The stored sign-in, and one `about` call to Drive unless `--local` (which reads no keychain) | `auth-status/v1` plus `profile`, `scopes`, `client`, `signed_in_at` |
 | `logout [--revoke] [--forget]` | Removes the token set. `--revoke` also revokes the grant at Google, which ends every sign-in of that account through any client of the Cloud project (a web app's too), on every machine. `--forget` removes the profile and its client too | `drive-logout/v1` |
 | `about` | The account's email and storage quota (replaces `rclone about`) | `drive-about/v1` |
-| `client import --file <PATH> \| --stdin [--overwrite]` | Stores a Desktop client's JSON (`--client-file`, `--client-stdin` as on `login` work too). Replacing a different client needs `--overwrite` and drops the profile's sign-in | `drive-client/v1` |
+| `client import --file <PATH> \| --stdin \| --from-profile <NAME> [--overwrite]` | Stores a Desktop client's JSON (`--client-file`, `--client-stdin` as on `login` work too), or copies the client another profile holds, without its sign-in (`from_profile` in the output). Replacing a different client needs `--overwrite` and drops the profile's sign-in | `drive-client/v1` |
 | `folder create <NAME>` | Makes a folder at the top of My Drive for a store and prints its id and spec; one of that name already there (that this sign-in can see) is reused, two are an error. Under `drive.file` a store must be a folder the app's client made | `drive-folder/v1` |
 | `folder list` | The folders at the top of My Drive this sign-in can see | `drive-folder-list/v1` |
 | `profiles list` | The profiles, with account, scopes and whether signed in. Reads no keychain | `profile-list/v1` |

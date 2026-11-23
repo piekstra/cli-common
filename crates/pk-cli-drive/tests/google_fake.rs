@@ -12,9 +12,9 @@ use pk_cli_config::profile::ProfileName;
 use pk_cli_core::{CliError, Reason};
 use pk_cli_drive::google::fake::{FakeDrive, When, ACCOUNT, MY_DRIVE, ROOT_ID};
 use pk_cli_drive::google::{
-    token_entry, ClientCommand, Drive, DriveCli, DriveCommand, DriveSpec, Duplicate, Existing,
-    FolderCommand, ItemKind, Listing, LoginArgs, LogoutArgs, ProfileStore, ProfilesCommand, Retry,
-    Scope, StatusArgs, MAX_TRANSFERS,
+    client_entry, token_entry, ClientCommand, Drive, DriveCli, DriveCommand, DriveSpec, Duplicate,
+    Existing, FolderCommand, ItemKind, Listing, LoginArgs, LogoutArgs, ProfileStore,
+    ProfilesCommand, Retry, Scope, StatusArgs, MAX_TRANSFERS,
 };
 use pk_cli_drive::{reason, Backend, CachePolicy, CachedRemote, RemoteRead, RemoteStore};
 
@@ -618,6 +618,7 @@ fn importing_another_client_needs_overwrite_and_drops_the_sign_in() {
             &DriveCommand::Client(ClientCommand::Import {
                 file: Some(other.clone()),
                 stdin: false,
+                from_profile: None,
                 overwrite,
             }),
             Some(PROFILE),
@@ -631,6 +632,72 @@ fn importing_another_client_needs_overwrite_and_drops_the_sign_in() {
     assert!(!h.vault().contains(&token_entry(&name)).unwrap());
     let record = h.profiles().get(&name).unwrap().unwrap();
     assert!(record.client_id.unwrap().contains("0def"));
+}
+
+#[test]
+fn a_client_is_copied_from_another_profile_without_its_sign_in() {
+    let h = Harness::new();
+    h.signed_in();
+    let import = |into: &str, from: &str| {
+        h.cli().run(
+            &DriveCommand::Client(ClientCommand::Import {
+                file: None,
+                stdin: false,
+                from_profile: Some(from.into()),
+                overwrite: false,
+            }),
+            Some(into),
+            true,
+            false,
+        )
+    };
+    import("synthetic", PROFILE).unwrap();
+    let from = ProfileName::parse(PROFILE).unwrap();
+    let into = ProfileName::parse("synthetic").unwrap();
+    let copied = h.profiles().get(&into).unwrap().unwrap();
+    let source = h.profiles().get(&from).unwrap().unwrap();
+    assert_eq!(copied.client_id, source.client_id);
+    assert!(copied.scopes.is_empty());
+    assert_eq!(copied.signed_in_at, None);
+    assert!(h.vault().contains(&client_entry(&into)).unwrap());
+    assert!(!h.vault().contains(&token_entry(&into)).unwrap());
+    assert!(
+        h.vault().contains(&token_entry(&from)).unwrap(),
+        "the source keeps its sign-in"
+    );
+
+    let missing = import("second", "nobody").unwrap_err();
+    assert_eq!(missing.exit_code(), 2);
+    assert_eq!(
+        h.profiles()
+            .get(&ProfileName::parse("second").unwrap())
+            .unwrap(),
+        None
+    );
+    assert_eq!(import(PROFILE, PROFILE).unwrap_err().exit_code(), 2);
+}
+
+#[test]
+fn from_profile_excludes_a_file_and_stdin() {
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Cli {
+        #[command(subcommand)]
+        client: ClientCommand,
+    }
+    let parse = |args: &[&str]| Cli::try_parse_from(args).map(|c| c.client);
+    assert!(matches!(
+        parse(&["c", "import", "--from-profile", "home"]),
+        Ok(ClientCommand::Import {
+            from_profile: Some(_),
+            file: None,
+            stdin: false,
+            ..
+        })
+    ));
+    assert!(parse(&["c", "import", "--from-profile", "home", "--file", "x.json"]).is_err());
+    assert!(parse(&["c", "import", "--from-profile", "home", "--stdin"]).is_err());
+    assert!(parse(&["c", "import"]).is_err());
 }
 
 #[test]

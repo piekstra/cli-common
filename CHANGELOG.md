@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.37.6 — 2026-11-23
+
+- `pk-cli-drive`: `drive client import --from-profile <NAME>` copies the OAuth client another
+  Drive profile on the machine holds into the profile being imported into. The client is read from
+  the vault and sealed again under the new profile; no file or stdin is needed. The source keeps
+  its client and its sign-in. The new profile gets the client only, with no sign-in, so
+  `drive login` follows. The output (`drive-client/v1`) adds `from_profile`. A source that is not
+  configured, holds no client, or is the profile being imported into is refused (exit 2), and
+  nothing is written. `--from-profile` cannot be combined with `--file` or `--stdin`. The
+  use case: a second Google account through the same Cloud project's client after the downloaded
+  JSON was deleted, as the guide advises. Under `drive.file`, only that project's clients see the
+  folders its first sign-in made.
+- `pk-cli-drive`: `ClientCommand::Import` gains a `from_profile` field. Code that builds the
+  variant by hand adds `from_profile: None`; a CLI that only parses it with clap needs no change.
+
 ## v0.37.5 — 2026-11-23
 
 - `pk-cli-browser`: a watch window (`Capture::responses`, `request_log`, `optional_request`) that
