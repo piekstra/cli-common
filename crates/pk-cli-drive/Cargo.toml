@@ -10,10 +10,41 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[features]
+# The Google Drive API backend and Drive profiles (`google`): our own OAuth
+# client and sign-in, no rclone. Off by default, so a CLI that keeps only the
+# mount and rclone backends builds none of it.
+google = [
+    "dep:pk-cli-auth",
+    "dep:pk-cli-secrets",
+    "dep:pk-cli-config",
+    "dep:pk-cli-http",
+    "dep:reqwest",
+    "dep:clap",
+    "dep:md-5",
+    "dep:zeroize",
+    "pk-cli-core/reqwest",
+]
+# A fake Drive API server on 127.0.0.1 for a CLI's own tests
+# (`google::fake::FakeDrive`). Never in a shipped build.
+fake-google = ["google"]
+
 [dependencies]
 pk-cli-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+pk-cli-auth = { workspace = true, optional = true }
+pk-cli-secrets = { workspace = true, optional = true }
+pk-cli-config = { workspace = true, optional = true }
+pk-cli-http = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+md-5 = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[[test]]
+name = "google_fake"
+required-features = ["fake-google"]

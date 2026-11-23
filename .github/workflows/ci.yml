@@ -41,6 +41,7 @@ jobs:
       - run: make test
       - run: make test-util-check
       - run: make mcp-check
+      - run: make drive-check
       - run: make wasm-check
       - run: make wasm-host-check
       - run: make scripts-check

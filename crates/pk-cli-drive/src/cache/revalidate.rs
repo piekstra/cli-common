@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use pk_cli_core::CliError;
 
 use super::{CachePolicy, CachedRemote, Kind, Outcome};
-use crate::rclone::Remote;
+use crate::remote::RemoteStore;
 
 /// The argument a [`SpawnRevalidator`] passes to refresh one file:
 /// `--revalidate-file=<rel>`. The CLI's command accepts it (hidden) and calls
@@ -116,11 +116,12 @@ pub fn background_revalidator(
 /// however the refresh ends.
 ///
 /// Build `remote`, `dir` and `policy` exactly as the spawning command built
-/// its cache (the same `Remote::program`, the same `cache_dir_for(bin, spec)`
-/// with the spec from [`REMOTE_SPEC_ARG`], the same policy source), so the
-/// child runs the same rclone against the same entry under the same bound.
-pub fn run_revalidation(
-    remote: Remote,
+/// its cache (the same `Remote::program` or Drive profile, the same
+/// `cache_dir_for(bin, spec)` with the spec from [`REMOTE_SPEC_ARG`], the
+/// same policy source), so the child reads the same remote into the same
+/// entry under the same bound.
+pub fn run_revalidation<R: RemoteStore>(
+    remote: R,
     dir: PathBuf,
     policy: CachePolicy,
     kind: Kind,

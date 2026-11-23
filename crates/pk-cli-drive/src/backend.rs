@@ -1,5 +1,7 @@
 //! The store a CLI keeps its state in, behind one interface: a mounted
-//! folder, rclone straight through, or rclone behind the read cache.
+//! folder, a remote straight through, or a remote behind the read cache.
+//! The remote is Google Drive's own API (feature `google`), or rclone
+//! (deprecated for Drive).
 
 use pk_cli_core::CliError;
 use serde::{Deserialize, Serialize};
@@ -8,7 +10,12 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 use crate::cache::CachedRemote;
+#[cfg(feature = "google")]
+use crate::google::Drive;
 use crate::rclone::Remote;
+#[cfg(feature = "google")]
+use crate::remote::RemoteRead;
+use crate::remote::RemoteStore;
 
 /// Where the store lives. Every method takes a path relative to the store
 /// root (`rel`, forward slashes) and behaves the same on every backend.
@@ -24,6 +31,12 @@ pub enum Backend {
     /// cache; writes go to the remote first, then update the cache. The
     /// remote stays the single source of truth.
     Cached(CachedRemote),
+    /// A folder in one Google account, through the Drive API, no cache.
+    #[cfg(feature = "google")]
+    Drive(Drive),
+    /// The Drive API behind the read cache.
+    #[cfg(feature = "google")]
+    CachedDrive(CachedRemote<Drive>),
 }
 
 /// A store file available on local disk: the file itself on a mount, or a
@@ -88,6 +101,11 @@ pub struct FileEntry {
     /// report one (an rclone too old for `--time-format`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified: Option<i64>,
+    /// The content's md5, lowercase hex, when the backend reports one in
+    /// the same listing (the Google backend does; a mount and rclone's
+    /// listing do not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md5: Option<String>,
 }
 
 impl Backend {
@@ -104,6 +122,10 @@ impl Backend {
             }
             Backend::Remote(r) => r.target(rel),
             Backend::Cached(c) => c.target(rel),
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => d.target(rel),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => c.target(rel),
         }
     }
 
@@ -117,6 +139,10 @@ impl Backend {
             },
             Backend::Remote(r) => r.cat(rel),
             Backend::Cached(c) => c.cat(rel),
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => d.cat(rel),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => c.cat(rel),
         }
     }
 
@@ -132,6 +158,10 @@ impl Backend {
             }
             Backend::Remote(r) => r.write(rel, content),
             Backend::Cached(c) => c.write(rel, content),
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => d.write(rel, content),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => c.write(rel, content),
         }
     }
 
@@ -155,6 +185,10 @@ impl Backend {
             }
             Backend::Remote(r) => r.copy_in(local, rel),
             Backend::Cached(c) => c.copy_in(local, rel),
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => d.copy_in(local, rel),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => c.copy_in(local, rel),
         }
     }
 
@@ -176,15 +210,12 @@ impl Backend {
             }
             Backend::Remote(r) => r,
             Backend::Cached(c) => c.remote(),
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => return download(d, rel),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => return download(c.remote(), rel),
         };
-        let dir = private_temp_dir(&format!("{}-doc", remote.temp_prefix))?;
-        let name = rel.rsplit('/').next().filter(|n| !n.is_empty());
-        let path = dir.path.join(name.unwrap_or("document"));
-        remote.copy_out(rel, &path)?;
-        Ok(LocalCopy {
-            path,
-            _dir: Some(dir),
-        })
+        download(remote, rel)
     }
 
     /// Move a file from one store-relative path to another. Overwrites an
@@ -219,6 +250,10 @@ impl Backend {
             }
             Backend::Remote(r) => r.move_to(rel_from, rel_to),
             Backend::Cached(c) => c.move_to(rel_from, rel_to),
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => d.move_to(rel_from, rel_to),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => c.move_to(rel_from, rel_to),
         }
     }
 
@@ -238,6 +273,10 @@ impl Backend {
             }
             Backend::Remote(r) => r.move_no_clobber(rel_from, rel_to),
             Backend::Cached(c) => c.move_no_clobber(rel_from, rel_to),
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => d.move_no_clobber(rel_from, rel_to),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => c.move_no_clobber(rel_from, rel_to),
         }
     }
 
@@ -285,6 +324,10 @@ impl Backend {
             }
             Backend::Remote(r) => r.delete_file(rel),
             Backend::Cached(c) => c.delete_file(rel),
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => d.delete_file(rel),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => c.delete_file(rel),
         }
     }
 
@@ -293,6 +336,10 @@ impl Backend {
             Backend::Mount(root) => Ok(root.join(rel).exists()),
             Backend::Remote(r) => r.exists(rel),
             Backend::Cached(c) => c.exists(rel),
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => d.exists(rel),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => c.exists(rel),
         }
     }
 
@@ -326,6 +373,22 @@ impl Backend {
                 c.mkdir(rel)?;
                 Ok(true)
             }
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => {
+                if d.exists(rel)? {
+                    return Ok(false);
+                }
+                d.mkdir(rel)?;
+                Ok(true)
+            }
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => {
+                if c.exists(rel)? {
+                    return Ok(false);
+                }
+                c.mkdir(rel)?;
+                Ok(true)
+            }
         }
     }
 
@@ -349,11 +412,27 @@ impl Backend {
             }
             Backend::Remote(r) => r.list_entries(rel),
             Backend::Cached(c) => c.list_entries(rel),
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => d.list_entries(rel),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => c.list_entries(rel),
         }
     }
 }
 
 /// The refusal every backend gives for an occupied rename destination.
+/// Download the remote file at `rel` into a private temp dir.
+fn download<R: RemoteStore>(remote: &R, rel: &str) -> Result<LocalCopy, CliError> {
+    let dir = private_temp_dir(&format!("{}-doc", remote.temp_name_prefix()))?;
+    let name = rel.rsplit('/').next().filter(|n| !n.is_empty());
+    let path = dir.path.join(name.unwrap_or("document"));
+    remote.copy_out(rel, &path)?;
+    Ok(LocalCopy {
+        path,
+        _dir: Some(dir),
+    })
+}
+
 pub(crate) fn occupied(target: &str) -> CliError {
     CliError::Usage(format!(
         "refusing to overwrite {target} — a document is already there; nothing was moved"
@@ -412,6 +491,7 @@ fn walk(base: &Path, dir: &Path, out: &mut Vec<FileEntry>) {
                         .and_then(|m| m.modified().ok())
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .and_then(|d| i64::try_from(d.as_secs()).ok()),
+                    md5: None,
                 });
             }
         }

@@ -2,7 +2,7 @@
 //!
 //! A CLI that keeps its own small state files (a registry, notes, settings
 //! it shares across machines) in a cloud-drive folder the owner already
-//! has gets two ways at that folder behind one interface, [`Backend`]:
+//! has gets three ways at that folder behind one interface, [`Backend`]:
 //!
 //! - [`Backend::Mount`]: a local filesystem path — a Drive-for-desktop
 //!   mount, or any directory. Fast, but a mount can go stale without saying
@@ -17,8 +17,18 @@
 //!   ([`CachedRemote`]), which serves reads locally and keeps the remote the
 //!   single source of truth (see [`cache`] for its invariants).
 //!
-//! The usual policy: when an rclone remote is configured, use it for every
-//! state operation; keep the mount for human browsing and bulk filing.
+//! - [`Backend::Drive`] / [`Backend::CachedDrive`] (feature `google`): one
+//!   Google account's Drive through the Drive API itself ([`google`]), signed
+//!   in through a Drive profile whose OAuth client and tokens are vault
+//!   entries. The same interface as [`Remote`] ([`RemoteRead`] and
+//!   [`RemoteStore`]), so the cache works over it unchanged. For Google
+//!   Drive it replaces rclone, which is deprecated there: its shared sign-in
+//!   client is being retired and it keeps tokens in plain text. The crate's
+//!   `docs/google-drive.md` has the client registration, the commands and
+//!   the scope evidence.
+//!
+//! The usual policy: when a remote is configured, use it for every state
+//! operation; keep the mount for human browsing and bulk filing.
 //!
 //! ```no_run
 //! use pk_cli_drive::{cache, Backend, CachedRemote, Remote};
@@ -70,12 +80,16 @@
 
 pub mod backend;
 pub mod cache;
+#[cfg(feature = "google")]
+pub mod google;
 pub mod private_file;
 pub mod rclone;
+pub mod remote;
 
 pub use backend::{private_temp_dir, Backend, FileEntry, LocalCopy, TempDir};
 pub use cache::{CachePolicy, CachedRemote, Kind, Outcome, Revalidator};
-pub use rclone::{Remote, RemoteRead};
+pub use rclone::Remote;
+pub use remote::{RemoteRead, RemoteStore};
 
 #[cfg(all(test, unix))]
 pub(crate) mod stub;

@@ -82,7 +82,8 @@ use std::time::Duration;
 use pk_cli_core::CliError;
 
 use crate::backend::FileEntry;
-use crate::rclone::{Remote, RemoteRead};
+use crate::rclone::Remote;
+use crate::remote::{RemoteRead, RemoteStore};
 use store::{claim_marker, CacheDir, MarkerGuard};
 
 /// How a stale serve's refresh went, for the stderr note.
@@ -161,11 +162,12 @@ struct StaleRead {
     digest: u64,
 }
 
-/// A read-through cache mirroring the [`Remote`] method surface. A CLI builds
+/// A read-through cache mirroring the remote's method surface ([`Remote`], or
+/// the Google backend). A CLI builds
 /// one for every remote whose cache dir resolves (with `--no-cache` it only
 /// bypasses reads, see [`CachePolicy::bypass_reads`]), and for a cache-warming
 /// command. Reads work over any [`RemoteRead`] (unit tests use an in-memory one); writes
-/// need the real [`Remote`]. A read may start a background refresh, but only
+/// need a [`RemoteStore`]. A read may start a background refresh, but only
 /// through a [`Revalidator`] handed to [`with_revalidator`](Self::with_revalidator).
 ///
 /// Build one per command. It remembers every copy it served stale until a
@@ -428,10 +430,10 @@ impl<R: RemoteRead> CachedRemote<R> {
     }
 }
 
-impl CachedRemote<Remote> {
+impl<R: RemoteStore> CachedRemote<R> {
     /// The remote behind the cache — for a document download, which the
     /// cache never holds (it caches small state files, not documents).
-    pub fn remote(&self) -> &Remote {
+    pub fn remote(&self) -> &R {
         &self.remote
     }
 
@@ -689,6 +691,7 @@ mod tests {
                         rel: r.to_string(),
                         size: Some(v.len() as u64),
                         modified: None,
+                        md5: None,
                     })
                 })
                 .collect();
