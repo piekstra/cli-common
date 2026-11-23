@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.37.4 — 2026-11-23
+
+- `pk-cli-drive`: `Drive::cat_many(rels)` reads many files at once. It returns each path with its
+  own answer, in the order asked: the file's bytes, `None` when no file is there (as `cat`
+  answers), or an error that is that path's alone, such as two items of one name, a Google
+  document, or a download whose md5 does not match Drive's. One file's failure never costs another
+  its bytes. The paths are found through one listing of the folders that hold them, up to 40
+  folders a query, instead of a lookup per file. The downloads run up to 8 at a time. The bytes
+  are Drive's own, unchanged, so a file that is not valid UTF-8 still reads as such. A path asked
+  for twice is downloaded once.
+- `pk-cli-drive`: `Drive::put_tree` uploads up to 4 files at a time and `Drive::fetch_tree`
+  downloads up to 8, where both went one file at a time. Drive takes about three writes a second
+  per user, so uploads get fewer workers, and the backoff on 429 absorbs a burst. `put_tree` makes
+  every missing folder once, shallowest first, before any upload into it, so two uploads never make
+  the same folder. Every file is still checked against Drive's md5. The first failure, in the
+  tree's order, stops the copy: no further transfer starts, and what was already copied stays, as
+  before. `Drive::transfers(n)` lowers both limits, `1` being one at a time;
+  `pk_cli_drive::google::MAX_TRANSFERS` is 8.
+- `pk-cli-drive`: `Drive` is `Send` and `Sync`, so one store can be shared between threads.
+- `pk-cli-drive` fake server: `FakeDrive::latency` holds each request before answering it,
+  `FakeDrive::peak_in_flight` reports the most requests answered at once, and
+  `FakeDrive::damage_next_download` changes a byte of one file's next download.
+
 ## v0.37.3 — 2026-11-23
 
 - `pk-cli-drive`: `Drive::trash_empty_folder` moves an empty folder to Drive's trash, where it is

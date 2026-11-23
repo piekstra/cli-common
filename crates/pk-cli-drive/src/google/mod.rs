@@ -40,6 +40,7 @@ mod drive;
 mod endpoints;
 mod error;
 mod files;
+mod pool;
 mod profiles;
 
 #[cfg(any(test, feature = "fake-google"))]
@@ -53,8 +54,8 @@ pub use commands::{
     ProfilesCommand, Scope, StatusArgs, LOGIN_WAIT_MINUTES,
 };
 pub use drive::{
-    check_folder_id, Drive, DriveSpec, Duplicate, Existing, Hashed, ItemKind, ListedItem, Listing,
-    TreeCopy, SPEC_PREFIX,
+    check_folder_id, Drive, DriveSpec, Duplicate, Existing, FileRead, Hashed, ItemKind, ListedItem,
+    Listing, TreeCopy, MAX_TRANSFERS, SPEC_PREFIX,
 };
 pub use endpoints::Endpoints;
 pub use files::{md5_file, About, DriveFile, ShortcutDetails, RESUMABLE_ABOVE};
