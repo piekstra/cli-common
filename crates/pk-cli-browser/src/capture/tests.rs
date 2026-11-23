@@ -2286,12 +2286,15 @@ fn the_confirm_gate_keeps_the_request_for_the_next_poll_on_not_yet() {
     let capture = jar_capture().request(GRAPHQL).confirm(hook);
     let mut w = Waiting::new(&capture);
     assert_eq!(
-        gate_blocked(confirm_gate(
-            &mut w,
-            candidate(Some(sample_request())),
-            Instant::now(),
-            &mut Vec::new(),
-        )),
+        gate_blocked(
+            confirm_gate(
+                &mut w,
+                candidate(Some(sample_request())),
+                Instant::now(),
+                &mut Vec::new(),
+            )
+            .map_err(|(gate, _)| gate)
+        ),
         Some(Blocked::Unconfirmed("GET /me answered 401 (call 1)".into()))
     );
     let kept = w.seen.take();
@@ -2318,7 +2321,7 @@ fn the_confirm_gate_keeps_the_request_for_the_next_poll_on_not_yet() {
     w.capture = &failing;
     assert!(matches!(
         confirm_gate(&mut w, candidate(None), Instant::now(), &mut Vec::new()),
-        Err(Gate::Failed(CliError::Other(m))) if m == "refused"
+        Err((Gate::Failed(CliError::Other(m)), _)) if m == "refused"
     ));
 }
 
@@ -2644,8 +2647,8 @@ fn billing_page_leaving(leaves: usize) -> FakePage {
 }
 
 const LEFT_NOTE: &str =
-    "Example: the tab was no longer open, so what it read and kept before then was \
-                         captured.";
+    "Example: session captured from what it read while its tab was open; no tab \
+                         of it is open now, so none was closed.";
 
 #[test]
 fn a_timeout_hands_over_what_was_kept_though_the_tab_has_left_the_hosts() {
@@ -2661,13 +2664,7 @@ fn a_timeout_hands_over_what_was_kept_though_the_tab_has_left_the_hosts() {
     assert_eq!(kept(&got[0]).len(), 2, "{:?}", out.notes);
     assert_eq!(got[0].responses_skipped(), 1);
     assert_eq!(got[0].host(), "portal.example.com");
-    assert!(
-        out.notes
-            .iter()
-            .any(|n| n == "Example: session captured; no tab of it was open to close."),
-        "{:?}",
-        out.notes
-    );
+    assert!(out.notes.iter().any(|n| n == LEFT_NOTE), "{:?}", out.notes);
     assert!(
         fake.0.borrow().closed.is_empty(),
         "the tab on the sign-in host stays"
@@ -2795,4 +2792,52 @@ fn the_window_runs_from_its_first_start_and_never_restarts() {
         assert_eq!(w.hold_since, Some(start), "at {secs} s");
     }
     assert_eq!(notes.len(), 1, "{notes:?}");
+}
+
+#[test]
+fn a_closed_window_whose_session_check_does_not_pass_hands_over_nothing_and_says_so() {
+    let mut fake = fake_with(vec![billing_page()]);
+    fake.0.borrow_mut().exits_after = Some(6);
+    let capture = billing_capture(Duration::from_secs(3600))
+        .confirm(|_: &Captured| Confirm::NotYet("GET /me answered 401".into()));
+    let out = run(&mut fake, &[capture], LONG);
+    assert!(
+        matches!(out.result, Err(BrowserError::WindowClosed(_))),
+        "{:?}",
+        out.notes
+    );
+    assert!(
+        out.notes.iter().any(|n| n
+            == "Example: its tab is no longer open and the session check did not pass, so \
+                nothing was handed over."),
+        "{:?}",
+        out.notes
+    );
+}
+
+#[test]
+fn a_session_check_that_passes_at_the_last_ask_hands_over_after_a_timeout() {
+    let mut fake = fake_with(vec![billing_page_leaving(4)]);
+    let asked = Arc::new(AtomicUsize::new(0));
+    let seen = asked.clone();
+    // The window runs out while the tab is away, and the check cannot
+    // decide then; the deadline's last ask confirms it.
+    let capture = billing_capture(Duration::from_millis(100)).confirm(move |_: &Captured| {
+        if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            Confirm::Undecided {
+                reason: "GET /me timed out".into(),
+                retry_after: Some(Duration::from_secs(3600)),
+            }
+        } else {
+            Confirm::Ready
+        }
+    });
+    let out = run(&mut fake, &[capture], Duration::from_millis(600));
+    let got = out.result.unwrap();
+    assert_eq!(kept(&got[0]).len(), 2, "{:?}", out.notes);
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        2,
+        "once at the window's end, once at the deadline"
+    );
 }

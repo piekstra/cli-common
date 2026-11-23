@@ -8,8 +8,11 @@
   another host (a sign-in), the owner closing the window, and the wait's deadline. Before, the
   capture waited for a page back on its hosts, and the deadline or a closed window ended it with
   an error that dropped everything kept: a 25-minute tour came back empty. A capture that never
-  became ready still ends with `TimedOut` or `WindowClosed`, as before. A capture handed over that
-  way, with no tab of it left to close, says so in its status line.
+  became ready still ends with `TimedOut` or `WindowClosed`, as before. A capture handed over
+  that way carries the values last read while its tab was on its hosts, goes through the confirm
+  hook (asked once more if it could not decide; a hook that does not pass hands over nothing, with
+  a status line saying so), and its status line says it was captured from what it read while its
+  tab was open.
 - `pk-cli-browser`: the window's docs say it starts once, the first time the rest is ready, and
   that leaving the capture's hosts and coming back does not start it again; a capture whose pages
   need a sign-in makes the sign-in part of being ready. Tests pin both.

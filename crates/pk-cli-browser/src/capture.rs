@@ -846,6 +846,9 @@ struct Waiting<'a> {
     /// capture's hosts is open (the owner went on to another site, or
     /// closed the window), or at the deadline.
     held: Option<Held>,
+    /// The deadline's last round asked the confirm hook: its answer stands,
+    /// so the hand-over after it does not ask again.
+    asked_last: bool,
     /// Loads in progress that a reconnecting watch lost since the last
     /// status line about it.
     responses_lost: usize,
@@ -881,6 +884,7 @@ impl<'a> Waiting<'a> {
             hold_since: None,
             hold_over: false,
             held: None,
+            asked_last: false,
             responses_lost: 0,
             undecided: None,
             warned_undecided: false,
@@ -1151,6 +1155,7 @@ fn read_when_ready<T: Transport>(
         if let Some(read) = &mut w.undecided {
             read.ask_at = state.now;
         }
+        w.asked_last = true;
     }
     let captured = hand_over(w, parts, user_agent, state.now, notes)?;
     let closed = close_pages(cdp, &matching);
@@ -1221,7 +1226,22 @@ fn hand_over(
         responses_skipped: 0,
         user_agent,
     };
-    let mut captured = confirm_gate(w, candidate, now, notes)?;
+    let mut captured = match confirm_gate(w, candidate, now, notes) {
+        Ok(captured) => captured,
+        Err((gate, candidate)) => {
+            // Not confirmed yet: keep what was read, for a later poll or
+            // the last hand-over, as a held tab's reads are kept.
+            if matches!(gate, Gate::Wait(_)) {
+                w.held = Some(Held {
+                    host: candidate.host,
+                    value: candidate.value,
+                    cookies: candidate.cookies,
+                    jar: candidate.jar,
+                });
+            }
+            return Err(gate);
+        }
+    };
     if let Some(log) = w.responses.as_mut() {
         let (kept, skipped) = log.take();
         captured.responses = Some(kept);
@@ -1240,29 +1260,40 @@ fn hand_over_held(
     note: &mut dyn FnMut(&str),
     on_capture: &mut dyn FnMut(Captured) -> Result<(), CliError>,
 ) -> Result<bool, BrowserError> {
-    for w in waiting.iter_mut().filter(|w| !w.done) {
+    for w in waiting.iter_mut().filter(|w| !w.done && !w.asked_last) {
         let Some(parts) = w.held.take() else {
             continue;
         };
         w.hold_over = true;
+        let now = Instant::now();
+        // No poll comes after this one: a read that could not decide is
+        // asked once more, now.
+        if let Some(read) = &mut w.undecided {
+            read.ask_at = now;
+        }
         let mut notes = Vec::new();
-        let read = hand_over(w, parts, user_agent.cloned(), Instant::now(), &mut notes);
+        let read = hand_over(w, parts, user_agent.cloned(), now, &mut notes);
         for line in &notes {
             note(line);
         }
         match read {
             Ok(captured) => {
                 w.done = true;
-                note(&format!(
-                    "{}: the tab was no longer open, so what it read and kept before then was \
-                     captured.",
-                    w.capture.label
-                ));
+                note(&captured_note(&w.capture.label, &Ok(0)));
                 on_capture(captured).map_err(BrowserError::Handler)?;
             }
             Err(Gate::Failed(e)) => return Err(BrowserError::Handler(e)),
             Err(Gate::Canceled) => return Err(canceled()),
-            Err(Gate::Wait(_)) => {}
+            Err(Gate::Wait(blocked)) => {
+                note(&format!(
+                    "{}: its tab is no longer open and the session check did not pass, so \
+                     nothing was handed over.",
+                    w.capture.label
+                ));
+                if blocked.is_some() {
+                    w.progress.blocked = blocked;
+                }
+            }
         }
     }
     Ok(waiting.iter().all(|w| w.done))
@@ -1432,21 +1463,22 @@ fn confirm_gate(
     mut candidate: Captured,
     now: Instant,
     notes: &mut Vec<String>,
-) -> Result<Captured, Gate> {
+) -> Result<Captured, (Gate, Box<Captured>)> {
     let capture = w.capture;
     let Some(hook) = &capture.confirm else {
         return Ok(candidate);
     };
     if let Some(read) = w.undecided.as_ref().filter(|read| now < read.ask_at) {
         w.seen = candidate.request.take();
-        return Err(Blocked::Undecided(read.reason.clone()).into());
+        let gate = Blocked::Undecided(read.reason.clone()).into();
+        return Err((gate, Box::new(candidate)));
     }
     match (hook.0)(&candidate) {
         Confirm::Ready => Ok(candidate),
         Confirm::NotYet(reason) => {
             w.undecided = None;
             w.seen = candidate.request.take();
-            Err(Blocked::Unconfirmed(reason).into())
+            Err((Blocked::Unconfirmed(reason).into(), Box::new(candidate)))
         }
         Confirm::Undecided {
             reason,
@@ -1466,9 +1498,9 @@ fn confirm_gate(
                 backoff,
             });
             w.seen = candidate.request.take();
-            Err(Blocked::Undecided(reason).into())
+            Err((Blocked::Undecided(reason).into(), Box::new(candidate)))
         }
-        Confirm::Fail(e) => Err(Gate::Failed(e)),
+        Confirm::Fail(e) => Err((Gate::Failed(e), Box::new(candidate))),
     }
 }
 
@@ -1991,7 +2023,10 @@ pub(crate) fn announce(captures: &[Capture], timeout: Duration) -> String {
 /// The status line printed as a capture is read.
 pub(crate) fn captured_note(label: &str, closed: &Result<usize, String>) -> String {
     match closed {
-        Ok(0) => format!("{label}: session captured; no tab of it was open to close."),
+        Ok(0) => format!(
+            "{label}: session captured from what it read while its tab was open; no tab of it \
+             is open now, so none was closed."
+        ),
         Ok(1) => format!("{label}: session captured, tab closed."),
         Ok(n) => format!("{label}: session captured, {n} tabs closed."),
         Err(e) => format!(
