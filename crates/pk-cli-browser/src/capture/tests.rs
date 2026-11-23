@@ -31,6 +31,8 @@ struct FakePage {
     requests: Vec<FakeRequest>,
     /// After this many polls the page navigates to this URL.
     navigates: Option<(usize, &'static str)>,
+    /// After this many polls (more than `navigates`'), it navigates here.
+    returns: Option<(usize, &'static str)>,
 }
 
 fn page(id: &'static str, url: &str) -> FakePage {
@@ -44,6 +46,7 @@ fn page(id: &'static str, url: &str) -> FakePage {
         hangs: false,
         requests: Vec::new(),
         navigates: None,
+        returns: None,
     }
 }
 
@@ -225,8 +228,10 @@ impl Transport for FakeTransport {
                 }
                 let polls = s.polls;
                 for p in &mut s.pages {
-                    if let Some((_, url)) = p.navigates.filter(|(after, _)| polls > *after) {
-                        p.url = url.to_string();
+                    for (after, url) in p.navigates.iter().chain(p.returns.iter()) {
+                        if polls > *after {
+                            p.url = url.to_string();
+                        }
                     }
                 }
                 let mut infos: Vec<Value> = s
@@ -2281,12 +2286,15 @@ fn the_confirm_gate_keeps_the_request_for_the_next_poll_on_not_yet() {
     let capture = jar_capture().request(GRAPHQL).confirm(hook);
     let mut w = Waiting::new(&capture);
     assert_eq!(
-        gate_blocked(confirm_gate(
-            &mut w,
-            candidate(Some(sample_request())),
-            Instant::now(),
-            &mut Vec::new(),
-        )),
+        gate_blocked(
+            confirm_gate(
+                &mut w,
+                candidate(Some(sample_request())),
+                Instant::now(),
+                &mut Vec::new(),
+            )
+            .map_err(|(gate, _)| gate)
+        ),
         Some(Blocked::Unconfirmed("GET /me answered 401 (call 1)".into()))
     );
     let kept = w.seen.take();
@@ -2313,7 +2321,7 @@ fn the_confirm_gate_keeps_the_request_for_the_next_poll_on_not_yet() {
     w.capture = &failing;
     assert!(matches!(
         confirm_gate(&mut w, candidate(None), Instant::now(), &mut Vec::new()),
-        Err(Gate::Failed(CliError::Other(m))) if m == "refused"
+        Err((Gate::Failed(CliError::Other(m)), _)) if m == "refused"
     ));
 }
 
@@ -2628,5 +2636,208 @@ fn the_hold_note_names_both_a_log_and_kept_responses() {
         "Example: keeping the tab open 40 milliseconds to record the page's requests to \
          example.com and keep what its pages load from example.com; go through the pages there \
          meanwhile, and leave the tab open."
+    );
+}
+
+/// The billing page, which goes off to sign in after `leaves` polls.
+fn billing_page_leaving(leaves: usize) -> FakePage {
+    let mut app = billing_page();
+    app.navigates = Some((leaves, "https://login.example.com/u/login"));
+    app
+}
+
+const LEFT_NOTE: &str =
+    "Example: session captured from what it read while its tab was open; no tab \
+                         of it is open now, so none was closed.";
+
+#[test]
+fn a_timeout_hands_over_what_was_kept_though_the_tab_has_left_the_hosts() {
+    let mut fake = fake_with(vec![billing_page_leaving(4)]);
+    let started = Instant::now();
+    let out = run(
+        &mut fake,
+        &[billing_capture(Duration::from_secs(3600))],
+        Duration::from_millis(400),
+    );
+    let got = out.result.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(kept(&got[0]).len(), 2, "{:?}", out.notes);
+    assert_eq!(got[0].responses_skipped(), 1);
+    assert_eq!(got[0].host(), "portal.example.com");
+    assert!(out.notes.iter().any(|n| n == LEFT_NOTE), "{:?}", out.notes);
+    assert!(
+        fake.0.borrow().closed.is_empty(),
+        "the tab on the sign-in host stays"
+    );
+}
+
+#[test]
+fn a_window_that_runs_out_while_the_tab_is_away_hands_over_without_waiting_for_it() {
+    let mut fake = fake_with(vec![billing_page_leaving(4)]);
+    let started = Instant::now();
+    let out = run(
+        &mut fake,
+        &[billing_capture(Duration::from_millis(200))],
+        LONG,
+    );
+    let got = out.result.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "it did not wait out the deadline"
+    );
+    assert_eq!(kept(&got[0]).len(), 2);
+}
+
+#[test]
+fn closing_the_window_while_the_tab_is_held_open_hands_over_what_was_kept() {
+    let mut fake = fake_with(vec![billing_page()]);
+    fake.0.borrow_mut().exits_after = Some(6);
+    let out = run(
+        &mut fake,
+        &[billing_capture(Duration::from_secs(3600))],
+        LONG,
+    );
+    let got = out.result.unwrap();
+    assert_eq!(kept(&got[0]).len(), 2, "{:?}", out.notes);
+    assert!(out.notes.iter().any(|n| n == LEFT_NOTE), "{:?}", out.notes);
+}
+
+#[test]
+fn a_window_whose_pages_all_close_hands_over_what_was_kept() {
+    let mut fake = fake_with(vec![billing_page()]);
+    fake.0.borrow_mut().pages_vanish_after = Some(6);
+    let out = run(
+        &mut fake,
+        &[billing_capture(Duration::from_secs(3600))],
+        LONG,
+    );
+    let got = out.result.unwrap();
+    assert_eq!(kept(&got[0]).len(), 2, "{:?}", out.notes);
+    assert!(out.notes.iter().any(|n| n == LEFT_NOTE), "{:?}", out.notes);
+}
+
+#[test]
+fn closing_the_window_before_any_tab_is_held_open_still_says_so() {
+    let mut app = billing_page();
+    app.value = json!("signed-in");
+    app.ready_after = 100;
+    let mut fake = fake_with(vec![app]);
+    fake.0.borrow_mut().exits_after = Some(4);
+    let capture = billing_capture(Duration::from_secs(3600)).expression("document.title");
+    let out = run(&mut fake, &[capture], LONG);
+    assert!(
+        matches!(out.result, Err(BrowserError::WindowClosed(_))),
+        "{:?}",
+        out.notes
+    );
+}
+
+#[test]
+fn going_off_to_sign_in_and_back_keeps_one_window_and_what_both_visits_loaded() {
+    let mut app = billing_page_leaving(3);
+    app.returns = Some((6, "https://portal.example.com/billing"));
+    app.requests.push(FakeRequest {
+        after: 8,
+        response: Some((200, "application/json")),
+        body: Some((r#"{"payments":[]}"#, false)),
+        ..request(
+            "R8",
+            "GET",
+            "https://portal.example.com/api/billing/payments",
+        )
+    });
+    let mut fake = fake_with(vec![app]);
+    fake.0.borrow_mut().finish_at = Some(12);
+    let out = run(
+        &mut fake,
+        &[billing_capture(Duration::from_secs(3600))],
+        LONG,
+    );
+    let got = out.result.unwrap();
+    // The page loads its statements again on the way back, so both visits
+    // are kept, then the payments it loaded after.
+    let paths = kept(&got[0]);
+    assert_eq!(paths.len(), 5, "{paths:?}");
+    assert!(paths[4].contains("/api/billing/payments"), "{paths:?}");
+    let holds = out
+        .notes
+        .iter()
+        .filter(|n| n.starts_with("Example: keeping the tab open"))
+        .count();
+    assert_eq!(holds, 1, "{:?}", out.notes);
+}
+
+#[test]
+fn the_window_runs_from_its_first_start_and_never_restarts() {
+    let capture = billing_capture(Duration::from_secs(600));
+    let mut w = Waiting::new(&capture);
+    let mut user_agent = None;
+    let start = Instant::now();
+    let mut notes = Vec::new();
+    for (secs, open) in [
+        (0, true),
+        (300, true),
+        (599, true),
+        (600, false),
+        (900, false),
+    ] {
+        let state = PollState {
+            cookies: None,
+            user_agent: &mut user_agent,
+            now: start + Duration::from_secs(secs),
+            final_round: false,
+        };
+        let result = hold_gate(&mut w, &state, &mut notes);
+        assert_eq!(result.is_err(), open, "at {secs} s");
+        assert_eq!(w.hold_since, Some(start), "at {secs} s");
+    }
+    assert_eq!(notes.len(), 1, "{notes:?}");
+}
+
+#[test]
+fn a_closed_window_whose_session_check_does_not_pass_hands_over_nothing_and_says_so() {
+    let mut fake = fake_with(vec![billing_page()]);
+    fake.0.borrow_mut().exits_after = Some(6);
+    let capture = billing_capture(Duration::from_secs(3600))
+        .confirm(|_: &Captured| Confirm::NotYet("GET /me answered 401".into()));
+    let out = run(&mut fake, &[capture], LONG);
+    assert!(
+        matches!(out.result, Err(BrowserError::WindowClosed(_))),
+        "{:?}",
+        out.notes
+    );
+    assert!(
+        out.notes.iter().any(|n| n
+            == "Example: its tab is no longer open and the session check did not pass, so \
+                nothing was handed over."),
+        "{:?}",
+        out.notes
+    );
+}
+
+#[test]
+fn a_session_check_that_passes_at_the_last_ask_hands_over_after_a_timeout() {
+    let mut fake = fake_with(vec![billing_page_leaving(4)]);
+    let asked = Arc::new(AtomicUsize::new(0));
+    let seen = asked.clone();
+    // The window runs out while the tab is away, and the check cannot
+    // decide then; the deadline's last ask confirms it.
+    let capture = billing_capture(Duration::from_millis(100)).confirm(move |_: &Captured| {
+        if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            Confirm::Undecided {
+                reason: "GET /me timed out".into(),
+                retry_after: Some(Duration::from_secs(3600)),
+            }
+        } else {
+            Confirm::Ready
+        }
+    });
+    let out = run(&mut fake, &[capture], Duration::from_millis(600));
+    let got = out.result.unwrap();
+    assert_eq!(kept(&got[0]).len(), 2, "{:?}", out.notes);
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        2,
+        "once at the window's end, once at the deadline"
     );
 }

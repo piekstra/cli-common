@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.37.5 — 2026-11-23
+
+- `pk-cli-browser`: a watch window (`Capture::responses`, `request_log`, `optional_request`) that
+  ends while no page on the capture's hosts is open now hands the capture over, with what was kept
+  and what the earlier gates last read. This covers a window that runs out while the owner is on
+  another host (a sign-in), the owner closing the window, and the wait's deadline. Before, the
+  capture waited for a page back on its hosts, and the deadline or a closed window ended it with
+  an error that dropped everything kept: a 25-minute tour came back empty. A capture that never
+  became ready still ends with `TimedOut` or `WindowClosed`, as before. A capture handed over
+  that way carries the values last read while its tab was on its hosts, goes through the confirm
+  hook (asked once more if it could not decide; a hook that does not pass hands over nothing, with
+  a status line saying so), and its status line says it was captured from what it read while its
+  tab was open.
+- `pk-cli-browser`: the window's docs say it starts once, the first time the rest is ready, and
+  that leaving the capture's hosts and coming back does not start it again; a capture whose pages
+  need a sign-in makes the sign-in part of being ready. Tests pin both.
+
 ## v0.37.4 — 2026-11-23
 
 - `pk-cli-drive`: `Drive::cat_many(rels)` reads many files at once. It returns each path with its
