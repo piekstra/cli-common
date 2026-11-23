@@ -118,6 +118,7 @@ struct State {
     codes: HashMap<String, Pending>,
     page_size: usize,
     revoked: Vec<String>,
+    foreign_sessions: bool,
 }
 
 impl State {
@@ -173,6 +174,7 @@ impl FakeDrive {
             codes: HashMap::new(),
             page_size: 1000,
             revoked: Vec::new(),
+            foreign_sessions: false,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -236,6 +238,12 @@ impl FakeDrive {
     /// Sign in this account instead of [`ACCOUNT`].
     pub fn sign_in_as(&self, email: &str) {
         self.state().email = email.into();
+    }
+
+    /// Name upload sessions on another host (`localhost` for `127.0.0.1`),
+    /// as a forged answer would.
+    pub fn foreign_upload_sessions(&self) {
+        self.state().foreign_sessions = true;
     }
 
     /// Answer listings at most `n` files a page.
@@ -831,9 +839,14 @@ fn upload(req: &Request, rest: &str, addr: SocketAddr, s: &mut State) -> Respons
                     data: Vec::new(),
                 },
             );
+            let host = if s.foreign_sessions {
+                format!("localhost:{}", addr.port())
+            } else {
+                addr.to_string()
+            };
             Response::json(200, json!({})).header(
                 "Location",
-                format!("http://{addr}/upload/drive/v3/files?uploadType=resumable&upload_id={sid}"),
+                format!("http://{host}/upload/drive/v3/files?uploadType=resumable&upload_id={sid}"),
             )
         }
         _ => Response::error(400, "badRequest", "unknown uploadType"),

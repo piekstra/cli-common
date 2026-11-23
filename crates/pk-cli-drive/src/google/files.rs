@@ -390,18 +390,25 @@ impl Api {
         })?;
         let session = opened
             .header("location")
-            .filter(|l| l.starts_with(&self.endpoints.upload) || l.starts_with("https://"))
             .ok_or_else(|| {
                 CliError::Upstream(format!(
                     "{what}: Google Drive opened no upload session (no Location)"
                 ))
             })?
             .to_string();
+        // The bearer token goes with every piece, so the session must be on
+        // the upload endpoint's own host, whatever the answer named.
         pk_cli_core::transport::require_secure_url(&session).map_err(|_| {
             CliError::Upstream(format!(
                 "{what}: refusing an upload session that is not https"
             ))
         })?;
+        if !same_origin(&session, &self.endpoints.upload) {
+            return Err(CliError::Upstream(format!(
+                "{what}: refusing an upload session on another host than Google Drive's upload \
+                 endpoint; nothing was sent to it"
+            )));
+        }
         let mut sent = 0u64;
         let mut stalls = 0;
         loop {
@@ -588,6 +595,18 @@ impl Api {
             usage_in_drive: num("usageInDrive"),
             usage_in_trash: num("usageInDriveTrash"),
         })
+    }
+}
+
+/// Whether two URLs share scheme, host and port.
+fn same_origin(a: &str, b: &str) -> bool {
+    match (reqwest::Url::parse(a), reqwest::Url::parse(b)) {
+        (Ok(a), Ok(b)) => {
+            a.scheme() == b.scheme()
+                && a.host_str() == b.host_str()
+                && a.port_or_known_default() == b.port_or_known_default()
+        }
+        _ => false,
     }
 }
 

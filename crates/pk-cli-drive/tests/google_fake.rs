@@ -652,3 +652,15 @@ fn a_store_folder_is_made_once_and_listed() {
     );
     assert_eq!(bad.unwrap_err().exit_code(), 2);
 }
+
+#[test]
+fn an_upload_session_on_another_host_gets_no_bytes_and_no_token() {
+    let h = Harness::new();
+    h.signed_in();
+    h.fake.foreign_upload_sessions();
+    let local = h.tmp.path().join("big.bin");
+    std::fs::write(&local, vec![7u8; 6 * 1024 * 1024]).unwrap();
+    let err = h.drive().copy_in(&local, "big.bin").unwrap_err();
+    assert!(err.to_string().contains("another host"), "{err}");
+    assert!(!h.fake.requests().iter().any(|l| l.contains("upload_id=")));
+}
