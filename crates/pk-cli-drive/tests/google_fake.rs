@@ -818,7 +818,20 @@ fn a_spec_with_a_path_is_a_store_under_that_folder() {
     let base = DriveSpec::new(ProfileName::parse(PROFILE).unwrap(), ROOT_ID).unwrap();
     let inbox = DriveSpec::parse(&format!("{base}/inbox")).unwrap();
     assert_eq!(inbox, base.join("inbox").unwrap());
+    // The path must be there: reading and writing are exit 4 naming it,
+    // never an empty store or a second folder of the name.
+    h.fake.add_folder(ROOT_ID, "Inbox");
     let d = h.cli().drive(&inbox).unwrap().without_backoff();
+    let err = d.list_entries("").unwrap_err();
+    assert_eq!(err.exit_code(), 4, "{err}");
+    assert!(err.to_string().contains("`inbox`"), "{err}");
+    let d = h.cli().drive(&inbox).unwrap().without_backoff();
+    assert_eq!(d.write("scan.pdf", "s").unwrap_err().exit_code(), 4);
+    assert_eq!(h.fake.count("", "inbox"), 0);
+    // mkdir makes it.
+    let d = h.cli().drive(&inbox).unwrap().without_backoff();
+    d.mkdir("").unwrap();
+    assert!(d.exists("").unwrap());
     d.write("scan.pdf", "s").unwrap();
     assert_eq!(h.fake.content("inbox/scan.pdf").unwrap(), b"s");
     assert_eq!(d.list_entries("").unwrap()[0].rel, "scan.pdf");

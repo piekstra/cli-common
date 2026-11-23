@@ -22,7 +22,9 @@
   127.0.0.1 with synthetic files and fault injection, which a CLI's black-box tests reach through
   `<PREFIX>_DRIVE_TEST_ENDPOINT`. `make drive-check` runs the backend's tests against it.
 - `pk-cli-drive`: a store spec may carry a path under its folder, `gdrive:<profile>/<folder-id>/<path>`
-  (`DriveSpec::join`), as rclone's `remote:path` does.
+  (`DriveSpec::join`), as rclone's `remote:path` does. The path must exist: a missing part is exit 4
+  on reads and writes, and `mkdir("")` makes it. `DriveSpec`'s fields are private, read through
+  `profile()`, `folder()` and `path()`.
 - `pk-cli-drive`: `Backend` is `#[non_exhaustive]`, since a variant exists per backend feature; a
   match outside the crate needs a wildcard arm (no family CLI matches on it).
 - `pk-cli-drive`: the store interface is two traits, `RemoteRead` (now in `remote`, still

@@ -326,18 +326,18 @@ impl DriveCli {
     /// The store at `spec`. Its profile must be configured: one that is not
     /// is exit 2 naming the sign-in that adds it. Nothing is read yet.
     pub fn drive(&self, spec: &DriveSpec) -> Result<Drive, CliError> {
-        if self.store.get(&spec.profile)?.is_none() {
+        if self.store.get(spec.profile())?.is_none() {
             return Err(CliError::Usage(format!(
                 "Drive profile `{}` is not configured on this machine",
-                spec.profile
+                spec.profile()
             ))
             .because(Reason::NoCredential)
             .with_remedy(format!(
                 "sign it in with `{}`",
-                self.login_command(&spec.profile)
+                self.login_command(spec.profile())
             )));
         }
-        Ok(Drive::new(self.api(&spec.profile)?, spec.clone()).temp_prefix(self.bin.clone()))
+        Ok(Drive::new(self.api(spec.profile())?, spec.clone()).temp_prefix(self.bin.clone()))
     }
 
     /// Run one Drive command as `profile` (the CLI's `--profile` for these

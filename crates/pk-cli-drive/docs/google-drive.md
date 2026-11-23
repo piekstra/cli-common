@@ -103,7 +103,13 @@ a store at a path under that folder (`DriveSpec::join`, as an inbox inside a
 records folder). Nothing is read until the first operation,
 and the folder itself is checked once: an id Drive does not know, a file, or
 a folder in the trash is exit 4. Drive lists an unknown id's children as
-nothing, so without that check a wrong id would read as an empty store.
+nothing, so without that check a wrong id would read as an empty store. A
+spec's path is held to the same rule: a part that is not there (each name
+must match exactly, capitals included) is exit 4 naming it, for reads and
+writes alike, so a typo never reads as empty or makes a second folder.
+`mkdir("")` is the one call that makes the path. A spec is built only through
+`DriveSpec::new`, `parse` and `join`, so two specs naming one store are equal
+and print the same text.
 
 | Behaviour | How |
 |---|---|
@@ -112,7 +118,7 @@ nothing, so without that check a wrong id would read as an empty store.
 | Listings | Size, modified time and md5 (`FileEntry::md5`). A whole tree is one query per level of folders, up to 40 folders a query. Google's own documents (Docs, Sheets) and shortcuts are left out |
 | Writes | An existing file's content is replaced in place (`files.update`), keeping its id; never a second file of the same name. Every upload is checked against the md5 Drive computes |
 | Large files | Above 5 MiB, a resumable session in 8 MiB pieces, resumed from what Drive reports it holds. Downloads above 16 MiB are read in ranges. Every download is checked against Drive's md5 and written through an owner-only temporary file, so a file already at the destination stays until the new one has passed |
-| Tree copies | `put_tree` skips every file whose md5 already matches. `Existing::Keep` refuses the whole copy, before uploading anything, when a file there holds other bytes; `Existing::Replace` replaces it in place. `fetch_tree` downloads what differs |
+| Tree copies | `put_tree` skips every file whose md5 already matches. `Existing::Keep` refuses the whole copy, before uploading anything, when a file there holds other bytes; `Existing::Replace` replaces it in place. A local path that would land on a Google document (Docs, Sheets: no bytes of their own) refuses the whole copy with exit 2, before anything is uploaded. `fetch_tree` downloads what differs |
 | Deletes | To Drive's trash (recoverable for 30 days) |
 | Moves | One `files.update` with `addParents`/`removeParents`. A clobbering move renames first and only then trashes the old destination, so a failure between leaves two files of the name (an error naming both), never none; `move_no_clobber` refuses an occupied one with exit 2 |
 | Retries | 429, a 403 with reason `rateLimitExceeded` or `userRateLimitExceeded`, and 5xx, with exponential backoff and jitter (1 s doubling to 32 s, 7 attempts), honouring `Retry-After` in seconds or as a date. A 5xx or lost answer to a create is not blindly retried: the folder is looked up again, or the new file found by name and md5. A file of that name with other bytes is another writer's: the upload stops with reason `duplicate_name` and replaces nothing. A resumable piece that keeps failing for a reason that may pass resumes from what the session holds; a refusal (auth, a full Drive, an expired session) stops at once |

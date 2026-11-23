@@ -20,12 +20,16 @@ use crate::remote::{RemoteRead, RemoteStore};
 /// and optionally a path under it that is the store's root. Written
 /// `gdrive:<profile>/<folder id>[/<path>]`, which is what the cache keys its
 /// directory on and what a background refresh is handed (`--remote-spec`).
+///
+/// Built only through [`DriveSpec::new`], [`DriveSpec::parse`] and
+/// [`DriveSpec::join`], which check the folder id and the path, so two specs
+/// naming one store are equal and print the same text.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DriveSpec {
-    pub profile: ProfileName,
-    pub folder: String,
+    profile: ProfileName,
+    folder: String,
     /// `/`-separated, no leading or trailing `/`; empty for the folder itself.
-    pub path: String,
+    path: String,
 }
 
 /// The scheme of a [`DriveSpec`]'s text form.
@@ -67,6 +71,22 @@ impl DriveSpec {
 
     pub fn is_spec(text: &str) -> bool {
         text.starts_with(SPEC_PREFIX)
+    }
+
+    /// The Drive profile (the Google account) the store is in.
+    pub fn profile(&self) -> &ProfileName {
+        &self.profile
+    }
+
+    /// The id of the folder the spec names.
+    pub fn folder(&self) -> &str {
+        &self.folder
+    }
+
+    /// The path under that folder that is the store's root; empty for the
+    /// folder itself.
+    pub fn path(&self) -> &str {
+        &self.path
     }
 }
 
@@ -144,6 +164,9 @@ pub struct Drive {
     temp_prefix: String,
     nodes: Mutex<HashMap<String, Node>>,
     root_checked: std::sync::OnceLock<()>,
+    /// The id of the store's root: the spec's folder, or the folder at its
+    /// path, once found.
+    base: std::sync::OnceLock<String>,
 }
 
 /// Folders asked about in one listing query (`'a' in parents or …`).
@@ -165,6 +188,7 @@ impl Drive {
             temp_prefix: crate::rclone::DEFAULT_TEMP_PREFIX.into(),
             nodes: Mutex::new(nodes),
             root_checked: std::sync::OnceLock::new(),
+            base: std::sync::OnceLock::new(),
         }
     }
 
@@ -340,14 +364,57 @@ impl Drive {
         Ok(())
     }
 
-    /// The id of the folder at `rel` ("" is the root); with `create`, the
-    /// missing folders on the way are made.
+    /// The id of the store's root, once per value: the spec's folder, or the
+    /// folder at the spec's path under it. A missing part of that path is
+    /// exit 4 naming it, as a wrong folder id is, so a typo never reads as an
+    /// empty store and a write never makes a second folder beside the right
+    /// one. Only `make` (an explicit `mkdir`) creates the path.
+    fn base_id(&self, make: bool) -> Result<String, CliError> {
+        self.check_root()?;
+        if let Some(id) = self.base.get() {
+            return Ok(id.clone());
+        }
+        let mut id = self.spec.folder.clone();
+        let mut path = String::new();
+        for part in Self::segments(&self.spec.path)? {
+            let next = Self::join(&path, part);
+            id = match self.child(&path, &id, part, true)? {
+                Some(f) => f.id,
+                None if make => {
+                    let what = format!("making the folder {}", self.shown(&next));
+                    self.api.create_folder(&what, &id, part)?.id
+                }
+                None => return Err(CliError::NotFound(format!(
+                    "opening {}: there is no folder `{next}` in the folder {}",
+                    self.spec_text(),
+                    self.spec.folder
+                ))
+                .with_remedy(
+                    "check the path in the CLI's settings; each folder name must match exactly, \
+                         capitals included",
+                )),
+            };
+            self.remember(&next, &id, true);
+            path = next;
+        }
+        let _ = self.base.set(id.clone());
+        Ok(id)
+    }
+
+    /// The id of the folder at `rel` (a path from [`Drive::abs`]); with
+    /// `create`, the missing folders below the store's root are made.
     fn folder_id(&self, rel: &str, create: bool) -> Result<Option<String>, CliError> {
         let parts = Self::segments(rel)?;
-        self.check_root()?;
-        let mut path = String::new();
-        let mut id = self.spec.folder.clone();
-        for part in parts {
+        let base = Self::segments(&self.spec.path)?;
+        let Some(below) = parts.strip_prefix(base.as_slice()) else {
+            return Err(CliError::Other(format!(
+                "`{rel}` is outside the store {}",
+                self.spec_text()
+            )));
+        };
+        let mut id = self.base_id(false)?;
+        let mut path = self.spec.path.clone();
+        for part in below {
             let next = Self::join(&path, part);
             match self.cached(&next) {
                 Some(node) if node.folder => id = node.id,
@@ -854,10 +921,10 @@ impl RemoteStore for Drive {
 
     /// A file or a folder at `rel`.
     fn exists(&self, rel: &str) -> Result<bool, CliError> {
-        let rel = &self.abs(rel);
         if Self::segments(rel)?.is_empty() {
-            return Ok(true);
+            return self.base_id(false).map(|_| true);
         }
+        let rel = &self.abs(rel);
         let (dir, name) = Self::split(rel)?;
         let Some(parent) = self.folder_id(&dir, false)? else {
             return Ok(false);
@@ -868,9 +935,10 @@ impl RemoteStore for Drive {
         Ok(self.folder_id(rel, false)?.is_some())
     }
 
+    /// The one write that makes the store's own path when it is missing.
     fn mkdir(&self, rel: &str) -> Result<(), CliError> {
-        let rel = &self.abs(rel);
-        self.folder_id(rel, true).map(|_| ())
+        self.base_id(true)?;
+        self.folder_id(&self.abs(rel), true).map(|_| ())
     }
 
     fn list_dirs(&self, rel: &str) -> Result<Vec<String>, CliError> {
