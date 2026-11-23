@@ -63,10 +63,15 @@ A vault reads its key from the keychain once and keeps it. On macOS, each
 newly built binary asks once before it may read the item. "Always Allow"
 lasts for that binary, while "Allow" covers one read. A process that builds
 several `DriveCli` values (a long-running server, a run that opens its store
-more than once) shares one vault, so it reads the key once:
-`with_vault(Arc::new(DriveCli::default_vault(bin)?))`, with the `Arc` kept
-for the process. To bound the wait on a dialog nobody answers, make that
-first read (`account(..).stored()`) on a thread of its own.
+more than once) shares one vault, so it reads the key once: keep
+`Arc::new(DriveCli::default_vault(bin)?)` for the process and give each
+`DriveCli` a clone with `with_vault`. To bound the wait on a dialog nobody
+answers, call `load_key(wait)` on that vault before the first sign-in is
+read. It reads on a thread of its own and holds none of the vault's locks,
+so an unanswered dialog is `KeyLoad::Waiting`. Until it is answered, the
+vault's reads and writes that need the key fail at once with exit 3. A read
+made some other way, holding the vault's key lock, would block every other
+user of the shared vault.
 
 ## Mounting the commands
 
@@ -131,7 +136,7 @@ and print the same text.
 | Paths | Store-relative, `/`-separated; `.`, `..` and empty parts are exit 2. Each part resolves to an id through a map cached for the life of the `Drive` value; a listing fills it in bulk |
 | Two items of one name | Drive allows it. A path that names two is an error naming both ids (reason `duplicate_name`), never a guess, and nothing is changed |
 | Listings | Size, modified time and md5 (`FileEntry::md5`). A whole tree is one query per level of folders, up to 40 folders a query. By default (`Listing::Bytes`), Google's own documents (Docs, Sheets) and shortcuts are left out, and paths do not go through shortcuts |
-| Whole listings | `Drive::listing(Listing::Whole)` lists the tree as rclone's default listing does, for a CLI whose folder other apps also fill. A Google document is listed with no size or md5. A shortcut is listed as its target under the shortcut's path, with the target's id, size, modified time and md5; a shortcut to a folder is walked, and two shortcuts to one folder list it under both paths. Reads (`cat`, `copy_out`, `md5`, `exists`, `list_here`, `list_dirs`, `fetch_tree`) follow shortcuts. A write, move, delete, `mkdir` or `put_tree` onto a shortcut, or into a folder reached through one, is exit 2 with reason `shortcut`, so nothing changes another account's file or makes a second item of the name. A shortcut whose target is gone or out of the sign-in's sight stops the listing with reason `shortcut_target_missing`, naming the shortcut; one inside the folder it points at stops it with `shortcut_loop`. A shortcut beside an item of its name is `duplicate_name`. The spec's own path never goes through a shortcut. A file with two parents (none since Drive's 2020 single-parent change) is listed once, under the first parent the walk reaches. Each shortcut costs one metadata read |
+| Whole listings | `Drive::listing(Listing::Whole)` lists the tree as rclone's default listing does, for a CLI whose folder other apps also fill. A Google document is listed with no size or md5. A shortcut is listed as its target under the shortcut's path, with the target's id, size, modified time and md5; a shortcut to a folder is walked, and two shortcuts to one folder list it under both paths. Reads (`cat`, `copy_out`, `md5`, `exists`, `list_here`, `list_dirs`, `fetch_tree`, `hashes`) follow shortcuts. A write, move, delete, `mkdir` or `put_tree` onto a shortcut, or into a folder reached through one, is exit 2 with reason `shortcut`, so nothing changes another account's file or makes a second item of the name. A shortcut whose target is gone or out of the sign-in's sight stops the listing with reason `shortcut_target_missing`, naming the shortcut; one inside the folder it points at stops it with `shortcut_loop`. A shortcut beside an item of its name is `duplicate_name`. The spec's own path never goes through a shortcut. A file with two parents (none since Drive's 2020 single-parent change) is listed once, under the first parent the walk reaches. Each shortcut costs one metadata read |
 | Writes | An existing file's content is replaced in place (`files.update`), keeping its id; never a second file of the same name. Every upload is checked against the md5 Drive computes |
 | Large files | Above 5 MiB, a resumable session in 8 MiB pieces, resumed from what Drive reports it holds. Downloads above 16 MiB are read in ranges. Every download is checked against Drive's md5 and written through an owner-only temporary file, so a file already at the destination stays until the new one has passed |
 | Tree copies | `put_tree` skips every file whose md5 already matches. `Existing::Keep` refuses the whole copy, before uploading anything, when a file there holds other bytes; `Existing::Replace` replaces it in place. A local path that would land on a Google document (Docs, Sheets: no bytes of their own) refuses the whole copy with exit 2, before anything is uploaded. `fetch_tree` downloads what differs |

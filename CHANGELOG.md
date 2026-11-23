@@ -16,6 +16,13 @@
   one vault across the `DriveCli` values it builds and read its key from the keychain once.
   `DriveCli::default_vault(bin)` builds the vault `DriveCli::new` would. Callers passing a `Vault`
   are unchanged.
+- `pk-cli-auth`: `Vault::load_key(wait)` reads the key into the vault's cache with a bound, on a
+  thread of its own that holds none of the vault's locks. A keychain dialog nobody answers is
+  `KeyLoad::Waiting`. Until it is answered, the vault's reads and writes that need the key fail at
+  once (exit 3) instead of blocking or asking again, and a later `load_key` waits on the same read.
+- `pk-cli-auth`: `Vault::for_binary` honours `<PREFIX>_KEYCHAIN_SERVICE` through the new
+  `vault::keychain_for(bin)`, as `DriveCli::new` already did, so the two pick one service for one
+  binary. DESIGN.md §2.5 and the vault docs say the key is read once per `Vault` value.
 
 ## v0.35.1 — 2026-11-23
 

@@ -446,3 +446,130 @@ fn the_default_directory_is_under_the_home_config() {
     let dir = default_dir("example").unwrap();
     assert!(dir.ends_with(".config/example/vault"), "{}", dir.display());
 }
+
+/// A key store whose reads wait until it is opened, as a keychain read
+/// waits on a dialog until a person answers it.
+#[derive(Default)]
+struct GatedKeys {
+    inner: MemoryKeys,
+    open: std::sync::Mutex<bool>,
+    opened: std::sync::Condvar,
+    reads: AtomicUsize,
+}
+
+impl GatedKeys {
+    fn set_open(&self, open: bool) {
+        *self.open.lock().unwrap() = open;
+        self.opened.notify_all();
+    }
+}
+
+impl KeyStore for GatedKeys {
+    fn get(&self, account: &str) -> Result<Option<Secret>, CliError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.opened.wait(open).unwrap();
+        }
+        drop(open);
+        self.inner.get(account)
+    }
+
+    fn set(&self, account: &str, value: &Secret) -> Result<(), CliError> {
+        self.inner.set(account, value)
+    }
+
+    fn delete(&self, account: &str) -> Result<bool, CliError> {
+        self.inner.delete(account)
+    }
+}
+
+#[test]
+fn a_bounded_key_read_nobody_answers_waits_and_blocks_no_one() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(GatedKeys::default());
+    keys.set_open(true);
+    Vault::new(Arc::clone(&keys), tmp.0.join("vault"))
+        .put("a", &secret("one"))
+        .unwrap();
+    keys.set_open(false);
+    let before = keys.reads.load(Ordering::SeqCst);
+    let vault = Arc::new(Vault::new(Arc::clone(&keys), tmp.0.join("vault")));
+    let started = std::time::Instant::now();
+    assert_eq!(
+        vault.load_key(Duration::from_millis(50)).unwrap(),
+        KeyLoad::Waiting
+    );
+    // While the dialog is open, reads and writes fail at once instead of
+    // blocking or asking again, and another load waits on the same read.
+    let err = vault.get("a").unwrap_err();
+    assert_eq!(err.exit_code(), 3, "{err}");
+    assert!(err.to_string().contains("dialog"), "{err}");
+    assert_eq!(vault.put("b", &secret("two")).unwrap_err().exit_code(), 3);
+    assert_eq!(
+        vault.load_key(Duration::from_millis(50)).unwrap(),
+        KeyLoad::Waiting
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(keys.reads.load(Ordering::SeqCst) - before, 1);
+    // Answered: the key is cached, and nothing reads the keychain again.
+    keys.set_open(true);
+    assert_eq!(
+        vault.load_key(Duration::from_secs(5)).unwrap(),
+        KeyLoad::Loaded
+    );
+    assert_eq!(vault.get("a").unwrap().unwrap().expose(), "one");
+    vault.put("b", &secret("two")).unwrap();
+    assert_eq!(keys.reads.load(Ordering::SeqCst) - before, 1);
+}
+
+#[test]
+fn a_bounded_read_that_answers_after_the_wait_is_taken_by_the_next_read() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(GatedKeys::default());
+    keys.set_open(true);
+    Vault::new(Arc::clone(&keys), tmp.0.join("vault"))
+        .put("a", &secret("one"))
+        .unwrap();
+    keys.set_open(false);
+    let vault = Arc::new(Vault::new(Arc::clone(&keys), tmp.0.join("vault")));
+    assert_eq!(
+        vault.load_key(Duration::from_millis(20)).unwrap(),
+        KeyLoad::Waiting
+    );
+    keys.set_open(true);
+    // A plain read after the answer uses it rather than reading again.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let value = loop {
+        match vault.get("a") {
+            Ok(v) => break v,
+            Err(e) if e.exit_code() == 3 && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert_eq!(value.unwrap().expose(), "one");
+}
+
+#[test]
+fn a_bounded_load_reads_nothing_for_an_empty_vault_and_names_a_lost_key() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(GatedKeys::default());
+    let vault = Arc::new(Vault::new(Arc::clone(&keys), tmp.0.join("vault")));
+    assert_eq!(
+        vault.load_key(Duration::from_millis(20)).unwrap(),
+        KeyLoad::Empty
+    );
+    assert_eq!(keys.reads.load(Ordering::SeqCst), 0);
+    // Entries sealed under a key this keychain does not hold.
+    Vault::new(MemoryKeys::new(), tmp.0.join("vault"))
+        .put("a", &secret("one"))
+        .unwrap();
+    keys.set_open(true);
+    let vault = Arc::new(Vault::new(Arc::clone(&keys), tmp.0.join("vault")));
+    assert_eq!(
+        vault.load_key(Duration::from_secs(5)).unwrap(),
+        KeyLoad::Missing
+    );
+}

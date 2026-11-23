@@ -18,7 +18,6 @@ use pk_cli_auth::vault::Vault;
 use pk_cli_auth::{AuthLogin, AuthMethod, AuthStatus};
 use pk_cli_config::profile::{self, ProfileName};
 use pk_cli_core::{block_on, confirm, output, CliError, Reason};
-use pk_cli_secrets::CredentialStore;
 use serde_json::{json, Value};
 
 use super::account::{now, Account, FixedToken};
@@ -232,19 +231,15 @@ impl DriveCli {
     /// `piekstra.<bin>` (or `<PREFIX>_KEYCHAIN_SERVICE`) and `bin`'s vault
     /// directory. Nothing is read until an entry is.
     pub fn default_vault(bin: &str) -> Result<Vault, CliError> {
-        let service_var = format!("{}_KEYCHAIN_SERVICE", crate::cache::env_prefix(bin));
-        let keys = match std::env::var(&service_var) {
-            Ok(s) if !s.is_empty() => CredentialStore::new(s),
-            _ => CredentialStore::for_binary(bin),
-        };
-        Ok(Vault::new(keys, pk_cli_auth::vault::default_dir(bin)?))
+        Vault::for_binary(bin)
     }
 
     /// Use `vault` instead: a test's, with its own keys and directory, or
     /// one `Arc<Vault>` shared by every `DriveCli` a process builds. A
     /// vault reads its key from the keychain once and keeps it, so sharing
     /// one means a process asks macOS at most once, whether the person
-    /// chose Allow or Always Allow.
+    /// chose Allow or Always Allow. [`Vault::load_key`] on the shared vault
+    /// bounds that read.
     pub fn with_vault(mut self, vault: impl Into<Arc<Vault>>) -> Self {
         self.vault = vault.into();
         self
