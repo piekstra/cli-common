@@ -17,7 +17,8 @@ use serde_json::Value;
 use crate::{dates, output, CliError};
 
 /// The list envelope every profile `list` command emits. Records live under
-/// `items`; text mode renders them as the standard pipe table.
+/// `items`; text mode renders them as the standard pipe table, and prints each
+/// of `warnings` on stderr.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paged<T> {
     /// `<record>-list/v1`, e.g. `statement-list/v1`, `document-list/v1`.
@@ -28,6 +29,29 @@ pub struct Paged<T> {
     /// Total available upstream, when known (items may be a `--limit` slice).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
+    /// Why `items` may be short of what the caller asked for (see
+    /// [`ListWarning`]). Absent when empty, so an envelope without any reads
+    /// exactly as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<ListWarning>,
+}
+
+/// A data-integrity note on one list: the provider reported more rows than it
+/// served, a per-row detail fetch failed, the range runs past the data on
+/// hand, the snapshot is older than the day asked for. A consumer treats a list
+/// carrying any warning as possibly incomplete.
+///
+/// It lives in the envelope because the stderr note a CLI prints for people
+/// does not reach a program: `--quiet` silences it and a `--json` consumer
+/// rarely reads stderr. So a CLI never drops a warning under `--quiet`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListWarning {
+    /// A stable kebab-case word a program branches on (`short-read`,
+    /// `coverage-gap`, …). A CLI documents the codes it emits; a consumer
+    /// treats an unknown code as a warning all the same.
+    pub code: String,
+    /// The same note for people.
+    pub message: String,
 }
 
 impl<T: Serialize> Paged<T> {
@@ -39,7 +63,17 @@ impl<T: Serialize> Paged<T> {
             items,
             next_cursor: None,
             total: None,
+            warnings: Vec::new(),
         }
+    }
+
+    /// Record a data-integrity warning on the list (see [`ListWarning`]).
+    pub fn warn(&mut self, code: impl Into<String>, message: impl Into<String>) -> &mut Self {
+        self.warnings.push(ListWarning {
+            code: code.into(),
+            message: message.into(),
+        });
+        self
     }
 
     /// Emit per the output contract: the full envelope in json mode, the
@@ -48,8 +82,13 @@ impl<T: Serialize> Paged<T> {
         let v = serde_json::to_value(self).unwrap_or(Value::Null);
         if json_mode {
             output::json(&v);
-        } else if let Some(items) = v.get("items").and_then(Value::as_array) {
+            return;
+        }
+        if let Some(items) = v.get("items").and_then(Value::as_array) {
             output::table(items);
+        }
+        for w in &self.warnings {
+            eprintln!("warning: {}", w.message);
         }
     }
 }
@@ -106,6 +145,26 @@ mod tests {
         // Optional envelope fields stay absent until set.
         assert!(v.get("next_cursor").is_none());
         assert!(v.get("total").is_none());
+        assert!(v.get("warnings").is_none());
+    }
+
+    #[test]
+    fn warnings_serialize_in_order_and_old_envelopes_still_read() {
+        let mut page = Paged::new("transaction", vec![Row { id: "t1".into() }]);
+        page.warn("short-read", "reported 3 rows and served 1")
+            .warn("coverage-gap", "no history before 2026-01-01");
+        let v = serde_json::to_value(&page).unwrap();
+        assert_eq!(v["warnings"][0]["code"], "short-read");
+        assert_eq!(v["warnings"][0]["message"], "reported 3 rows and served 1");
+        assert_eq!(v["warnings"][1]["code"], "coverage-gap");
+
+        // An envelope written before the field existed deserializes with none.
+        let old: Paged<serde_json::Value> =
+            serde_json::from_str(r#"{"schema":"transaction-list/v1","items":[],"total":0}"#)
+                .unwrap();
+        assert!(old.warnings.is_empty());
+        let back: Paged<serde_json::Value> = serde_json::from_value(v).unwrap();
+        assert_eq!(back.warnings.len(), 2);
     }
 
     #[test]

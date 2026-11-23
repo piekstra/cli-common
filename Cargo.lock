@@ -746,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "example-cli"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1559,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-arcgis"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "pk-cli-core",
  "serde_json",
@@ -1567,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-auth"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "chacha20poly1305",
  "clap",
@@ -1584,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-browser"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "clap",
  "ctrlc",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-config"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "pk-cli-core",
  "serde",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-core"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "clap",
  "libc",
@@ -1618,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-documents"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "pk-cli-core",
  "serde",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-drive"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "pk-cli-core",
  "serde",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-http"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "clap",
  "pk-cli-core",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-mcp"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "bytes",
  "clap",
@@ -1667,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-mcp-wasm-demo"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "pk-cli-core",
  "pk-cli-mcp",
@@ -1678,11 +1678,11 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-scrape"
-version = "0.33.5"
+version = "0.34.0"
 
 [[package]]
 name = "pk-cli-secrets"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "clap",
  "keyring",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-selfupdate"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "clap",
  "flate2",
@@ -1708,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-utility"
-version = "0.33.5"
+version = "0.34.0"
 dependencies = [
  "clap",
  "pk-cli-core",

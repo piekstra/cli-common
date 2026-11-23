@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.34.0 — 2026-11-22
+
+- `pk-cli-core`: the `Paged` envelope gains `warnings: [{code, message}]` (`ListWarning`,
+  re-exported at the crate root), added with `Paged::warn(code, message)`. It is how a list says
+  it may be short of what was asked: the provider reported more rows than it served, a per-row
+  detail fetch failed, the range runs past the data on hand, the snapshot is older than the day
+  asked for. Absent when empty, and an envelope without it still deserializes. `Paged::emit` prints
+  each warning on stderr in text mode; `--quiet` never removes one. Minor bump: `Paged` has a new
+  public field, so a struct literal of it no longer compiles (no family CLI builds one). Asked for
+  by the etrade-cli and fidelity-cli reviews, whose short-read and coverage-gap notes reached
+  stderr only.
+- `pk-cli-mcp`: `PageInfo` carries the same `warnings` (in the output schema as `ListWarning`), and
+  `Page::warn` adds one, so an MCP list tool over the same read reports what the CLI list does.
+  `PageInfo` has a new public field too. It adds about 240 characters to each list tool's
+  `outputSchema`, which counts toward the 8,000-character definitions budget; a CLI near the
+  budget sees `assert_conforms` say so on the bump.
+- Rollout: the field is additive under the same `<record>-list/v1` tag, and a consumer on an older
+  cli-common drops it without error. Move a consumer to v0.34.0 or later (or have it read
+  `warnings` from the JSON) before or with its producers; only then does a list with no warnings
+  read as complete. conformance.md has both checks.
+
 ## v0.33.5 — 2026-11-21
 
 - `pk-cli-browser`: `Capture::responses(domain, paths, during)` keeps the responses the capture's

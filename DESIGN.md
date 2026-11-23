@@ -329,12 +329,27 @@ Rules that apply to every profile:
 - A profile owns **spellings and shapes**, never provider logic.
 - Profile DTOs follow §1.4 (schema tags, `Money`, ISO dates, snake_case).
 - Every profile `list` command emits the `Paged` envelope — records under
-  `items`, optional `next_cursor`/`total` — and takes the shared range flags
+  `items`, optional `next_cursor`/`total`/`warnings` — and takes the shared range flags
   `--limit N`, `--since YYYY-MM-DD`, `--until YYYY-MM-DD` (`RangeArgs`).
   Both are profile-agnostic and live in `pk-cli-core` (`pk_cli_core::{Paged,
   RangeArgs}`); profile crates re-export them, so a CLI that adopts two
   profiles gets one type, not two, and a non-utility CLI never depends on the
   utility crate just to page a list.
+- A list that may be short of what was asked says so in the envelope:
+  `warnings: [{code, message}]` (`ListWarning`, added with `Paged::warn`), one
+  per data-integrity note — the provider reported more rows than it served, a
+  per-row detail fetch failed, the range runs past the data on hand, the
+  snapshot is older than the day asked for. `code` is a stable kebab-case
+  word the CLI documents; `message` is for people. `--quiet` never removes a
+  warning, and text mode prints each on stderr from `Paged::emit`, so a CLI
+  does not print them a second time. A consumer treats a list with any
+  warning, known code or not, as possibly incomplete. An MCP list tool over
+  the same read carries the same notes in its result's `warnings`
+  (`pk_cli_mcp::PageInfo`, `Page::warn`), so the codes match. The field is
+  additive under the same `<record>-list/v1` tag, and an older consumer
+  ignores it: a consumer of a list that can carry warnings is on cli-common
+  v0.34.0 or later (or reads `warnings` from the JSON itself) before or with
+  its producers, since only then does a list without any read as complete.
 - When a profile earns a crate, and how to add one: see **[PROFILES.md](PROFILES.md)**.
 
 #### The `utility/v1` profile (crate `pk-cli-utility`)
@@ -594,7 +609,7 @@ WebCrypto) in B, behind a provider seam the toolset awaits (§2.3).
 | Limit | 25 records unless the call passes `limit`, at most 200 |
 | Paging | an opaque `cursor`; a page returns `next_cursor` until the last. A cursor is bound to its query's filters, so one replayed with other filters is refused rather than paging a different list. A list whose rows can arrive or leave between pages (a ledger, a bill history) pages by position: `PositionRequest`, whose cursor holds the last row's `PositionKey`, so a new row repeats nothing and a removed one skips nothing. The key's sort value (a date) travels in the cursor encoded and not encrypted, and the row's id as a fingerprint, which keeps it from being read off the cursor and does not hide it from someone trying candidates. The tool reads every matching row for it. `PageRequest`'s count of rows does for a list that holds still between pages. A list too long to read whole on every page, whose provider reads on from a position (`before=<id>`, or a cursor of its own), pages with `ResumeRequest`, so a deep page costs one page. Its cursor holds the tool's key encoded and not encrypted, so the key is something the client may already see. A key must resume immediately after its row: a provider's cursor marking the end of a whole page does not, so that key holds the cursor that fetched the row's page and what the row is, the tool resumes just after that row in the page it re-reads, and if the row has gone it says the place is lost and to start over. The key comes back from the client, so the tool checks its shape before sending it to the provider. |
 | Format | `response_format`: `concise` (default) is the fields a person reads, names instead of ids; `detailed` adds ids, timestamps and provider detail |
-| Envelope | `items`, `returned`, `next_cursor`, `truncated`, `hint`, beside the tool's own top-level fields |
+| Envelope | `items`, `returned`, `next_cursor`, `truncated`, `hint`, and `warnings` when the list may be short (`Page::warn`), beside the tool's own top-level fields |
 | Size budget | a page stops before 32,000 characters of JSON and says so: `truncated: true` and a `hint` naming the cursor and the tool's own narrowing arguments. Claude Code warns above 10,000 tokens per result and cuts at 25,000; Claude Desktop and claude.ai cut at about 150,000 characters and 240 s per call |
 | Hard limit | any result over 64,000 characters, list or not, is replaced by an error telling the model to narrow the call |
 
