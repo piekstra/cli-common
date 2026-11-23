@@ -905,6 +905,49 @@ impl Drive {
         Ok(self.file(rel)?.and_then(|(_, f, _)| f.md5()))
     }
 
+    /// Moves the empty folder at `rel` to Drive's trash, where it is
+    /// recoverable for 30 days (as `rclone rmdir` removes an empty
+    /// directory). `false` when no folder is at `rel`. Refused, with
+    /// nothing trashed: the store's own folder (exit 2), a folder holding
+    /// anything outside the trash (exit 2, reason `not_empty`), and a path
+    /// that is or goes through a shortcut (exit 2, reason `shortcut`), so
+    /// neither a shortcut nor the folder it points at is trashed.
+    pub fn trash_empty_folder(&self, rel: &str) -> Result<bool, CliError> {
+        if Self::segments(rel)?.is_empty() {
+            return Err(CliError::Usage(format!(
+                "{} is the store's own folder; only a folder below it is trashed",
+                self.spec_text()
+            )));
+        }
+        let rel = &self.abs(rel);
+        let (dir, name) = Self::split(rel)?;
+        let Some(parent) = self.folder_node(&dir, false)? else {
+            return Ok(false);
+        };
+        let Some(found) = self.child(&dir, &parent.id, &name, true, true)? else {
+            return Ok(false);
+        };
+        if parent.via || found.via {
+            return Err(self.through_shortcut(rel));
+        }
+        let what = format!("listing {}", self.shown(rel));
+        let q = format!("{} in parents and trashed = false", quote(&found.file.id));
+        let held = self.api.list(&what, &q)?.len();
+        if held > 0 {
+            return Err(CliError::Usage(format!(
+                "{} holds {held} item(s) outside the trash; only an empty folder is trashed, \
+                 so nothing was",
+                self.shown(rel)
+            ))
+            .because(crate::reason::NOT_EMPTY)
+            .with_remedy("move or trash what it holds first"));
+        }
+        let what = format!("trashing the folder {}", self.shown(rel));
+        let gone = self.api.trash(&what, &found.file.id)?;
+        self.forget(rel);
+        Ok(gone)
+    }
+
     /// The account and its storage (replaces `rclone about`).
     pub fn about(&self) -> Result<About, CliError> {
         self.api.about()

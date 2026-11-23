@@ -1333,3 +1333,60 @@ fn a_tree_download_refuses_names_that_leave_the_folder_or_land_twice() {
     assert_eq!(h.drive().fetch_tree("shared", &down).unwrap(), 2);
     assert_eq!(std::fs::read(down.join("a/b.txt")).unwrap(), b"one");
 }
+
+#[test]
+fn only_an_empty_folder_is_trashed_and_never_through_a_shortcut() {
+    let h = Harness::new();
+    h.signed_in();
+    let d = h.drive();
+    let empty = h.fake.add_folder(ROOT_ID, "empty");
+    let full = h.fake.add_folder(ROOT_ID, "full");
+    let kept = h.fake.add_file(&full, "kept.txt", b"kept");
+    let leftover = h.fake.add_folder(ROOT_ID, "leftover");
+    let old = h.fake.add_file(&leftover, "old.txt", b"old");
+    h.fake.trash(&old);
+    let theirs = h.fake.add_folder(MY_DRIVE, "Theirs");
+    let inner = h.fake.add_folder(&theirs, "inner");
+    h.fake.add_shortcut(ROOT_ID, "linked", &theirs);
+    h.fake.add_file(ROOT_ID, "plain.txt", b"p");
+
+    assert!(d.trash_empty_folder("empty").unwrap());
+    assert!(h.fake.is_trashed(&empty));
+    assert!(!d.exists("empty").unwrap());
+    // What is already in the trash does not count.
+    assert!(d.trash_empty_folder("leftover").unwrap());
+    assert!(h.fake.is_trashed(&leftover));
+
+    let e = d.trash_empty_folder("full").unwrap_err();
+    assert_eq!((e.exit_code(), reason(&e)), (2, Some(reason::NOT_EMPTY)));
+    assert!(!h.fake.is_trashed(&full) && !h.fake.is_trashed(&kept));
+
+    // A shortcut is refused under either listing. Under the whole listing
+    // a path through one is refused too; under the bytes listing it is not
+    // there at all.
+    let whole = h.drive().listing(Listing::Whole);
+    for through in ["linked", "linked/inner"] {
+        let e = whole.trash_empty_folder(through).unwrap_err();
+        assert_eq!(
+            (e.exit_code(), reason(&e)),
+            (2, Some(reason::SHORTCUT)),
+            "{through}"
+        );
+    }
+    let e = d.trash_empty_folder("linked").unwrap_err();
+    assert_eq!(reason(&e), Some(reason::SHORTCUT));
+    assert!(!d.trash_empty_folder("linked/inner").unwrap());
+    assert!(!h.fake.is_trashed(&theirs) && !h.fake.is_trashed(&inner));
+
+    assert!(!d.trash_empty_folder("missing").unwrap());
+    assert!(
+        !d.trash_empty_folder("plain.txt").unwrap(),
+        "a file is no folder"
+    );
+    assert_eq!(d.trash_empty_folder("").unwrap_err().exit_code(), 2);
+
+    let top = h.fake.add_folder(MY_DRIVE, "top-empty");
+    let at_root = h.drive_at(&DriveSpec::parse(&format!("gdrive:{PROFILE}/root")).unwrap());
+    assert!(at_root.trash_empty_folder("top-empty").unwrap());
+    assert!(h.fake.is_trashed(&top));
+}

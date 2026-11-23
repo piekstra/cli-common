@@ -189,7 +189,7 @@ pub enum ProfilesCommand {
     /// The Drive profiles (profile-list/v1). Reads no keychain.
     List,
     /// Remove a Drive profile: its sign-in, its OAuth client and its record.
-    /// Named as `profiles add` does, or by the commands' profile flag.
+    /// The profile is NAME, or else the one the profile flag names.
     Remove {
         name: Option<String>,
         /// Do not ask.
