@@ -616,14 +616,15 @@ impl DriveCli {
                 {
                     status.session_valid = Some(true);
                 }
-                Ok(about) => {
+                Ok(_) => {
                     status.session_valid = Some(false);
                     status.authenticated = false;
-                    problem = Some(format!(
-                        "the stored sign-in is {}'s, not {}'s",
-                        about.email,
-                        record.account.clone().unwrap_or_default()
-                    ));
+                    // The profile's address is the status's username; the
+                    // other account's is not shown.
+                    problem = Some(
+                        "the stored sign-in is another Google account's, not this profile's"
+                            .to_string(),
+                    );
                 }
                 Err(e) if e.is_auth() => {
                     status.session_valid = Some(false);
