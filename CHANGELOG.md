@@ -9,6 +9,12 @@
   reads and writes that need the key fail at once. Before, a key replaced while a server ran was
   read again holding the vault's key lock with no limit, so an unanswered dialog held every other
   call. Vaults built without it are unchanged.
+- `pk-cli-auth`: a bounded read that answers in the background is cached under the vault's key id
+  from before it started, and `Vault::clear` drops one still waiting. In v0.36.0 `load_key`'s late
+  answer took the id current when it was taken. A vault cleared and rekeyed while that read waited
+  could then seal an entry with the deleted key.
+- `pk-cli-auth`: a new key's read-back is bounded too, and the vault's new key id is written before
+  it, so a process holding an older key reads the keychain again even if the read-back stops.
 - `pk-cli-auth`: `Vault::load_key` takes `&self` (it took `self: &Arc<Self>`); calls on an
   `Arc<Vault>` are unchanged.
 

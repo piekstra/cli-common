@@ -265,6 +265,15 @@ pub enum KeyLoad {
     Waiting,
 }
 
+/// A bounded key read left to answer in the background, with the vault's
+/// key id from before it started. Its key is cached under that id, so a
+/// vault cleared and rekeyed while it waited reads the key again rather
+/// than seal with the one it got.
+struct Pending {
+    id: Option<String>,
+    rx: mpsc::Receiver<KeyRead>,
+}
+
 /// Whether a bounded key read is still waiting on the keychain.
 enum Settled {
     Idle,
@@ -278,7 +287,7 @@ pub struct Vault {
     dir: PathBuf,
     key: Mutex<Option<Cached>>,
     /// A bounded key read still on its way. Locked after `key`.
-    loading: Mutex<Option<mpsc::Receiver<KeyRead>>>,
+    loading: Mutex<Option<Pending>>,
     wait: Duration,
     /// [`Vault::bound_key_reads`]: how long a keychain read of the key may
     /// take before it is left to answer in the background.
@@ -363,7 +372,11 @@ impl Vault {
                 if self.entry_files()?.is_empty() {
                     return Ok(KeyLoad::Empty);
                 }
-                *self.loading.lock().unwrap() = Some(self.spawn_read());
+                let id = self.current_id()?;
+                *self.loading.lock().unwrap() = Some(Pending {
+                    id,
+                    rx: self.spawn_read(),
+                });
             }
         }
         loop {
@@ -398,8 +411,9 @@ impl Vault {
 
     /// The keychain's key, for a caller holding the key lock: read on the
     /// caller's thread, or under [`Vault::bound_key_reads`] on a thread of
-    /// its own, waiting at most the bound and then left to `loading`.
-    fn fetch_key(&self) -> KeyRead {
+    /// its own, waiting at most the bound and then left to `loading` with
+    /// `id`, the vault's key id read before this call.
+    fn fetch_key(&self, id: &Option<String>) -> KeyRead {
         let Some(bound) = self.read_bound else {
             return self.read_key();
         };
@@ -407,7 +421,7 @@ impl Vault {
         match rx.recv_timeout(bound) {
             Ok(read) => read,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                *self.loading.lock().unwrap() = Some(rx);
+                *self.loading.lock().unwrap() = Some(Pending { id: id.clone(), rx });
                 Err(waiting_for_keychain())
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(CliError::Keychain(
@@ -416,21 +430,18 @@ impl Vault {
         }
     }
 
-    /// Take a bounded key read that has answered into the cache.
-    /// `Waiting` while it has not.
+    /// Take a bounded key read that has answered into the cache, under the
+    /// key id from before it started. `Waiting` while it has not.
     fn settle(&self, cached: &mut Option<Cached>) -> Result<Settled, CliError> {
         let mut loading = self.loading.lock().unwrap();
-        let Some(rx) = loading.as_ref() else {
+        let Some(pending) = loading.as_ref() else {
             return Ok(Settled::Idle);
         };
-        match rx.try_recv() {
+        match pending.rx.try_recv() {
             Ok(read) => {
-                *loading = None;
+                let id = loading.take().and_then(|p| p.id);
                 if let Some(key) = read? {
-                    *cached = Some(Cached {
-                        key,
-                        id: self.current_id()?,
-                    });
+                    *cached = Some(Cached { key, id });
                 }
                 Ok(Settled::Idle)
             }
@@ -583,6 +594,8 @@ impl Vault {
         }
         self.keys.delete(KEY_ACCOUNT)?;
         *cached = None;
+        // A read still waiting would answer with the deleted key.
+        *self.loading.lock().unwrap() = None;
         Ok(removed)
     }
 
@@ -697,7 +710,7 @@ impl Vault {
             return Ok(Some(c.key.clone()));
         }
         let id = self.current_id()?;
-        let Some(key) = self.fetch_key()? else {
+        let Some(key) = self.fetch_key(&id)? else {
             return Ok(None);
         };
         *cached = Some(Cached {
@@ -720,7 +733,7 @@ impl Vault {
             return Ok(None);
         }
         *cached = None;
-        let Some(key) = self.fetch_key()? else {
+        let Some(key) = self.fetch_key(&id)? else {
             return Ok(None);
         };
         *cached = Some(Cached {
@@ -743,7 +756,7 @@ impl Vault {
             return Ok(c.key.clone());
         }
         *cached = None;
-        if let Some(key) = self.fetch_key()? {
+        if let Some(key) = self.fetch_key(&id)? {
             *cached = Some(Cached {
                 key: key.clone(),
                 id,
@@ -765,9 +778,12 @@ impl Vault {
             .map_err(|e| CliError::Other(format!("encoding the vault's key: {e}")))?,
         );
         self.keys.set(KEY_ACCOUNT, &Secret::new(item.as_str()))?;
+        // The new id first: a process holding an older key reads the
+        // keychain again even if this one stops at the read-back.
+        let id = Some(self.write_id()?);
         // Read it back: a store that dropped the write would otherwise seal
         // entries with a key nothing can find again.
-        match self.read_key()? {
+        match self.fetch_key(&id)? {
             Some(stored) if *stored == *fresh => {}
             _ => {
                 return Err(CliError::Keychain(
@@ -775,10 +791,9 @@ impl Vault {
                 ))
             }
         }
-        let id = self.write_id()?;
         *cached = Some(Cached {
             key: fresh.clone(),
-            id: Some(id),
+            id,
         });
         Ok(fresh)
     }

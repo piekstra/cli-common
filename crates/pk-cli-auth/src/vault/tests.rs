@@ -455,6 +455,10 @@ struct GatedKeys {
     open: std::sync::Mutex<bool>,
     opened: std::sync::Condvar,
     reads: AtomicUsize,
+    /// Reads that have answered.
+    answered: AtomicUsize,
+    /// Close the gate when a key is stored, so only its read-back waits.
+    close_on_set: std::sync::atomic::AtomicBool,
 }
 
 impl GatedKeys {
@@ -472,11 +476,17 @@ impl KeyStore for GatedKeys {
             open = self.opened.wait(open).unwrap();
         }
         drop(open);
-        self.inner.get(account)
+        let read = self.inner.get(account);
+        self.answered.fetch_add(1, Ordering::SeqCst);
+        read
     }
 
     fn set(&self, account: &str, value: &Secret) -> Result<(), CliError> {
-        self.inner.set(account, value)
+        self.inner.set(account, value)?;
+        if self.close_on_set.load(Ordering::SeqCst) {
+            self.set_open(false);
+        }
+        Ok(())
     }
 
     fn delete(&self, account: &str) -> Result<bool, CliError> {
@@ -642,4 +652,69 @@ fn a_bounded_vaults_first_read_waits_at_most_the_bound() {
         KeyLoad::Loaded
     );
     assert_eq!(vault.get("a").unwrap().unwrap().expose(), "one");
+}
+
+#[test]
+fn a_read_that_answers_after_a_rekey_is_not_used_to_seal() {
+    let tmp = TempDir::new();
+    let dir = tmp.0.join("vault");
+    let keys = Arc::new(GatedKeys::default());
+    keys.set_open(true);
+    Vault::new(Arc::clone(&keys), &dir)
+        .put("a", &secret("one"))
+        .unwrap();
+    let server = Vault::new(Arc::clone(&keys), &dir).bound_key_reads(Duration::from_millis(50));
+    keys.set_open(false);
+    assert_eq!(server.get("a").unwrap_err().exit_code(), 3);
+    // The dialog is answered with the old key, and nothing in the server
+    // takes the answer yet.
+    let answered = keys.answered.load(Ordering::SeqCst);
+    keys.set_open(true);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while keys.answered.load(Ordering::SeqCst) == answered {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the read never answered"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Meanwhile a terminal resets the vault and signs in again: a new key.
+    let terminal = Vault::new(Arc::clone(&keys), &dir);
+    terminal.clear().unwrap();
+    terminal.put("a", &secret("two")).unwrap();
+    // The server's write must use the new key, not the answer it held.
+    server.put("b", &secret("three")).unwrap();
+    let fresh = Vault::new(Arc::clone(&keys), &dir);
+    assert_eq!(fresh.get("b").unwrap().unwrap().expose(), "three");
+    assert_eq!(server.get("a").unwrap().unwrap().expose(), "two");
+}
+
+#[test]
+fn a_new_keys_read_back_waits_at_most_the_bound() {
+    let tmp = TempDir::new();
+    let dir = tmp.0.join("vault");
+    let keys = Arc::new(GatedKeys::default());
+    keys.set_open(true);
+    keys.close_on_set.store(true, Ordering::SeqCst);
+    let vault = Vault::new(Arc::clone(&keys), &dir).bound_key_reads(Duration::from_millis(50));
+    let started = std::time::Instant::now();
+    let err = vault.put("a", &secret("one")).unwrap_err();
+    assert_eq!(err.exit_code(), 3, "{err}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(vault.put("a", &secret("one")).unwrap_err().exit_code(), 3);
+    // Answered: the key read back is the one stored, and a write uses it.
+    keys.close_on_set.store(false, Ordering::SeqCst);
+    keys.set_open(true);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match vault.put("a", &secret("one")) {
+            Ok(()) => break,
+            Err(e) if e.exit_code() == 3 && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+    let fresh = Vault::new(Arc::clone(&keys), &dir);
+    assert_eq!(fresh.get("a").unwrap().unwrap().expose(), "one");
 }
