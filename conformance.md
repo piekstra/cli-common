@@ -190,11 +190,12 @@ the rest; this repo's own workflow adopts it in #15): `fmt` / `clippy -D warning
 smoke** — build and run the same three commands — rather than a full macOS
 matrix, because the only platform-specific sliver is the apple-native keyring
 backend and macOS minutes bill at roughly ten times Linux. A separate
-**security** job runs `cargo-audit` (rustsec/audit-check) and `gitleaks`.
+**security** job runs `cargo audit` (the CLI itself: rustsec/audit-check fails
+publishing its check run once there are unmaintained warnings) and `gitleaks`.
 Every workflow file sets `permissions: contents: read` at the top level, from
 its first commit, and widens only in the job that needs more: a release job
-`contents: write`, the security job `pull-requests: write`,
-`security-events: write` and `checks: write`. CodeQL reports a workflow without
+`contents: write`, the security job `pull-requests: write` and
+`security-events: write`. CodeQL reports a workflow without
 it as `actions/missing-workflow-permissions`.
 Tests are offline and never read the OS keychain (an ad-hoc-signed test
 binary would prompt once per item per run).
