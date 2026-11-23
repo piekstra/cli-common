@@ -46,6 +46,9 @@
 //!   vault's locks. A keychain dialog nobody answers is then
 //!   [`KeyLoad::Waiting`], and the vault's reads and writes that need the
 //!   key fail at once (exit 3) until it is answered, rather than block.
+//!   [`Vault::bound_key_reads`] holds every later keychain read of the key
+//!   to a bound the same way, so a key another process replaced while a
+//!   server ran is a timed-out read, not a hang.
 //!
 //! - **Moving in and resetting.** [`Vault::migrate_from`] moves a CLI's
 //!   old keychain items in, deleting each only once its copy reads back.
@@ -271,12 +274,15 @@ enum Settled {
 /// Secrets in owner-only encrypted files, under one keychain key. See the
 /// [module docs](self).
 pub struct Vault {
-    keys: Box<dyn KeyStore>,
+    keys: Arc<dyn KeyStore>,
     dir: PathBuf,
     key: Mutex<Option<Cached>>,
-    /// A [`Vault::load_key`] read still on its way. Locked after `key`.
+    /// A bounded key read still on its way. Locked after `key`.
     loading: Mutex<Option<mpsc::Receiver<KeyRead>>>,
     wait: Duration,
+    /// [`Vault::bound_key_reads`]: how long a keychain read of the key may
+    /// take before it is left to answer in the background.
+    read_bound: Option<Duration>,
 }
 
 /// The keychain store `bin`'s vault keeps its key in: the service
@@ -315,12 +321,27 @@ impl Vault {
     /// keychain-service override, or a test's [`MemoryKeys`].
     pub fn new(keys: impl KeyStore + 'static, dir: impl Into<PathBuf>) -> Self {
         Self {
-            keys: Box::new(keys),
+            keys: Arc::new(keys),
             dir: dir.into(),
             key: Mutex::new(None),
             loading: Mutex::new(None),
             wait: KEY_WAIT,
+            read_bound: None,
         }
+    }
+
+    /// Hold every keychain read of the key to `wait`, as [`Vault::load_key`]
+    /// holds the first: the first read for an entry, the read again after
+    /// another process replaced the key, and a write's. Each runs on a
+    /// thread of its own. One that does not answer in time fails with exit
+    /// 3, naming the dialog, and is left to answer in the background; until
+    /// it does, the vault's reads and writes that need the key fail at once
+    /// instead of blocking or asking again. For a process nobody may be
+    /// watching: a server, a scheduled run. Without it a read waits for the
+    /// keychain's answer, as a command run at the screen should.
+    pub fn bound_key_reads(mut self, wait: Duration) -> Self {
+        self.read_bound = Some(wait);
+        self
     }
 
     /// Read the key into this vault's cache now, waiting at most `wait` for
@@ -331,7 +352,7 @@ impl Vault {
     /// read: on macOS a person's "Allow" covers that one read, and the
     /// cached key then serves every later one. Reads nothing when the vault
     /// has no entries.
-    pub fn load_key(self: &Arc<Self>, wait: Duration) -> Result<KeyLoad, CliError> {
+    pub fn load_key(&self, wait: Duration) -> Result<KeyLoad, CliError> {
         let deadline = Instant::now() + wait;
         {
             let mut cached = self.key.lock().unwrap();
@@ -342,12 +363,7 @@ impl Vault {
                 if self.entry_files()?.is_empty() {
                     return Ok(KeyLoad::Empty);
                 }
-                let (tx, rx) = mpsc::channel();
-                let vault = Arc::clone(self);
-                std::thread::spawn(move || {
-                    let _ = tx.send(vault.read_key());
-                });
-                *self.loading.lock().unwrap() = Some(rx);
+                *self.loading.lock().unwrap() = Some(self.spawn_read());
             }
         }
         loop {
@@ -369,7 +385,38 @@ impl Vault {
         }
     }
 
-    /// Take a [`Vault::load_key`] read that has answered into the cache.
+    /// A keychain read of the key on a thread of its own, holding none of
+    /// the vault's locks.
+    fn spawn_read(&self) -> mpsc::Receiver<KeyRead> {
+        let (tx, rx) = mpsc::channel();
+        let keys = Arc::clone(&self.keys);
+        std::thread::spawn(move || {
+            let _ = tx.send(read_key_from(&*keys));
+        });
+        rx
+    }
+
+    /// The keychain's key, for a caller holding the key lock: read on the
+    /// caller's thread, or under [`Vault::bound_key_reads`] on a thread of
+    /// its own, waiting at most the bound and then left to `loading`.
+    fn fetch_key(&self) -> KeyRead {
+        let Some(bound) = self.read_bound else {
+            return self.read_key();
+        };
+        let rx = self.spawn_read();
+        match rx.recv_timeout(bound) {
+            Ok(read) => read,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                *self.loading.lock().unwrap() = Some(rx);
+                Err(waiting_for_keychain())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(CliError::Keychain(
+                "the keychain read of the vault's key ended without an answer".into(),
+            )),
+        }
+    }
+
+    /// Take a bounded key read that has answered into the cache.
     /// `Waiting` while it has not.
     fn settle(&self, cached: &mut Option<Cached>) -> Result<Settled, CliError> {
         let mut loading = self.loading.lock().unwrap();
@@ -650,7 +697,7 @@ impl Vault {
             return Ok(Some(c.key.clone()));
         }
         let id = self.current_id()?;
-        let Some(key) = self.read_key()? else {
+        let Some(key) = self.fetch_key()? else {
             return Ok(None);
         };
         *cached = Some(Cached {
@@ -673,7 +720,7 @@ impl Vault {
             return Ok(None);
         }
         *cached = None;
-        let Some(key) = self.read_key()? else {
+        let Some(key) = self.fetch_key()? else {
             return Ok(None);
         };
         *cached = Some(Cached {
@@ -696,7 +743,7 @@ impl Vault {
             return Ok(c.key.clone());
         }
         *cached = None;
-        if let Some(key) = self.read_key()? {
+        if let Some(key) = self.fetch_key()? {
             *cached = Some(Cached {
                 key: key.clone(),
                 id,
@@ -811,17 +858,8 @@ impl Vault {
             .collect())
     }
 
-    fn read_key(&self) -> Result<Option<Key>, CliError> {
-        let Some(secret) = self.keys.get(KEY_ACCOUNT)? else {
-            return Ok(None);
-        };
-        let item: KeyItem = serde_json::from_str(secret.expose()).map_err(|_| bad_key())?;
-        if item.format != KEY_FORMAT {
-            return Err(bad_key());
-        }
-        let mut key: Key = Zeroizing::new([0u8; 32]);
-        unhex(&item.key, key.as_mut()).ok_or_else(bad_key)?;
-        Ok(Some(key))
+    fn read_key(&self) -> KeyRead {
+        read_key_from(&*self.keys)
     }
 
     fn ensure_dir(&self) -> Result<(), CliError> {
@@ -937,6 +975,20 @@ fn unreadable(path: &Path) -> CliError {
         path.display()
     ))
     .with_remedy(REMEDY_DELETE_ENTRY)
+}
+
+/// The vault's key as `keys` holds it, or `None` when it holds none.
+fn read_key_from(keys: &dyn KeyStore) -> KeyRead {
+    let Some(secret) = keys.get(KEY_ACCOUNT)? else {
+        return Ok(None);
+    };
+    let item: KeyItem = serde_json::from_str(secret.expose()).map_err(|_| bad_key())?;
+    if item.format != KEY_FORMAT {
+        return Err(bad_key());
+    }
+    let mut key: Key = Zeroizing::new([0u8; 32]);
+    unhex(&item.key, key.as_mut()).ok_or_else(bad_key)?;
+    Ok(Some(key))
 }
 
 fn waiting_for_keychain() -> CliError {

@@ -573,3 +573,73 @@ fn a_bounded_load_reads_nothing_for_an_empty_vault_and_names_a_lost_key() {
         KeyLoad::Missing
     );
 }
+
+#[test]
+fn a_bounded_vault_rereads_a_replaced_key_without_blocking_anyone() {
+    let tmp = TempDir::new();
+    let dir = tmp.0.join("vault");
+    let keys = Arc::new(GatedKeys::default());
+    keys.set_open(true);
+    let server =
+        Arc::new(Vault::new(Arc::clone(&keys), &dir).bound_key_reads(Duration::from_millis(50)));
+    server.put("a", &secret("one")).unwrap();
+    assert_eq!(server.get("a").unwrap().unwrap().expose(), "one");
+    // Another process resets the vault and signs in again: a new key.
+    let other = Vault::new(Arc::clone(&keys), &dir);
+    other.clear().unwrap();
+    other.put("a", &secret("two")).unwrap();
+    // The server's next read cannot open the entry with its cached key and
+    // asks the keychain for the new one, which waits on a dialog.
+    keys.set_open(false);
+    let before = keys.reads.load(Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let err = server.get("a").unwrap_err();
+    assert_eq!(err.exit_code(), 3, "{err}");
+    assert!(err.to_string().contains("dialog"), "{err}");
+    // Another thread using the vault is not held behind it.
+    let peer = Arc::clone(&server);
+    let other_thread = std::thread::spawn(move || peer.get("a").unwrap_err().exit_code());
+    assert_eq!(other_thread.join().unwrap(), 3);
+    assert_eq!(server.put("b", &secret("x")).unwrap_err().exit_code(), 3);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(keys.reads.load(Ordering::SeqCst) - before, 1);
+    // Answered: the next read takes the new key, and asks nothing more.
+    keys.set_open(true);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let value = loop {
+        match server.get("a") {
+            Ok(v) => break v,
+            Err(e) if e.exit_code() == 3 && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Err(e) => panic!("{e}"),
+        }
+    };
+    assert_eq!(value.unwrap().expose(), "two");
+    assert_eq!(keys.reads.load(Ordering::SeqCst) - before, 1);
+}
+
+#[test]
+fn a_bounded_vaults_first_read_waits_at_most_the_bound() {
+    let tmp = TempDir::new();
+    let dir = tmp.0.join("vault");
+    let keys = Arc::new(GatedKeys::default());
+    keys.set_open(true);
+    Vault::new(Arc::clone(&keys), &dir)
+        .put("a", &secret("one"))
+        .unwrap();
+    keys.set_open(false);
+    let before = keys.reads.load(Ordering::SeqCst);
+    let vault = Vault::new(Arc::clone(&keys), &dir).bound_key_reads(Duration::from_millis(50));
+    let started = std::time::Instant::now();
+    assert_eq!(vault.get("a").unwrap_err().exit_code(), 3);
+    assert_eq!(vault.get("a").unwrap_err().exit_code(), 3);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(keys.reads.load(Ordering::SeqCst) - before, 1);
+    keys.set_open(true);
+    assert_eq!(
+        vault.load_key(Duration::from_secs(5)).unwrap(),
+        KeyLoad::Loaded
+    );
+    assert_eq!(vault.get("a").unwrap().unwrap().expose(), "one");
+}

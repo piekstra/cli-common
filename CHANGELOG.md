@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.36.1 — 2026-11-23
+
+- `pk-cli-auth`: `Vault::bound_key_reads(wait)` holds every keychain read of the key to `wait`, as
+  `Vault::load_key` holds the first. That covers the first read for an entry, the read again after
+  another process replaced the key, and a write's. Each runs on a thread of its own. One that does
+  not answer in time is exit 3 and is left to answer in the background; until it does, the vault's
+  reads and writes that need the key fail at once. Before, a key replaced while a server ran was
+  read again holding the vault's key lock with no limit, so an unanswered dialog held every other
+  call. Vaults built without it are unchanged.
+- `pk-cli-auth`: `Vault::load_key` takes `&self` (it took `self: &Arc<Self>`); calls on an
+  `Arc<Vault>` are unchanged.
+
 ## v0.36.0 — 2026-11-23
 
 - `pk-cli-drive`: `Drive::listing(Listing::Whole)` lists a Drive store as rclone's default
