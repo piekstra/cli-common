@@ -7,11 +7,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use md5::{Digest, Md5};
-use pk_cli_core::CliError;
+use pk_cli_core::{CliError, Reason};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::api::{is_ambiguous, Answer, Api};
+use super::api::{is_ambiguous, is_transient, Answer, Api};
 
 pub(crate) const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 /// The fields every file answer carries.
@@ -337,20 +337,29 @@ impl Api {
                     }) {
                         Ok(answer) => return answer.json(what),
                         Err(e) if is_ambiguous(&e) && attempt < 2 => {
-                            // Did it land? Take ours if so; anything else
-                            // there gets the content in place.
+                            // Did it land? A multipart create is all or
+                            // nothing, so ours is there with our md5 or not
+                            // at all. A file of the name with other bytes is
+                            // another writer's: never replaced, never joined
+                            // by a second of the name.
                             let found = self.named(what, parent, name, false)?;
                             if let Some(f) = found.iter().find(|f| f.md5().as_deref() == Some(md5))
                             {
                                 return Ok(f.clone());
                             }
-                            if let [only] = found.as_slice() {
-                                return self.upload_simple(
-                                    what,
-                                    &Target::Existing { id: &only.id },
-                                    source,
-                                    md5,
-                                );
+                            if !found.is_empty() {
+                                return Err(CliError::Upstream(format!(
+                                    "{what}: Google Drive's answer was lost, and the folder now \
+                                     holds {} other file(s) of that name (ids {}); nothing was \
+                                     replaced",
+                                    found.len(),
+                                    found
+                                        .iter()
+                                        .map(|f| f.id.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ))
+                                .because(Reason::Provider("duplicate_name")));
                             }
                         }
                         Err(e) => return Err(e),
@@ -422,11 +431,15 @@ impl Api {
             });
             let answer = match put {
                 Ok(a) => a,
-                // A piece that failed after its retries: ask the session
-                // how much it holds, and go on from there.
-                Err(_) if stalls < 3 => {
+                // A piece that failed after its retries for a reason that
+                // may pass: ask the session how much it holds, and go on from
+                // there. A refusal (auth, quota, an expired session) stands.
+                Err(e) if is_transient(&e) && stalls < 3 => {
                     stalls += 1;
-                    self.upload_status(what, &session, len)?
+                    match self.upload_status(what, &session, len) {
+                        Ok(answer) => answer,
+                        Err(_) => return Err(e),
+                    }
                 }
                 Err(e) => return Err(e),
             };

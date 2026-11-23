@@ -21,8 +21,12 @@
 - `pk-cli-drive`: `google::fake::FakeDrive` (feature `fake-google`), a Drive API server on
   127.0.0.1 with synthetic files and fault injection, which a CLI's black-box tests reach through
   `<PREFIX>_DRIVE_TEST_ENDPOINT`. `make drive-check` runs the backend's tests against it.
+- `pk-cli-drive`: a store spec may carry a path under its folder, `gdrive:<profile>/<folder-id>/<path>`
+  (`DriveSpec::join`), as rclone's `remote:path` does.
+- `pk-cli-drive`: `Backend` is `#[non_exhaustive]`, since a variant exists per backend feature; a
+  match outside the crate needs a wildcard arm (no family CLI matches on it).
 - `pk-cli-drive`: the store interface is two traits, `RemoteRead` (now in `remote`, still
-  re-exported from `rclone`) and `RemoteStore`; `CachedRemote<R>`'s writes and
+  re-exported from `rclone`) and `RemoteStore` (sealed: implemented by the crate's remotes only); `CachedRemote<R>`'s writes and
   `cache::run_revalidation` are generic over `RemoteStore`, and `CachedRemote::remote` returns
   `&R`. `FileEntry` gains `md5: Option<String>` (absent from JSON when `None`). The rclone
   backend's docs mark it deprecated for Google Drive.

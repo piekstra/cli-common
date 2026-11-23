@@ -51,6 +51,8 @@ impl RemoteRead for Remote {
     }
 }
 
+impl crate::remote::sealed::Sealed for Remote {}
+
 impl RemoteStore for Remote {
     fn write(&self, rel: &str, content: &str) -> Result<(), CliError> {
         Remote::write(self, rel, content)

@@ -13,12 +13,14 @@ use crate::cache::CachedRemote;
 #[cfg(feature = "google")]
 use crate::google::Drive;
 use crate::rclone::Remote;
-#[cfg(feature = "google")]
-use crate::remote::RemoteRead;
-use crate::remote::RemoteStore;
+use crate::remote::{RemoteRead, RemoteStore};
 
 /// Where the store lives. Every method takes a path relative to the store
 /// root (`rel`, forward slashes) and behaves the same on every backend.
+///
+/// Non-exhaustive: a variant exists per backend feature (`google`), so a
+/// match outside this crate keeps a wildcard arm.
+#[non_exhaustive]
 pub enum Backend {
     /// A local directory: a Drive-for-desktop mount, or any folder (tests
     /// use temp dirs). Fast, but a mount can go stale without saying so;
@@ -108,60 +110,147 @@ pub struct FileEntry {
     pub md5: Option<String>,
 }
 
+/// What [`Backend`] asks of a remote, cached or not: one dispatch for
+/// every backend that is not a mount.
+trait Store {
+    fn target(&self, rel: &str) -> String;
+    fn cat(&self, rel: &str) -> Result<Option<String>, CliError>;
+    fn write(&self, rel: &str, content: &str) -> Result<(), CliError>;
+    fn copy_in(&self, local: &Path, rel: &str) -> Result<(), CliError>;
+    fn move_to(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError>;
+    fn move_no_clobber(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError>;
+    fn delete_file(&self, rel: &str) -> Result<bool, CliError>;
+    fn exists(&self, rel: &str) -> Result<bool, CliError>;
+    fn mkdir(&self, rel: &str) -> Result<(), CliError>;
+    fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError>;
+    /// A download, never cached.
+    fn download(&self, rel: &str) -> Result<LocalCopy, CliError>;
+}
+
+impl<R: RemoteStore> Store for R {
+    fn target(&self, rel: &str) -> String {
+        RemoteRead::target(self, rel)
+    }
+    fn cat(&self, rel: &str) -> Result<Option<String>, CliError> {
+        RemoteRead::cat(self, rel)
+    }
+    fn write(&self, rel: &str, content: &str) -> Result<(), CliError> {
+        RemoteStore::write(self, rel, content)
+    }
+    fn copy_in(&self, local: &Path, rel: &str) -> Result<(), CliError> {
+        RemoteStore::copy_in(self, local, rel)
+    }
+    fn move_to(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError> {
+        RemoteStore::move_to(self, rel_from, rel_to)
+    }
+    fn move_no_clobber(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError> {
+        RemoteStore::move_no_clobber(self, rel_from, rel_to)
+    }
+    fn delete_file(&self, rel: &str) -> Result<bool, CliError> {
+        RemoteStore::delete_file(self, rel)
+    }
+    fn exists(&self, rel: &str) -> Result<bool, CliError> {
+        RemoteStore::exists(self, rel)
+    }
+    fn mkdir(&self, rel: &str) -> Result<(), CliError> {
+        RemoteStore::mkdir(self, rel)
+    }
+    fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
+        RemoteRead::list_entries(self, rel)
+    }
+    fn download(&self, rel: &str) -> Result<LocalCopy, CliError> {
+        download(self, rel)
+    }
+}
+
+impl<R: RemoteStore> Store for CachedRemote<R> {
+    fn target(&self, rel: &str) -> String {
+        CachedRemote::target(self, rel)
+    }
+    fn cat(&self, rel: &str) -> Result<Option<String>, CliError> {
+        CachedRemote::cat(self, rel)
+    }
+    fn write(&self, rel: &str, content: &str) -> Result<(), CliError> {
+        CachedRemote::write(self, rel, content)
+    }
+    fn copy_in(&self, local: &Path, rel: &str) -> Result<(), CliError> {
+        CachedRemote::copy_in(self, local, rel)
+    }
+    fn move_to(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError> {
+        CachedRemote::move_to(self, rel_from, rel_to)
+    }
+    fn move_no_clobber(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError> {
+        CachedRemote::move_no_clobber(self, rel_from, rel_to)
+    }
+    fn delete_file(&self, rel: &str) -> Result<bool, CliError> {
+        CachedRemote::delete_file(self, rel)
+    }
+    fn exists(&self, rel: &str) -> Result<bool, CliError> {
+        CachedRemote::exists(self, rel)
+    }
+    fn mkdir(&self, rel: &str) -> Result<(), CliError> {
+        CachedRemote::mkdir(self, rel)
+    }
+    fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
+        CachedRemote::list_entries(self, rel)
+    }
+    fn download(&self, rel: &str) -> Result<LocalCopy, CliError> {
+        download(self.remote(), rel)
+    }
+}
+
 impl Backend {
+    /// The remote behind this backend, or the mount's root.
+    fn store(&self) -> Result<&dyn Store, &Path> {
+        match self {
+            Backend::Mount(root) => Err(root),
+            Backend::Remote(r) => Ok(r),
+            Backend::Cached(c) => Ok(c),
+            #[cfg(feature = "google")]
+            Backend::Drive(d) => Ok(d),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => Ok(c),
+        }
+    }
+
     /// Where `rel` lives, for messages: the mount path, or the remote spec
     /// with `rel` appended (never the cache dir).
     pub fn display_path(&self, rel: &str) -> String {
-        match self {
-            Backend::Mount(root) => {
+        match self.store() {
+            Err(root) => {
                 if rel.is_empty() {
                     root.display().to_string()
                 } else {
                     root.join(rel).display().to_string()
                 }
             }
-            Backend::Remote(r) => r.target(rel),
-            Backend::Cached(c) => c.target(rel),
-            #[cfg(feature = "google")]
-            Backend::Drive(d) => d.target(rel),
-            #[cfg(feature = "google")]
-            Backend::CachedDrive(c) => c.target(rel),
+            Ok(s) => s.target(rel),
         }
     }
 
     /// A small UTF-8 state file's contents; `None` when it does not exist.
     pub fn read_file(&self, rel: &str) -> Result<Option<String>, CliError> {
-        match self {
-            Backend::Mount(root) => match fs::read_to_string(root.join(rel)) {
+        match self.store() {
+            Err(root) => match fs::read_to_string(root.join(rel)) {
                 Ok(s) => Ok(Some(s)),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(CliError::Other(format!("reading {rel}: {e}"))),
             },
-            Backend::Remote(r) => r.cat(rel),
-            Backend::Cached(c) => c.cat(rel),
-            #[cfg(feature = "google")]
-            Backend::Drive(d) => d.cat(rel),
-            #[cfg(feature = "google")]
-            Backend::CachedDrive(c) => c.cat(rel),
+            Ok(s) => s.cat(rel),
         }
     }
 
     /// Write a small UTF-8 state file. Binary files (documents, scans) go
     /// through [`Backend::put_file`], never this.
     pub fn write_file(&self, rel: &str, content: &str) -> Result<(), CliError> {
-        match self {
-            Backend::Mount(root) => {
+        match self.store() {
+            Err(root) => {
                 let path = root.join(rel);
                 create_parent(&path)?;
                 fs::write(&path, content)
                     .map_err(|e| CliError::Other(format!("writing {}: {e}", path.display())))
             }
-            Backend::Remote(r) => r.write(rel, content),
-            Backend::Cached(c) => c.write(rel, content),
-            #[cfg(feature = "google")]
-            Backend::Drive(d) => d.write(rel, content),
-            #[cfg(feature = "google")]
-            Backend::CachedDrive(c) => c.write(rel, content),
+            Ok(s) => s.write(rel, content),
         }
     }
 
@@ -171,8 +260,8 @@ impl Backend {
     /// created as needed; an existing destination is overwritten, so callers
     /// that must not clobber check `exists` first.
     pub fn put_file(&self, local: &Path, rel: &str) -> Result<(), CliError> {
-        match self {
-            Backend::Mount(root) => {
+        match self.store() {
+            Err(root) => {
                 let dest = root.join(rel);
                 create_parent(&dest)?;
                 fs::copy(local, &dest).map(|_| ()).map_err(|e| {
@@ -183,12 +272,7 @@ impl Backend {
                     ))
                 })
             }
-            Backend::Remote(r) => r.copy_in(local, rel),
-            Backend::Cached(c) => c.copy_in(local, rel),
-            #[cfg(feature = "google")]
-            Backend::Drive(d) => d.copy_in(local, rel),
-            #[cfg(feature = "google")]
-            Backend::CachedDrive(c) => c.copy_in(local, rel),
+            Ok(s) => s.copy_in(local, rel),
         }
     }
 
@@ -197,8 +281,8 @@ impl Backend {
     /// a private temp dir that lives as long as the returned [`LocalCopy`].
     /// Downloads are never cached.
     pub fn local_copy(&self, rel: &str) -> Result<LocalCopy, CliError> {
-        let remote = match self {
-            Backend::Mount(root) => {
+        match self.store() {
+            Err(root) => {
                 let path = root.join(rel);
                 if !path.is_file() {
                     return Err(CliError::NotFound(format!(
@@ -206,23 +290,17 @@ impl Backend {
                         path.display()
                     )));
                 }
-                return Ok(LocalCopy { path, _dir: None });
+                Ok(LocalCopy { path, _dir: None })
             }
-            Backend::Remote(r) => r,
-            Backend::Cached(c) => c.remote(),
-            #[cfg(feature = "google")]
-            Backend::Drive(d) => return download(d, rel),
-            #[cfg(feature = "google")]
-            Backend::CachedDrive(c) => return download(c.remote(), rel),
-        };
-        download(remote, rel)
+            Ok(s) => s.download(rel),
+        }
     }
 
     /// Move a file from one store-relative path to another. Overwrites an
     /// existing destination; see [`Backend::move_no_clobber`].
     pub fn move_within(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError> {
-        match self {
-            Backend::Mount(root) => {
+        match self.store() {
+            Err(root) => {
                 let (from, to) = (root.join(rel_from), root.join(rel_to));
                 create_parent(&to)?;
                 let Err(rename_err) = fs::rename(&from, &to) else {
@@ -248,12 +326,7 @@ impl Backend {
                     ))
                 })
             }
-            Backend::Remote(r) => r.move_to(rel_from, rel_to),
-            Backend::Cached(c) => c.move_to(rel_from, rel_to),
-            #[cfg(feature = "google")]
-            Backend::Drive(d) => d.move_to(rel_from, rel_to),
-            #[cfg(feature = "google")]
-            Backend::CachedDrive(c) => c.move_to(rel_from, rel_to),
+            Ok(s) => s.move_to(rel_from, rel_to),
         }
     }
 
@@ -263,20 +336,15 @@ impl Backend {
     /// appeared after the caller's `exists` check would be destroyed. An
     /// occupied destination exits 2 with both files untouched.
     pub fn move_no_clobber(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError> {
-        match self {
-            Backend::Mount(root) => {
+        match self.store() {
+            Err(root) => {
                 let to = root.join(rel_to);
                 if to.exists() {
                     return Err(occupied(&to.display().to_string()));
                 }
                 self.move_within(rel_from, rel_to)
             }
-            Backend::Remote(r) => r.move_no_clobber(rel_from, rel_to),
-            Backend::Cached(c) => c.move_no_clobber(rel_from, rel_to),
-            #[cfg(feature = "google")]
-            Backend::Drive(d) => d.move_no_clobber(rel_from, rel_to),
-            #[cfg(feature = "google")]
-            Backend::CachedDrive(c) => c.move_no_clobber(rel_from, rel_to),
+            Ok(s) => s.move_no_clobber(rel_from, rel_to),
         }
     }
 
@@ -292,8 +360,8 @@ impl Backend {
     /// and rclone, which answers a folder as no file, gives `false`. So on a
     /// remote `false` means no file at `rel`, not that nothing is there.
     pub fn delete_file(&self, rel: &str) -> Result<bool, CliError> {
-        match self {
-            Backend::Mount(root) => {
+        match self.store() {
+            Err(root) => {
                 check_deletable(rel)?;
                 let path = root.join(rel);
                 let gone = |e: &std::io::Error| {
@@ -322,33 +390,23 @@ impl Backend {
                     Err(e) => Err(failed(e)),
                 }
             }
-            Backend::Remote(r) => r.delete_file(rel),
-            Backend::Cached(c) => c.delete_file(rel),
-            #[cfg(feature = "google")]
-            Backend::Drive(d) => d.delete_file(rel),
-            #[cfg(feature = "google")]
-            Backend::CachedDrive(c) => c.delete_file(rel),
+            Ok(s) => s.delete_file(rel),
         }
     }
 
     pub fn exists(&self, rel: &str) -> Result<bool, CliError> {
-        match self {
-            Backend::Mount(root) => Ok(root.join(rel).exists()),
-            Backend::Remote(r) => r.exists(rel),
-            Backend::Cached(c) => c.exists(rel),
-            #[cfg(feature = "google")]
-            Backend::Drive(d) => d.exists(rel),
-            #[cfg(feature = "google")]
-            Backend::CachedDrive(c) => c.exists(rel),
+        match self.store() {
+            Err(root) => Ok(root.join(rel).exists()),
+            Ok(s) => s.exists(rel),
         }
     }
 
     /// Returns true if the directory was created, false if it existed.
     pub fn ensure_dir(&self, rel: &str) -> Result<bool, CliError> {
-        match self {
-            Backend::Mount(root) => {
+        match self.store() {
+            Err(root) => {
                 let dir = if rel.is_empty() {
-                    root.clone()
+                    root.to_path_buf()
                 } else {
                     root.join(rel)
                 };
@@ -359,34 +417,11 @@ impl Backend {
                     .map_err(|e| CliError::Other(format!("creating {}: {e}", dir.display())))?;
                 Ok(true)
             }
-            Backend::Remote(r) => {
-                if r.exists(rel)? {
+            Ok(s) => {
+                if s.exists(rel)? {
                     return Ok(false);
                 }
-                r.mkdir(rel)?;
-                Ok(true)
-            }
-            Backend::Cached(c) => {
-                if c.exists(rel)? {
-                    return Ok(false);
-                }
-                c.mkdir(rel)?;
-                Ok(true)
-            }
-            #[cfg(feature = "google")]
-            Backend::Drive(d) => {
-                if d.exists(rel)? {
-                    return Ok(false);
-                }
-                d.mkdir(rel)?;
-                Ok(true)
-            }
-            #[cfg(feature = "google")]
-            Backend::CachedDrive(c) => {
-                if c.exists(rel)? {
-                    return Ok(false);
-                }
-                c.mkdir(rel)?;
+                s.mkdir(rel)?;
                 Ok(true)
             }
         }
@@ -402,25 +437,19 @@ impl Backend {
     /// Same listing, with sizes and modification times — one call, no extra
     /// round trips. Sorted by path; dot-files are skipped on a mount.
     pub fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
-        match self {
-            Backend::Mount(root) => {
+        match self.store() {
+            Err(root) => {
                 let dir = root.join(rel);
                 let mut out = Vec::new();
                 walk(&dir, &dir, &mut out);
                 out.sort_by(|a, b| a.rel.cmp(&b.rel));
                 Ok(out)
             }
-            Backend::Remote(r) => r.list_entries(rel),
-            Backend::Cached(c) => c.list_entries(rel),
-            #[cfg(feature = "google")]
-            Backend::Drive(d) => d.list_entries(rel),
-            #[cfg(feature = "google")]
-            Backend::CachedDrive(c) => c.list_entries(rel),
+            Ok(s) => s.list_entries(rel),
         }
     }
 }
 
-/// The refusal every backend gives for an occupied rename destination.
 /// Download the remote file at `rel` into a private temp dir.
 fn download<R: RemoteStore>(remote: &R, rel: &str) -> Result<LocalCopy, CliError> {
     let dir = private_temp_dir(&format!("{}-doc", remote.temp_name_prefix()))?;
@@ -433,6 +462,7 @@ fn download<R: RemoteStore>(remote: &R, rel: &str) -> Result<LocalCopy, CliError
     })
 }
 
+/// The refusal every backend gives for an occupied rename destination.
 pub(crate) fn occupied(target: &str) -> CliError {
     CliError::Usage(format!(
         "refusing to overwrite {target} — a document is already there; nothing was moved"

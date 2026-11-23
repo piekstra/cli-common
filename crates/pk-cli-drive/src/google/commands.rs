@@ -150,13 +150,14 @@ pub enum ClientCommand {
         /// The JSON file the Cloud console's "Download JSON" gave.
         #[arg(
             long,
+            alias = "client-file",
             value_name = "PATH",
             required_unless_present = "stdin",
             conflicts_with = "stdin"
         )]
         file: Option<PathBuf>,
         /// Read the JSON from stdin.
-        #[arg(long)]
+        #[arg(long, alias = "client-stdin")]
         stdin: bool,
         /// Replace a different client already stored; its sign-in is removed.
         #[arg(long)]
@@ -169,8 +170,9 @@ pub enum ProfilesCommand {
     /// The Drive profiles (profile-list/v1). Reads no keychain.
     List,
     /// Remove a Drive profile: its sign-in, its OAuth client and its record.
+    /// Named as `profiles add` does, or by the commands' profile flag.
     Remove {
-        name: String,
+        name: Option<String>,
         /// Do not ask.
         #[arg(long)]
         force: bool,
@@ -360,6 +362,21 @@ impl DriveCli {
             }) => self.import_client(profile, file.as_deref(), *stdin, *overwrite, json_mode),
             DriveCommand::Profiles(ProfilesCommand::List) => self.list(json_mode),
             DriveCommand::Profiles(ProfilesCommand::Remove { name, force }) => {
+                let name = match (name.as_deref(), profile) {
+                    (Some(a), Some(b)) if a != b => {
+                        return Err(CliError::Usage(format!(
+                            "two profiles named: `{a}` and {} `{b}`; name one",
+                            self.profile_flag
+                        )))
+                    }
+                    (Some(a), _) | (None, Some(a)) => a,
+                    (None, None) => {
+                        return Err(CliError::Usage(format!(
+                            "name the profile to remove: `{} profiles remove <NAME>`",
+                            self.command
+                        )))
+                    }
+                };
                 self.remove(name, *force, interactive, json_mode)
             }
             DriveCommand::Folder(FolderCommand::Create { name }) => {
@@ -832,15 +849,21 @@ impl DriveCli {
             ));
         }
         if changed {
-            let lock = RefreshLock::at(self.lock_path.clone());
-            lock.forget(|| self.vault.delete(&token_entry(&name)))?;
             record.scopes.clear();
             record.signed_in_at = None;
         }
+        // The new client and its record first, the old sign-in last: a
+        // failure between leaves a token Google refuses for the new client
+        // (exit 3, naming the sign-in), never a profile that lost its
+        // sign-in while still naming the old client.
         self.vault
             .put_json(&client_entry(&name), &client.to_stored())?;
         record.client_id = Some(client.client_id().to_string());
         self.store.put(&name, &record)?;
+        if changed {
+            let lock = RefreshLock::at(self.lock_path.clone());
+            lock.forget(|| self.vault.delete(&token_entry(&name)))?;
+        }
         let payload = json!({
             "profile": name.as_str(),
             "client": client.id_hint(),

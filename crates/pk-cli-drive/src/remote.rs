@@ -22,7 +22,10 @@ pub trait RemoteRead {
 /// The rest of a remote's surface: what [`crate::Backend`] and the cache's
 /// writes call. Every method takes a path relative to the store root
 /// (`rel`, forward slashes) and means the same on every remote.
-pub trait RemoteStore: RemoteRead {
+///
+/// Sealed: the remotes are this crate's ([`crate::Remote`], `google::Drive`),
+/// so a method can be added without breaking an implementor elsewhere.
+pub trait RemoteStore: RemoteRead + sealed::Sealed {
     /// Write a small UTF-8 file, replacing one already there.
     fn write(&self, rel: &str, content: &str) -> Result<(), CliError>;
     /// Upload a local file byte for byte, replacing one already there.
@@ -50,4 +53,9 @@ pub trait RemoteStore: RemoteRead {
     fn with_budget(self, budget: Duration) -> Self
     where
         Self: Sized;
+}
+
+pub(crate) mod sealed {
+    /// Implemented by this crate's remotes only.
+    pub trait Sealed {}
 }

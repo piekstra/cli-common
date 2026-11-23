@@ -109,6 +109,13 @@ pub(crate) fn is_ambiguous(err: &CliError) -> bool {
     err.reason() == Some(AMBIGUOUS)
 }
 
+/// A failure that waiting might cure: Drive unreachable, a 5xx or a rate
+/// limit after their retries, or an answer that never came. Not a refusal
+/// (auth, permission, quota, a bad request, a missing file or session).
+pub(crate) fn is_transient(err: &CliError) -> bool {
+    err.exit_code() == 5 && matches!(err.reason(), None | Some(AMBIGUOUS))
+}
+
 /// The Drive API for one account.
 pub(crate) struct Api {
     http: Client,
@@ -204,11 +211,7 @@ impl Api {
                         token = self.tokens.renew(&token)?;
                         continue;
                     }
-                    let retry_after = headers
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.trim().parse::<u64>().ok())
-                        .map(Duration::from_secs);
+                    let retry_after = pk_cli_http::retry_after(&headers);
                     if refusal.is_rate_limit() {
                         let err = refusal.into_cli(what, &self.relogin());
                         self.wait(what, &mut retry, retry_after, err)?;

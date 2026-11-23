@@ -16,14 +16,16 @@ use super::files::{md5_file, quote, About, DriveFile, Source, Target};
 use crate::backend::{check_deletable, occupied, FileEntry};
 use crate::remote::{RemoteRead, RemoteStore};
 
-/// What names a Drive store: the profile that signs in and the id of the
-/// folder that is the store's root. Written `gdrive:<profile>/<folder id>`,
-/// which is what the cache keys its directory on and what a background
-/// refresh is handed (`--remote-spec`).
+/// What names a Drive store: the profile that signs in, the id of a folder,
+/// and optionally a path under it that is the store's root. Written
+/// `gdrive:<profile>/<folder id>[/<path>]`, which is what the cache keys its
+/// directory on and what a background refresh is handed (`--remote-spec`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DriveSpec {
     pub profile: ProfileName,
     pub folder: String,
+    /// `/`-separated, no leading or trailing `/`; empty for the folder itself.
+    pub path: String,
 }
 
 /// The scheme of a [`DriveSpec`]'s text form.
@@ -33,20 +35,34 @@ impl DriveSpec {
     pub fn new(profile: ProfileName, folder: impl Into<String>) -> Result<Self, CliError> {
         let folder = folder.into();
         check_folder_id(&folder)?;
-        Ok(DriveSpec { profile, folder })
+        Ok(DriveSpec {
+            profile,
+            folder,
+            path: String::new(),
+        })
     }
 
-    /// `gdrive:<profile>/<folder id>`; anything else is exit 2.
+    /// The store at `rel` under this one (`inbox` of a records folder).
+    pub fn join(&self, rel: &str) -> Result<Self, CliError> {
+        let rel = Drive::segments(rel)?.join("/");
+        let mut spec = self.clone();
+        spec.path = Drive::join(&self.path, &rel);
+        Ok(spec)
+    }
+
+    /// `gdrive:<profile>/<folder id>[/<path>]`; anything else is exit 2.
     pub fn parse(text: &str) -> Result<Self, CliError> {
         let bad = || {
             CliError::Usage(format!(
-                "`{}` is not a Drive store: write gdrive:<profile>/<folder id>",
+                "`{}` is not a Drive store: write gdrive:<profile>/<folder id>[/<path>]",
                 text.escape_debug()
             ))
         };
         let rest = text.strip_prefix(SPEC_PREFIX).ok_or_else(bad)?;
-        let (profile, folder) = rest.split_once('/').ok_or_else(bad)?;
-        DriveSpec::new(ProfileName::parse(profile)?, folder.trim_end_matches('/'))
+        let (profile, rest) = rest.split_once('/').ok_or_else(bad)?;
+        let rest = rest.trim_end_matches('/');
+        let (folder, path) = rest.split_once('/').unwrap_or((rest, ""));
+        DriveSpec::new(ProfileName::parse(profile)?, folder)?.join(path)
     }
 
     pub fn is_spec(text: &str) -> bool {
@@ -56,7 +72,11 @@ impl DriveSpec {
 
 impl std::fmt::Display for DriveSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{SPEC_PREFIX}{}/{}", self.profile, self.folder)
+        write!(f, "{SPEC_PREFIX}{}/{}", self.profile, self.folder)?;
+        if !self.path.is_empty() {
+            write!(f, "/{}", self.path)?;
+        }
+        Ok(())
     }
 }
 
@@ -155,11 +175,6 @@ impl Drive {
         self
     }
 
-    /// Every request this store makes bounded to `budget` from now.
-    pub fn budget(self, budget: Duration) -> Self {
-        RemoteStore::with_budget(self, budget)
-    }
-
     pub fn spec(&self) -> &DriveSpec {
         &self.spec
     }
@@ -178,6 +193,26 @@ impl Drive {
     }
 
     // ── paths ───────────────────────────────────────────────────────────
+    //
+    // Everything below the public and trait methods works on paths under
+    // the spec's folder id (`abs`); those methods turn a store path (under
+    // the spec's path) into one first.
+
+    /// A store path as a path under the spec's folder id.
+    fn abs(&self, rel: &str) -> String {
+        Self::join(&self.spec.path, rel.trim_matches('/'))
+    }
+
+    /// How a path under the folder id is shown in messages.
+    fn shown(&self, abs: &str) -> String {
+        let abs = abs.trim_matches('/');
+        let root = format!("{SPEC_PREFIX}{}/{}", self.spec.profile, self.spec.folder);
+        if abs.is_empty() {
+            root
+        } else {
+            format!("{root}/{abs}")
+        }
+    }
 
     fn segments(rel: &str) -> Result<Vec<&str>, CliError> {
         let rel = rel.trim_matches('/');
@@ -247,7 +282,7 @@ impl Drive {
         CliError::Other(format!(
             "{} has {} items named `{name}` (ids {}); Drive allows that, but a path must name \
              one, so nothing was guessed",
-            self.target(parent),
+            self.shown(parent),
             found.len(),
             ids.join(", ")
         ))
@@ -265,7 +300,7 @@ impl Drive {
         name: &str,
         folder: bool,
     ) -> Result<Option<DriveFile>, CliError> {
-        let what = format!("looking up {}", self.target(&Self::join(parent_rel, name)));
+        let what = format!("looking up {}", self.shown(&Self::join(parent_rel, name)));
         let mut found = self.api.named(&what, parent_id, name, folder)?;
         if !folder {
             found.retain(|f| f.mime_type != "application/vnd.google-apps.shortcut");
@@ -322,7 +357,7 @@ impl Drive {
                         id = f.id;
                     }
                     None if create => {
-                        let what = format!("making the folder {}", self.target(&next));
+                        let what = format!("making the folder {}", self.shown(&next));
                         let made = self.api.create_folder(&what, &id, part)?;
                         self.remember(&next, &made.id, true);
                         id = made.id;
@@ -358,7 +393,7 @@ impl Drive {
         let Some(root) = self.folder_id(rel, false)? else {
             return Ok(Vec::new());
         };
-        let what = format!("listing {}", self.target(rel));
+        let what = format!("listing {}", self.shown(rel));
         let mut out = Vec::new();
         // Folders to list next: id → path under `rel`.
         let mut level: Vec<(String, String)> = vec![(root, String::new())];
@@ -414,9 +449,10 @@ impl Drive {
     /// Every file under `rel` (recursive) with its size and md5: one
     /// listing, Google's own documents left out.
     pub fn hashes(&self, rel: &str) -> Result<Vec<Hashed>, CliError> {
+        let abs = self.abs(rel);
         let rel = rel.trim_matches('/');
         Ok(self
-            .tree(rel)?
+            .tree(&abs)?
             .into_iter()
             .filter(|(_, f)| f.is_blob())
             .map(|(under, f)| Hashed {
@@ -430,10 +466,11 @@ impl Drive {
     /// The files directly in the folder `rel`, not below it, never from a
     /// cache. Empty when the folder is not there.
     pub fn list_here(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
+        let rel = &self.abs(rel);
         let Some(id) = self.folder_id(rel, false)? else {
             return Ok(Vec::new());
         };
-        let what = format!("listing {}", self.target(rel));
+        let what = format!("listing {}", self.shown(rel));
         let q = format!(
             "{} in parents and trashed = false and mimeType != {}",
             quote(&id),
@@ -459,6 +496,7 @@ impl Drive {
 
     /// The md5 Drive holds for one file; `None` when it is not there.
     pub fn md5(&self, rel: &str) -> Result<Option<String>, CliError> {
+        let rel = &self.abs(rel);
         Ok(self.file(rel)?.and_then(|(_, f)| f.md5()))
     }
 
@@ -478,7 +516,7 @@ impl Drive {
         rel: &str,
         existing: Existing,
     ) -> Result<TreeCopy, CliError> {
-        let rel = rel.trim_matches('/');
+        let rel = &self.abs(rel);
         let mut files = Vec::new();
         walk(local, local, &mut files)?;
         files.sort();
@@ -486,6 +524,24 @@ impl Drive {
         let mut plan = Vec::new();
         let mut report = TreeCopy::default();
         let mut conflicts = Vec::new();
+        let native: Vec<&String> = files
+            .iter()
+            .filter(|u| there.get(*u).is_some_and(|f| !f.is_blob()))
+            .collect();
+        if !native.is_empty() {
+            return Err(CliError::Usage(format!(
+                "refusing to copy over {} Google document(s) under {}, which hold no bytes of \
+                 their own ({}); nothing was uploaded",
+                native.len(),
+                self.shown(rel),
+                native
+                    .iter()
+                    .take(3)
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
         for under in files {
             let path = local.join(&under);
             let md5 = md5_file(&path)?;
@@ -501,7 +557,7 @@ impl Drive {
                 "refusing to replace {} file(s) under {} that hold other bytes ({}{}); nothing \
                  was uploaded",
                 conflicts.len(),
-                self.target(rel),
+                self.shown(rel),
                 conflicts
                     .iter()
                     .take(3)
@@ -513,7 +569,7 @@ impl Drive {
         }
         for (under, path, id) in plan {
             let dest = Self::join(rel, &under);
-            let what = format!("uploading {}", self.target(&dest));
+            let what = format!("uploading {}", self.shown(&dest));
             let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             match id {
                 Some(id) => {
@@ -544,6 +600,7 @@ impl Drive {
     /// Download everything under `rel` into `local` (made `0700`), skipping
     /// files already there with the same md5. Files are written owner-only.
     pub fn fetch_tree(&self, rel: &str, local: &Path) -> Result<usize, CliError> {
+        let rel = &self.abs(rel);
         let mut fetched = 0;
         for (under, f) in self.tree(rel)? {
             if !f.is_blob() {
@@ -566,13 +623,15 @@ impl Drive {
     /// Download `f` to `dest` through an owner-only temp file beside it,
     /// renamed into place once the md5 checks.
     fn download_to(&self, rel: &str, f: &DriveFile, dest: &Path) -> Result<(), CliError> {
-        let what = format!("reading {}", self.target(rel));
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let what = format!("reading {}", self.shown(rel));
         let tmp = dest.with_file_name(format!(
-            ".{}.{}.part",
+            ".{}.{}-{}.part",
             dest.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("download"),
-            std::process::id()
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let mut out = open_private(&tmp)?;
         let res = self.api.download(&what, f, &mut out);
@@ -588,7 +647,7 @@ impl Drive {
     }
 
     fn upload_to(&self, rel: &str, source: Source<'_>) -> Result<(), CliError> {
-        let what = format!("writing {}", self.target(rel));
+        let what = format!("writing {}", self.shown(rel));
         let (dir, name) = Self::split(rel)?;
         let parent = self.folder_id(&dir, true)?.expect("made when missing");
         let existing = self.child(&dir, &parent, &name, false)?;
@@ -615,27 +674,29 @@ impl Drive {
     }
 
     fn move_file(&self, rel_from: &str, rel_to: &str, clobber: bool) -> Result<(), CliError> {
-        let from = self.target(rel_from);
+        let from = self.shown(rel_from);
         let Some((from_parent, file)) = self.file(rel_from)? else {
             return Err(CliError::NotFound(format!("{from}: nothing to move")));
         };
         let (dir, name) = Self::split(rel_to)?;
         let to_parent = self.folder_id(&dir, true)?.expect("made when missing");
-        if let Some(there) = self.child(&dir, &to_parent, &name, false)? {
-            if there.id == file.id {
-                return Ok(());
-            }
-            if !clobber {
-                return Err(occupied(&self.target(rel_to)));
-            }
-            let what = format!("replacing {}", self.target(rel_to));
-            self.api.trash(&what, &there.id)?;
-        }
-        let what = format!("moving {from} to {}", self.target(rel_to));
+        let replaced = match self.child(&dir, &to_parent, &name, false)? {
+            Some(there) if there.id == file.id => return Ok(()),
+            Some(_) if !clobber => return Err(occupied(&self.shown(rel_to))),
+            there => there,
+        };
+        let what = format!("moving {from} to {}", self.shown(rel_to));
         self.api
             .rename_move(&what, &file.id, &name, &from_parent, &to_parent)?;
         self.forget(rel_from);
         self.remember(rel_to, &file.id, false);
+        // The old destination goes to the trash only once the move is done,
+        // so a failure between leaves two files of the name (reported as
+        // such, both ids named) rather than none.
+        if let Some(old) = replaced {
+            let what = format!("replacing {}", self.shown(rel_to));
+            self.api.trash(&what, &old.id)?;
+        }
         if !clobber {
             // Another writer may have taken the name meanwhile: put ours back
             // rather than leave two files of one name.
@@ -646,7 +707,7 @@ impl Drive {
                 self.api
                     .rename_move(&what, &file.id, &from_name, &to_parent, &from_parent)?;
                 self.forget(rel_to);
-                return Err(occupied(&self.target(rel_to)));
+                return Err(occupied(&self.shown(rel_to)));
             }
         }
         Ok(())
@@ -704,19 +765,15 @@ fn open_private(path: &Path) -> Result<fs::File, CliError> {
 
 impl RemoteRead for Drive {
     fn target(&self, rel: &str) -> String {
-        let rel = rel.trim_matches('/');
-        if rel.is_empty() {
-            self.spec.to_string()
-        } else {
-            format!("{}/{rel}", self.spec)
-        }
+        self.shown(&self.abs(rel))
     }
 
     fn cat(&self, rel: &str) -> Result<Option<String>, CliError> {
+        let rel = &self.abs(rel);
         let Some((_, f)) = self.file(rel)? else {
             return Ok(None);
         };
-        let what = format!("reading {}", self.target(rel));
+        let what = format!("reading {}", self.shown(rel));
         let dir = crate::backend::private_temp_dir(&format!("{}-remote", self.temp_prefix))?;
         let path = dir.path().join("file");
         let mut out = open_private(&path)?;
@@ -736,6 +793,7 @@ impl RemoteRead for Drive {
     /// Every file under `rel` with its size, modified time and md5. Google's
     /// own documents (no bytes of their own) and shortcuts are left out.
     fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
+        let rel = &self.abs(rel);
         Ok(self
             .tree(rel)?
             .into_iter()
@@ -745,46 +803,50 @@ impl RemoteRead for Drive {
     }
 }
 
+impl crate::remote::sealed::Sealed for Drive {}
+
 impl RemoteStore for Drive {
     /// Replaces an existing file's content in place (`files.update`, same
     /// id), never a second file of the name; unchanged bytes upload nothing.
     fn write(&self, rel: &str, content: &str) -> Result<(), CliError> {
+        let rel = &self.abs(rel);
         self.upload_to(rel, Source::Bytes(content.as_bytes()))
     }
 
     fn copy_in(&self, local: &Path, rel: &str) -> Result<(), CliError> {
+        let rel = &self.abs(rel);
         self.upload_to(rel, Source::File(local))
     }
 
     fn copy_out(&self, rel: &str, local: &Path) -> Result<(), CliError> {
+        let rel = &self.abs(rel);
         let Some((_, f)) = self.file(rel)? else {
             return Err(CliError::NotFound(format!(
                 "{}: no such file",
-                self.target(rel)
+                self.shown(rel)
             )));
         };
-        if local.exists() {
-            fs::remove_file(local)
-                .map_err(|e| CliError::Other(format!("replacing {}: {e}", local.display())))?;
-        }
+        // A file already at `local` stays until the download has passed its
+        // md5 check, as rclone's `copyto` leaves it on a failure.
         self.download_to(rel, &f, local)
     }
 
     fn move_to(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError> {
-        self.move_file(rel_from, rel_to, true)
+        self.move_file(&self.abs(rel_from), &self.abs(rel_to), true)
     }
 
     fn move_no_clobber(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError> {
-        self.move_file(rel_from, rel_to, false)
+        self.move_file(&self.abs(rel_from), &self.abs(rel_to), false)
     }
 
     /// Moves the file to Drive's trash. A folder at `rel` is no file: `false`.
     fn delete_file(&self, rel: &str) -> Result<bool, CliError> {
         check_deletable(rel)?;
+        let rel = &self.abs(rel);
         let Some((_, f)) = self.file(rel)? else {
             return Ok(false);
         };
-        let what = format!("deleting {}", self.target(rel));
+        let what = format!("deleting {}", self.shown(rel));
         let gone = self.api.trash(&what, &f.id)?;
         self.forget(rel);
         Ok(gone)
@@ -792,6 +854,7 @@ impl RemoteStore for Drive {
 
     /// A file or a folder at `rel`.
     fn exists(&self, rel: &str) -> Result<bool, CliError> {
+        let rel = &self.abs(rel);
         if Self::segments(rel)?.is_empty() {
             return Ok(true);
         }
@@ -806,14 +869,16 @@ impl RemoteStore for Drive {
     }
 
     fn mkdir(&self, rel: &str) -> Result<(), CliError> {
+        let rel = &self.abs(rel);
         self.folder_id(rel, true).map(|_| ())
     }
 
     fn list_dirs(&self, rel: &str) -> Result<Vec<String>, CliError> {
+        let rel = &self.abs(rel);
         let Some(id) = self.folder_id(rel, false)? else {
             return Ok(Vec::new());
         };
-        let what = format!("listing {}", self.target(rel));
+        let what = format!("listing {}", self.shown(rel));
         let q = format!(
             "{} in parents and trashed = false and mimeType = {}",
             quote(&id),
@@ -865,10 +930,16 @@ mod tests {
             "gdrive:Adult1/1AbC",
             "gdrive:adult1/1A'bC",
             "gdrive:adult1/",
-            "gdrive:adult1/a/b",
+            "gdrive:adult1/1AbC/a/../b",
+            "gdrive:adult1/1AbC/a//b",
         ] {
             assert_eq!(DriveSpec::parse(bad).unwrap_err().exit_code(), 2, "{bad}");
         }
+        let sub = DriveSpec::parse("gdrive:adult1/1AbC/inbox/done/").unwrap();
+        assert_eq!(sub.path, "inbox/done");
+        assert_eq!(sub.to_string(), "gdrive:adult1/1AbC/inbox/done");
+        let base = DriveSpec::parse("gdrive:adult1/1AbC").unwrap();
+        assert_eq!(base.join("inbox").unwrap().join("done").unwrap(), sub);
     }
 
     #[test]

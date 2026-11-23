@@ -3,6 +3,9 @@
 use pk_cli_core::{CliError, Reason};
 use serde_json::Value;
 
+/// The account's storage is full (`storageQuotaExceeded`).
+pub(crate) const QUOTA: Reason = Reason::Provider("drive_storage_full");
+
 /// What a Google API refusal said: `{"error": {"code", "message",
 /// "errors": [{"reason"}]}}`, or a body that is not that.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +79,7 @@ impl GoogleError {
                 .because(Reason::CredentialRefused)
                 .with_remedy(format!("sign in again with `{relogin}`")),
             403 if self.has_reason("storageQuotaExceeded") => CliError::Upstream(text)
+                .because(QUOTA)
                 .with_remedy("free space in the Drive account, or buy more storage"),
             403 if self.has_reason("insufficientPermissions")
                 || self.has_reason("insufficientScopes")

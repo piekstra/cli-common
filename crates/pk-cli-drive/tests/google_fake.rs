@@ -113,11 +113,14 @@ fn login_verifies_the_account_and_records_the_profile() {
         && l.contains("access_type=offline")
         && l.contains("prompt=consent")
         && l.contains("code_challenge_method=S256")));
-    assert!(log.iter().any(
-        |l| l == "GET /drive/v3/about?fields=user(emailAddress),storageQuota"
-            || l.starts_with("GET /drive/v3/about")
-    ));
-    // Status reads the stored sign-in and asks Drive once.
+    let abouts = |log: &[String]| {
+        log.iter()
+            .filter(|l| l.starts_with("GET /drive/v3/about"))
+            .count()
+    };
+    assert_eq!(abouts(&log), 1, "the sign-in reads the account once");
+    // Status reads the stored sign-in and asks Drive once; --local not at all.
+    h.fake.clear_requests();
     h.cli()
         .run(
             &DriveCommand::Status(StatusArgs::default()),
@@ -126,6 +129,17 @@ fn login_verifies_the_account_and_records_the_profile() {
             false,
         )
         .unwrap();
+    assert_eq!(abouts(&h.fake.requests()), 1);
+    h.fake.clear_requests();
+    h.cli()
+        .run(
+            &DriveCommand::Status(StatusArgs { local: true }),
+            Some(PROFILE),
+            true,
+            false,
+        )
+        .unwrap();
+    assert!(h.fake.requests().is_empty());
 }
 
 #[test]
@@ -321,7 +335,9 @@ fn moves_deletes_folders_and_existence() {
     let err = d
         .move_no_clobber("inbox/b.txt", "filed/2026/a.txt")
         .unwrap_err();
-    assert!(d.exists("inbox/b.txt").unwrap(), "{err}");
+    assert_eq!(err.exit_code(), 2, "{err}");
+    assert!(err.to_string().contains("filed/2026/a.txt"), "{err}");
+    assert!(d.exists("inbox/b.txt").unwrap());
     assert_eq!(h.fake.content("filed/2026/a.txt").unwrap(), b"a");
     let b_id = h.fake.find("inbox/b.txt").unwrap();
     assert!(d.delete_file("inbox/b.txt").unwrap());
@@ -565,11 +581,8 @@ fn removing_a_profile_needs_force_when_nobody_can_answer() {
     h.signed_in();
     let remove = |force| {
         h.cli().run(
-            &DriveCommand::Profiles(ProfilesCommand::Remove {
-                name: PROFILE.into(),
-                force,
-            }),
-            None,
+            &DriveCommand::Profiles(ProfilesCommand::Remove { name: None, force }),
+            Some(PROFILE),
             true,
             false,
         )
@@ -663,4 +676,154 @@ fn an_upload_session_on_another_host_gets_no_bytes_and_no_token() {
     let err = h.drive().copy_in(&local, "big.bin").unwrap_err();
     assert!(err.to_string().contains("another host"), "{err}");
     assert!(!h.fake.requests().iter().any(|l| l.contains("upload_id=")));
+}
+
+#[test]
+fn a_damaged_upload_or_download_is_an_error_and_a_local_copy_survives_it() {
+    let h = Harness::new();
+    h.signed_in();
+    let d = h.drive();
+    h.fake.corrupt_md5_next(1);
+    let err = d.write("a.txt", "a").unwrap_err();
+    assert!(err.to_string().contains("after the upload"), "{err}");
+    d.write("b.txt", "fresh").unwrap();
+    let local = h.tmp.path().join("b.txt");
+    std::fs::write(&local, "an earlier copy").unwrap();
+    // The listing the download checks against reports another md5.
+    h.fake.corrupt_md5_next(1);
+    let err = h.drive().copy_out("b.txt", &local).unwrap_err();
+    assert!(err.to_string().contains("md5"), "{err}");
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), "an earlier copy");
+    h.drive().copy_out("b.txt", &local).unwrap();
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), "fresh");
+}
+
+#[test]
+fn an_update_in_place_whose_answer_was_lost_is_retried_safely() {
+    let h = Harness::new();
+    h.signed_in();
+    let d = h.drive();
+    d.write("a.txt", "one").unwrap();
+    h.fake.fail_next(
+        "PATCH /upload/drive/v3/files/",
+        503,
+        "backendError",
+        1,
+        When::After,
+    );
+    d.write("a.txt", "two").unwrap();
+    assert_eq!(h.fake.content("a.txt").unwrap(), b"two");
+    assert_eq!(h.fake.count("", "a.txt"), 1);
+}
+
+#[test]
+fn a_resumable_piece_that_fails_resumes_and_a_refusal_stops_at_once() {
+    let h = Harness::new();
+    h.signed_in();
+    let local = h.tmp.path().join("big.bin");
+    let body: Vec<u8> = (0..(9 * 1024 * 1024)).map(|i| (i % 249) as u8).collect();
+    std::fs::write(&local, &body).unwrap();
+    // Every retry of the first piece fails: the session is asked what it
+    // holds, and the upload goes on from there.
+    h.fake
+        .fail_next("upload_id=", 503, "backendError", 7, When::Before);
+    h.drive().copy_in(&local, "big.bin").unwrap();
+    assert_eq!(h.fake.content("big.bin").unwrap(), body);
+    // A full Drive is a refusal: no status probe, no further piece.
+    h.fake.clear_requests();
+    h.fake
+        .fail_next("upload_id=", 403, "storageQuotaExceeded", 1, When::Before);
+    let err = h.drive().copy_in(&local, "big2.bin").unwrap_err();
+    assert_eq!(
+        err.reason(),
+        Some(Reason::Provider("drive_storage_full")),
+        "{err}"
+    );
+    let puts = h
+        .fake
+        .requests()
+        .iter()
+        .filter(|l| l.contains("upload_id="))
+        .count();
+    assert_eq!(puts, 1);
+}
+
+#[test]
+fn a_clobbering_move_that_fails_leaves_the_destination() {
+    let h = Harness::new();
+    h.signed_in();
+    let d = h.drive();
+    d.write("a.txt", "new").unwrap();
+    d.write("b.txt", "old").unwrap();
+    // The rename of a.txt fails; the trash of the old b.txt, by its own id,
+    // must not have happened first.
+    let a = h.fake.find("a.txt").unwrap();
+    h.fake.fail_next(
+        &format!("PATCH /drive/v3/files/{a}"),
+        403,
+        "insufficientPermissions",
+        1,
+        When::Before,
+    );
+    d.move_to("a.txt", "b.txt").unwrap_err();
+    assert_eq!(h.fake.content("b.txt").unwrap(), b"old");
+    assert_eq!(h.fake.content("a.txt").unwrap(), b"new");
+}
+
+#[test]
+fn a_lost_create_never_replaces_another_writers_file() {
+    let h = Harness::new();
+    h.signed_in();
+    let d = h.drive();
+    d.mkdir("docs").unwrap();
+    let docs = h.fake.find("docs").unwrap();
+    h.fake.fail_next_while_another_adds(
+        "POST /upload/drive/v3/files",
+        503,
+        &docs,
+        "new.json",
+        b"theirs",
+    );
+    let err = d.write("docs/new.json", "ours").unwrap_err();
+    assert_eq!(
+        err.reason(),
+        Some(Reason::Provider("duplicate_name")),
+        "{err}"
+    );
+    assert_eq!(h.fake.count("docs", "new.json"), 1);
+    assert_eq!(h.fake.content("docs/new.json").unwrap(), b"theirs");
+}
+
+#[test]
+fn a_tree_copy_refuses_to_land_on_a_google_document() {
+    let h = Harness::new();
+    h.signed_in();
+    let local = h.tmp.path().join("tree");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(local.join("notes"), "n").unwrap();
+    std::fs::write(local.join("a.json"), "a").unwrap();
+    h.fake.add_google_doc(ROOT_ID, "notes");
+    let err = h
+        .drive()
+        .put_tree(&local, "", Existing::Replace)
+        .unwrap_err();
+    assert_eq!(err.exit_code(), 2, "{err}");
+    assert_eq!(h.fake.count("", "a.json"), 0, "nothing was uploaded");
+}
+
+#[test]
+fn a_spec_with_a_path_is_a_store_under_that_folder() {
+    let h = Harness::new();
+    h.signed_in();
+    let base = DriveSpec::new(ProfileName::parse(PROFILE).unwrap(), ROOT_ID).unwrap();
+    let inbox = DriveSpec::parse(&format!("{base}/inbox")).unwrap();
+    assert_eq!(inbox, base.join("inbox").unwrap());
+    let d = h.cli().drive(&inbox).unwrap().without_backoff();
+    d.write("scan.pdf", "s").unwrap();
+    assert_eq!(h.fake.content("inbox/scan.pdf").unwrap(), b"s");
+    assert_eq!(d.list_entries("").unwrap()[0].rel, "scan.pdf");
+    assert_eq!(d.hashes("").unwrap()[0].rel, "scan.pdf");
+    assert_eq!(d.target("scan.pdf"), format!("{base}/inbox/scan.pdf"));
+    d.move_to("scan.pdf", "done/scan.pdf").unwrap();
+    assert!(h.fake.find("inbox/done/scan.pdf").is_some());
 }

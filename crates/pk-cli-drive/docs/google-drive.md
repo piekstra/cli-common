@@ -84,11 +84,11 @@ is `<PREFIX>_DRIVE_PROFILE`.
 | `status [--local]` | The stored sign-in, and one `about` call to Drive unless `--local` (which reads no keychain) | `auth-status/v1` plus `profile`, `scopes`, `client`, `signed_in_at` |
 | `logout [--revoke] [--forget]` | Removes the token set. `--revoke` also revokes the grant at Google, which ends every sign-in of that account through that client, on every machine. `--forget` removes the profile and its client too | `drive-logout/v1` |
 | `about` | The account's email and storage quota (replaces `rclone about`) | `drive-about/v1` |
-| `client import --file <PATH> \| --stdin [--overwrite]` | Stores a Desktop client's JSON. Replacing a different client needs `--overwrite` and drops the profile's sign-in | `drive-client/v1` |
+| `client import --file <PATH> \| --stdin [--overwrite]` | Stores a Desktop client's JSON (`--client-file`, `--client-stdin` as on `login` work too). Replacing a different client needs `--overwrite` and drops the profile's sign-in | `drive-client/v1` |
 | `folder create <NAME>` | Makes a folder at the top of My Drive for a store and prints its id and spec; one of that name already there (that this sign-in can see) is reused, two are an error. Under `drive.file` a store must be a folder the app's client made | `drive-folder/v1` |
 | `folder list` | The folders at the top of My Drive this sign-in can see | `drive-folder-list/v1` |
 | `profiles list` | The profiles, with account, scopes and whether signed in. Reads no keychain | `profile-list/v1` |
-| `profiles remove <NAME> [--force]` | Removes the sign-in, the client and the record; asks first, exit 6 when nobody can answer | `drive-profile-removed/v1` |
+| `profiles remove <NAME> [--force]` | Removes the sign-in, the client and the record; asks first, exit 6 when nobody can answer. The profile flag names it too | `drive-profile-removed/v1` |
 
 A store opened on a profile that is not configured is exit 2 naming
 `<cli> drive login --profile <NAME>`. A profile with no client is exit 2
@@ -98,7 +98,9 @@ is exit 3 naming the sign-in.
 ## The store
 
 `DriveCli::drive(&DriveSpec)` opens the folder a spec names:
-`gdrive:<profile>/<folder-id>`. Nothing is read until the first operation,
+`gdrive:<profile>/<folder-id>`, or `gdrive:<profile>/<folder-id>/<path>` for
+a store at a path under that folder (`DriveSpec::join`, as an inbox inside a
+records folder). Nothing is read until the first operation,
 and the folder itself is checked once: an id Drive does not know, a file, or
 a folder in the trash is exit 4. Drive lists an unknown id's children as
 nothing, so without that check a wrong id would read as an empty store.
@@ -109,11 +111,12 @@ nothing, so without that check a wrong id would read as an empty store.
 | Two items of one name | Drive allows it. A path that names two is an error naming both ids (reason `duplicate_name`), never a guess, and nothing is changed |
 | Listings | Size, modified time and md5 (`FileEntry::md5`). A whole tree is one query per level of folders, up to 40 folders a query. Google's own documents (Docs, Sheets) and shortcuts are left out |
 | Writes | An existing file's content is replaced in place (`files.update`), keeping its id; never a second file of the same name. Every upload is checked against the md5 Drive computes |
-| Large files | Above 5 MiB, a resumable session in 8 MiB pieces, resumed from what Drive reports it holds. Downloads above 16 MiB are read in ranges. Every download is checked against Drive's md5 and written through an owner-only temporary file |
+| Large files | Above 5 MiB, a resumable session in 8 MiB pieces, resumed from what Drive reports it holds. Downloads above 16 MiB are read in ranges. Every download is checked against Drive's md5 and written through an owner-only temporary file, so a file already at the destination stays until the new one has passed |
 | Tree copies | `put_tree` skips every file whose md5 already matches. `Existing::Keep` refuses the whole copy, before uploading anything, when a file there holds other bytes; `Existing::Replace` replaces it in place. `fetch_tree` downloads what differs |
 | Deletes | To Drive's trash (recoverable for 30 days) |
-| Moves | One `files.update` with `addParents`/`removeParents`. A clobbering move trashes the destination first; `move_no_clobber` refuses an occupied one with exit 2 |
-| Retries | 429, a 403 with reason `rateLimitExceeded` or `userRateLimitExceeded`, and 5xx, with exponential backoff and jitter (1 s doubling to 32 s, 7 attempts), honouring `Retry-After`. A 5xx or lost answer to a create is not blindly retried: the folder is looked up again, or a new file found by name and md5, so a create is never made twice |
+| Moves | One `files.update` with `addParents`/`removeParents`. A clobbering move renames first and only then trashes the old destination, so a failure between leaves two files of the name (an error naming both), never none; `move_no_clobber` refuses an occupied one with exit 2 |
+| Retries | 429, a 403 with reason `rateLimitExceeded` or `userRateLimitExceeded`, and 5xx, with exponential backoff and jitter (1 s doubling to 32 s, 7 attempts), honouring `Retry-After` in seconds or as a date. A 5xx or lost answer to a create is not blindly retried: the folder is looked up again, or the new file found by name and md5. A file of that name with other bytes is another writer's: the upload stops with reason `duplicate_name` and replaces nothing. A resumable piece that keeps failing for a reason that may pass resumes from what the session holds; a refusal (auth, a full Drive, an expired session) stops at once |
+| Refusals | A full Drive is exit 5 with reason `drive_storage_full`; a scope or permission refusal exit 3; a missing file exit 4 |
 | Tokens | Renewed under the CLI's refresh lock, so two processes never spend one refresh twice; a 401 renews once and retries |
 | Bounds | `with_budget` caps every request of the store to the time left, as the cache's background refresh needs |
 

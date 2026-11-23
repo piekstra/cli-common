@@ -88,6 +88,8 @@ struct Fault {
     left: usize,
     when: When,
     retry_after: Option<u64>,
+    /// A file another writer adds as the fault answers: (parent, name, bytes).
+    adds: Option<(String, String, Vec<u8>)>,
 }
 
 struct Session {
@@ -119,6 +121,7 @@ struct State {
     page_size: usize,
     revoked: Vec<String>,
     foreign_sessions: bool,
+    corrupt_md5: usize,
 }
 
 impl State {
@@ -175,6 +178,7 @@ impl FakeDrive {
             page_size: 1000,
             revoked: Vec::new(),
             foreign_sessions: false,
+            corrupt_md5: 0,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -261,6 +265,7 @@ impl FakeDrive {
             left: times,
             when,
             retry_after: None,
+            adds: None,
         });
     }
 
@@ -273,7 +278,35 @@ impl FakeDrive {
             left: times,
             when: When::Before,
             retry_after: Some(secs),
+            adds: None,
         });
+    }
+
+    /// [`fail_next`](Self::fail_next) once, before the request takes effect,
+    /// while another writer adds `name` under `parent`.
+    pub fn fail_next_while_another_adds(
+        &self,
+        matcher: &str,
+        status: u16,
+        parent: &str,
+        name: &str,
+        content: &[u8],
+    ) {
+        self.state().faults.push_back(Fault {
+            matcher: matcher.into(),
+            status,
+            reason: "backendError".into(),
+            left: 1,
+            when: When::Before,
+            retry_after: None,
+            adds: Some((parent.into(), name.into(), content.to_vec())),
+        });
+    }
+
+    /// Report a wrong md5 in the next `times` answers that carry files (an
+    /// upload's answer, a listing), as a damaged transfer would show.
+    pub fn corrupt_md5_next(&self, times: usize) {
+        self.state().corrupt_md5 += times;
     }
 
     /// Every request so far, as `METHOD /path?query` (no headers or body).
@@ -599,14 +632,57 @@ fn handle(req: &Request, addr: SocketAddr, state: &Mutex<State>) -> Response {
         }
         r
     };
+    if let Some((parent, name, content)) = fault.as_ref().and_then(|f| f.adds.clone()) {
+        let id = s.id("fake");
+        let modified = s.tick();
+        s.files.insert(
+            id.clone(),
+            FakeFile {
+                id,
+                name,
+                mime: "application/octet-stream".into(),
+                parents: vec![parent],
+                content,
+                modified,
+                trashed: false,
+            },
+        );
+    }
     if let Some(f) = fault.as_ref().filter(|f| f.when == When::Before) {
         return failed(f);
     }
-    let resp = route(req, addr, &mut s);
+    let mut resp = route(req, addr, &mut s);
+    if s.corrupt_md5 > 0 && corrupt(&mut resp) {
+        s.corrupt_md5 -= 1;
+    }
     match fault {
         Some(f) => failed(&f),
         None => resp,
     }
+}
+
+/// Flip the md5 in an answer's file (or its listing's files); whether there
+/// was one.
+fn corrupt(resp: &mut Response) -> bool {
+    let Ok(mut v) = serde_json::from_slice::<Value>(&resp.body) else {
+        return false;
+    };
+    let mut done = false;
+    let mut flip = |f: &mut Value| {
+        if let Some(m) = f.get_mut("md5Checksum") {
+            *m = json!("00000000000000000000000000000000");
+            done = true;
+        }
+    };
+    if let Some(files) = v.get_mut("files").and_then(Value::as_array_mut) {
+        files.iter_mut().for_each(&mut flip);
+    } else {
+        flip(&mut v);
+    }
+    if done {
+        resp.body = v.to_string().into_bytes();
+    }
+    done
 }
 
 fn route(req: &Request, addr: SocketAddr, s: &mut State) -> Response {

@@ -1,6 +1,7 @@
-//! A transparent, read-through cache in front of the rclone [`Remote`]
-//! backend. Only the remote path is slow — every read shells out to rclone
-//! and the provider's API (seconds, sometimes minutes), and an app may fire
+//! A transparent, read-through cache in front of a remote: rclone's
+//! [`Remote`], or the Google Drive backend (`google::Drive`). Only the
+//! remote path is slow — every read goes to the provider's API, through
+//! rclone or directly (seconds, sometimes minutes), and an app may fire
 //! several reads per view — so this layer accelerates *reads* without ever
 //! becoming a second source of truth. A mount is already a local filesystem
 //! and needs no cache.
@@ -9,8 +10,8 @@
 //!
 //! - **Remote is authoritative.** The cache only accelerates reads; it can
 //!   never contradict a write this process completed.
-//! - **Write-through.** Every write hits the REMOTE first ([`Remote::write`],
-//!   `copy_in`, `move_to`, `delete_file`, `mkdir`). Only on remote success do
+//! - **Write-through.** Every write hits the REMOTE first
+//!   ([`RemoteStore::write`], `copy_in`, `move_to`, `delete_file`, `mkdir`). Only on remote success do
 //!   we touch the cache — write the new content in (a delete drops the file's
 //!   copy instead), and invalidate cached listings the write changes. On
 //!   remote error we propagate and leave the cache untouched.
