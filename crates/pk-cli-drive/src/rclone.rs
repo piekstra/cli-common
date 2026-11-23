@@ -2,6 +2,13 @@
 //! against a remote spec (`<remote>:<path>`). Slower per call than a mount, but it
 //! talks to the storage provider's API directly and is immune to mount
 //! health.
+//!
+//! **Deprecated for Google Drive.** rclone's shared Google sign-in client is
+//! being retired, and rclone keeps each remote's token in plain text in its
+//! config file. A CLI whose store is in Google Drive moves to the Google
+//! backend (feature `google`, `crate::google`), which signs in with the
+//! CLI's own OAuth client and keeps the token in the keychain. This backend
+//! stays for the CLIs that have not moved and for other rclone remotes.
 
 use pk_cli_core::CliError;
 use std::fs;
@@ -12,16 +19,11 @@ use std::time::{Duration, Instant};
 
 use crate::backend::{check_deletable, occupied, FileEntry};
 use crate::private_file::{self, Replace};
+use crate::remote::RemoteStore;
 
-/// The reads the cache needs from its source of truth. A trait so the
-/// cache's serve/revalidate decisions are testable against an in-memory
-/// remote that counts its calls, without spawning rclone.
-pub trait RemoteRead {
-    /// The remote spec (`remote:path`) with `rel` appended — display only.
-    fn target(&self, rel: &str) -> String;
-    fn cat(&self, rel: &str) -> Result<Option<String>, CliError>;
-    fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError>;
-}
+/// Where it always was; it now lives in [`crate::remote`] beside
+/// [`RemoteStore`].
+pub use crate::remote::RemoteRead;
 
 /// The temp-name prefix a [`Remote`] uses unless told otherwise.
 pub const DEFAULT_TEMP_PREFIX: &str = "pk-drive";
@@ -46,6 +48,44 @@ impl RemoteRead for Remote {
     }
     fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
         Remote::list_entries(self, rel)
+    }
+}
+
+impl crate::remote::sealed::Sealed for Remote {}
+
+impl RemoteStore for Remote {
+    fn write(&self, rel: &str, content: &str) -> Result<(), CliError> {
+        Remote::write(self, rel, content)
+    }
+    fn copy_in(&self, local: &Path, rel: &str) -> Result<(), CliError> {
+        Remote::copy_in(self, local, rel)
+    }
+    fn copy_out(&self, rel: &str, local: &Path) -> Result<(), CliError> {
+        Remote::copy_out(self, rel, local)
+    }
+    fn move_to(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError> {
+        Remote::move_to(self, rel_from, rel_to)
+    }
+    fn move_no_clobber(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError> {
+        Remote::move_no_clobber(self, rel_from, rel_to)
+    }
+    fn delete_file(&self, rel: &str) -> Result<bool, CliError> {
+        Remote::delete_file(self, rel)
+    }
+    fn exists(&self, rel: &str) -> Result<bool, CliError> {
+        Remote::exists(self, rel)
+    }
+    fn mkdir(&self, rel: &str) -> Result<(), CliError> {
+        Remote::mkdir(self, rel)
+    }
+    fn list_dirs(&self, rel: &str) -> Result<Vec<String>, CliError> {
+        Remote::list_dirs(self, rel)
+    }
+    fn temp_name_prefix(&self) -> &str {
+        &self.temp_prefix
+    }
+    fn with_budget(self, budget: Duration) -> Self {
+        Remote::with_budget(self, budget)
     }
 }
 
@@ -126,12 +166,15 @@ impl Remote {
     /// in a shared temp dir never follows a planted symlink and is never
     /// readable by others; it is removed whatever the upload's outcome.
     pub fn write(&self, rel: &str, content: &str) -> Result<(), CliError> {
+        // The clock alone repeats between two threads' writes on macOS.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let tmp = std::env::temp_dir().join(format!(
-            "{}-remote-{}-{nanos}.tmp",
+            "{}-remote-{}-{seq}-{nanos}.tmp",
             self.temp_prefix,
             std::process::id()
         ));
@@ -303,11 +346,13 @@ fn parse_entry(line: &str, with_time: bool) -> FileEntry {
             rel: path.to_string(),
             size: size.trim().parse().ok(),
             modified,
+            md5: None,
         },
         None => FileEntry {
             rel: rest.to_string(),
             size: None,
             modified,
+            md5: None,
         },
     }
 }
@@ -507,12 +552,14 @@ mod tests {
                 FileEntry {
                     rel: "a/c.pdf".into(),
                     size: Some(2),
-                    modified: Some(1_767_225_601)
+                    modified: Some(1_767_225_601),
+                    md5: None
                 },
                 FileEntry {
                     rel: "b.pdf".into(),
                     size: Some(3),
-                    modified: Some(1_767_225_600)
+                    modified: Some(1_767_225_600),
+                    md5: None
                 },
             ]
         );
@@ -526,7 +573,8 @@ mod tests {
             vec![FileEntry {
                 rel: "b.pdf".into(),
                 size: Some(3),
-                modified: None
+                modified: None,
+                md5: None
             }]
         );
         assert_eq!(old.calls().len(), 2);

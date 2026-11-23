@@ -3,9 +3,9 @@
 
 CARGO ?= cargo
 
-.PHONY: verify fmt fmt-check lint test test-util-check mcp-check wasm-check wasm-host-check scripts-check connector-check
+.PHONY: verify fmt fmt-check lint test test-util-check mcp-check drive-check wasm-check wasm-host-check scripts-check connector-check
 
-verify: fmt-check lint test test-util-check mcp-check wasm-check wasm-host-check scripts-check
+verify: fmt-check lint test test-util-check mcp-check drive-check wasm-check wasm-host-check scripts-check
 
 fmt:
 	$(CARGO) fmt --all
@@ -44,6 +44,14 @@ mcp-check:
 	$(CARGO) test -p pk-cli-mcp --all-features
 	$(CARGO) clippy -p pk-cli-utility --all-targets --features mcp -- -D warnings
 	$(CARGO) test -p pk-cli-utility --features mcp
+
+# pk-cli-drive with and without its Google backend, on the crate alone, and
+# the backend's tests against the fake Drive server (`fake-google`). The
+# workspace runs above build the crate without them.
+drive-check:
+	$(CARGO) clippy -p pk-cli-drive --all-targets --features google -- -D warnings
+	$(CARGO) clippy -p pk-cli-drive --all-targets --features fake-google -- -D warnings
+	$(CARGO) test -p pk-cli-drive --features fake-google
 
 # The pk-cli-mcp core and its `wasm` feature, and pk-cli-core under them,
 # build for WebAssembly, so a CLI's toolset can run in a deploy-your-own

@@ -1,0 +1,14 @@
+{
+  "error": {
+    "code": 403,
+    "message": "User rate limit exceeded.",
+    "errors": [
+      {
+        "message": "User rate limit exceeded.",
+        "domain": "usageLimits",
+        "reason": "userRateLimitExceeded"
+      }
+    ],
+    "status": "PERMISSION_DENIED"
+  }
+}

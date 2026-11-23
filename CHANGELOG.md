@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.35.0 — 2026-11-23
+
+- `pk-cli-drive`: a Google Drive API backend and Drive profiles (feature `google`), replacing
+  rclone for Google Drive. `google::Drive` is a store in one Google account's Drive behind the
+  same interface as rclone's `Remote`, so `CachedRemote<Drive>`, `Backend::Drive` and
+  `Backend::CachedDrive` work as the rclone backends do. Paths resolve to ids through a map cached
+  for the command; listings carry size, modified time and md5; writes replace an existing file in
+  place (`files.update`), never a second file of the name; files above 5 MiB go up in a resumable
+  session; `put_tree` skips files whose md5 matches; two items of one name are an error, never a
+  guess; requests retry with backoff on 429, rate-limit 403s and 5xx; a create whose answer was
+  lost is looked up rather than repeated; deletes go to the trash; `about` gives the account's
+  email and quota.
+- `pk-cli-drive`: Drive profiles, one Google account each, with no default. The Desktop app
+  OAuth client (imported from Google's JSON by file or stdin) and the token set are vault entries;
+  the verified email, the scopes granted and the client id are in `drive.json`. `DriveCommand`
+  (`login`, `status`, `logout`, `about`, `client import`, `folder create|list`, `profiles list|remove`) mounts in any CLI
+  and runs through `DriveCli::run`. `login` uses PKCE with a loopback redirect, opens the browser
+  itself, and refuses a sign-in that lands on another account or lacks a scope asked for.
+- `pk-cli-drive`: `google::fake::FakeDrive` (feature `fake-google`), a Drive API server on
+  127.0.0.1 with synthetic files and fault injection, which a CLI's black-box tests reach through
+  `<PREFIX>_DRIVE_TEST_ENDPOINT`. `make drive-check` runs the backend's tests against it.
+- `pk-cli-drive`: a store spec may carry a path under its folder, `gdrive:<profile>/<folder-id>/<path>`
+  (`DriveSpec::join`), as rclone's `remote:path` does. The path must exist: a missing part is exit 4
+  on reads and writes, `exists` answers `false`, and `mkdir` (or `Backend::ensure_dir`) makes it. `DriveSpec`'s fields are private, read through
+  `profile()`, `folder()` and `path()`.
+- `pk-cli-drive`: `Backend` is `#[non_exhaustive]`, since a variant exists per backend feature; a
+  match outside the crate needs a wildcard arm (no family CLI matches on it).
+- `pk-cli-drive`: the store interface is two traits, `RemoteRead` (now in `remote`, still
+  re-exported from `rclone`) and `RemoteStore` (sealed: implemented by the crate's remotes only); `CachedRemote<R>`'s writes and
+  `cache::run_revalidation` are generic over `RemoteStore`, and `CachedRemote::remote` returns
+  `&R`. `FileEntry` gains `md5: Option<String>` (absent from JSON when `None`). The rclone
+  backend's docs mark it deprecated for Google Drive.
+- `pk-cli-drive`: `Remote::write`'s temporary file name carries a per-process counter, so two
+  writes in one process within one clock tick no longer collide ("File exists").
+- Minor bump: `FileEntry` has a new public field, so a struct literal of it no longer compiles;
+  add `md5: None`. Nothing else changes for a CLI on the rclone or mount backends.
+- `crates/pk-cli-drive/docs/google-drive.md`: registering the OAuth client, the commands, the
+  store's behaviour, and the evidence for the scope a CLI asks for.
+
 ## v0.34.0 — 2026-11-22
 
 - `pk-cli-core`: the `Paged` envelope gains `warnings: [{code, message}]` (`ListWarning`,

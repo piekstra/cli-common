@@ -1,6 +1,7 @@
-//! A transparent, read-through cache in front of the rclone [`Remote`]
-//! backend. Only the remote path is slow — every read shells out to rclone
-//! and the provider's API (seconds, sometimes minutes), and an app may fire
+//! A transparent, read-through cache in front of a remote: rclone's
+//! [`Remote`], or the Google Drive backend (`google::Drive`). Only the
+//! remote path is slow — every read goes to the provider's API, through
+//! rclone or directly (seconds, sometimes minutes), and an app may fire
 //! several reads per view — so this layer accelerates *reads* without ever
 //! becoming a second source of truth. A mount is already a local filesystem
 //! and needs no cache.
@@ -9,8 +10,8 @@
 //!
 //! - **Remote is authoritative.** The cache only accelerates reads; it can
 //!   never contradict a write this process completed.
-//! - **Write-through.** Every write hits the REMOTE first ([`Remote::write`],
-//!   `copy_in`, `move_to`, `delete_file`, `mkdir`). Only on remote success do
+//! - **Write-through.** Every write hits the REMOTE first
+//!   ([`RemoteStore::write`], `copy_in`, `move_to`, `delete_file`, `mkdir`). Only on remote success do
 //!   we touch the cache — write the new content in (a delete drops the file's
 //!   copy instead), and invalidate cached listings the write changes. On
 //!   remote error we propagate and leave the cache untouched.
@@ -82,7 +83,8 @@ use std::time::Duration;
 use pk_cli_core::CliError;
 
 use crate::backend::FileEntry;
-use crate::rclone::{Remote, RemoteRead};
+use crate::rclone::Remote;
+use crate::remote::{RemoteRead, RemoteStore};
 use store::{claim_marker, CacheDir, MarkerGuard};
 
 /// How a stale serve's refresh went, for the stderr note.
@@ -161,11 +163,12 @@ struct StaleRead {
     digest: u64,
 }
 
-/// A read-through cache mirroring the [`Remote`] method surface. A CLI builds
+/// A read-through cache mirroring the remote's method surface ([`Remote`], or
+/// the Google backend). A CLI builds
 /// one for every remote whose cache dir resolves (with `--no-cache` it only
 /// bypasses reads, see [`CachePolicy::bypass_reads`]), and for a cache-warming
 /// command. Reads work over any [`RemoteRead`] (unit tests use an in-memory one); writes
-/// need the real [`Remote`]. A read may start a background refresh, but only
+/// need a [`RemoteStore`]. A read may start a background refresh, but only
 /// through a [`Revalidator`] handed to [`with_revalidator`](Self::with_revalidator).
 ///
 /// Build one per command. It remembers every copy it served stale until a
@@ -428,10 +431,10 @@ impl<R: RemoteRead> CachedRemote<R> {
     }
 }
 
-impl CachedRemote<Remote> {
+impl<R: RemoteStore> CachedRemote<R> {
     /// The remote behind the cache — for a document download, which the
     /// cache never holds (it caches small state files, not documents).
-    pub fn remote(&self) -> &Remote {
+    pub fn remote(&self) -> &R {
         &self.remote
     }
 
@@ -689,6 +692,7 @@ mod tests {
                         rel: r.to_string(),
                         size: Some(v.len() as u64),
                         modified: None,
+                        md5: None,
                     })
                 })
                 .collect();

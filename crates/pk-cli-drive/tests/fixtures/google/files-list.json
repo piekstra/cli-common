@@ -1,0 +1,28 @@
+{
+  "nextPageToken": "example-page-2",
+  "files": [
+    {
+      "id": "1ExampleSubfolderId",
+      "name": "Records",
+      "mimeType": "application/vnd.google-apps.folder",
+      "parents": ["1ExampleFolderId"],
+      "modifiedTime": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "1ExampleFileId",
+      "name": "2026-01-01_lab_Example Clinic_scan.pdf",
+      "mimeType": "application/pdf",
+      "parents": ["1ExampleFolderId"],
+      "size": "12345",
+      "md5Checksum": "0123456789ABCDEF0123456789abcdef",
+      "modifiedTime": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "1ExampleDocId",
+      "name": "notes",
+      "mimeType": "application/vnd.google-apps.document",
+      "parents": ["1ExampleFolderId"],
+      "modifiedTime": "2026-01-01T00:00:00.000Z"
+    }
+  ]
+}
