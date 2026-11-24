@@ -2,6 +2,7 @@
   "name": "pk-cli-connector",
   "version": "0.2.0",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
   "description": "Deploy-your-own Cloudflare Worker that serves piekstra-family CLI tools to Claude (web, desktop, mobile) as a custom MCP connector.",
   "scripts": {

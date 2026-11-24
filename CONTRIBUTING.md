@@ -44,4 +44,4 @@ the tag. Downstreams bump their `tag = "vX.Y.Z"` pins.
 
 ## License of contributions
 
-Dual-licensed MIT OR Apache-2.0, like the project.
+Licensed AGPL-3.0-only, like the project.
