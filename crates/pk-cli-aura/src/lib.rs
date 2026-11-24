@@ -9,7 +9,7 @@
 //! calls with a session the owner signed in to, so a CLI reads the same JSON
 //! the site's pages render, never the DOM.
 //!
-//! The crate is mechanism: the request form ([`protocol`]), the context the
+//! The crate is mechanism: the request form ([`Action`]), the context the
 //! signed-in home page carries ([`bootstrap_context`]), what each answer
 //! means for the session ([`Site`]), and a [`Client`] over core's
 //! [`Transport`](pk_cli_core::transport::Transport) that reads the context
@@ -43,6 +43,7 @@
 //! use pk_cli_secrets::Secret;
 //! use serde_json::json;
 //!
+//! # fn store_cookies(_: &Secret) {}
 //! # fn main() -> Result<(), pk_cli_core::CliError> {
 //! # let (cookie_header, token) = (Secret::new("sid=…"), Secret::new("…"));
 //! let site = Site::new("example.my.site.com")
@@ -51,14 +52,13 @@
 //!     .with_user_agent("ex/0.1.0 (unofficial; read-only)");
 //! let mut client = Client::new(BlockingTransport::new()?, site, cookie_header, token);
 //! let actions = [Action::apex_execute("", "ExampleController", "getThings", json!({}), true)];
-//! let answer = pk_cli_core::block_on(client.call(&actions))?;
-//! let things = answer
-//!     .take_apex(0, "ExampleController.getThings")
-//!     .map_err(|e| e.into_cli(client.site()))?;
+//! let result = pk_cli_core::block_on(client.call(&actions));
+//! // Before any error goes on: an answer may have rotated the cookie.
 //! if let Some(cookies) = client.refreshed() {
-//!     // store the rotated cookie header back in the keychain item
-//! #   let _ = cookies;
+//!     store_cookies(cookies); // under the CLI's RefreshLock
 //! }
+//! let answer = result?;
+//! let things = client.site().take_apex(&answer, 0, "ExampleController.getThings")?;
 //! # let _ = things;
 //! # Ok(())
 //! # }
@@ -68,8 +68,8 @@
 //! `pk_cli_secrets::Secret`, and that crate does not.
 
 mod client;
-pub mod cookies;
-pub mod protocol;
+mod cookies;
+mod protocol;
 mod site;
 
 pub use client::Client;

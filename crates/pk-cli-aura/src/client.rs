@@ -14,7 +14,7 @@ use pk_cli_core::CliError;
 use pk_cli_secrets::Secret;
 
 use crate::cookies::{is_sendable, merge_set_cookies};
-use crate::protocol::{self, is_sign_in_page, Action, Answer, AuraError, Context};
+use crate::protocol::{self, is_sign_in_page, Action, Answer, Context};
 use crate::Site;
 
 /// A client for one run of a command: the site, the session it calls with,
@@ -63,6 +63,13 @@ impl<T: Transport> Client<T> {
     /// The session's cookie header as it stands now, when an answer rotated
     /// one of its cookies ([`merge_set_cookies`]). The caller stores it, or
     /// the stored copy goes stale while the site still holds the session.
+    ///
+    /// Read it after every call, a failed one too, before the error goes
+    /// on: an earlier answer may have rotated the cookie, and a run that
+    /// stops on a later error would otherwise leave the old one stored.
+    /// Two runs can share the stored session, so write it under the CLI's
+    /// `pk_cli_auth::refresh_lock::RefreshLock` (DESIGN.md §1.7), and only
+    /// while the store still holds the session this run read.
     pub fn refreshed(&self) -> Option<&Secret> {
         self.refreshed.then_some(&self.cookie_header)
     }
@@ -91,15 +98,17 @@ impl<T: Transport> Client<T> {
     }
 
     /// Posts `actions` as one request and parses the answer; read each
-    /// action's result with [`Answer::take`] by its position.
+    /// action's result by its position ([`Site::take`], [`Site::take_apex`]).
     ///
     /// An answer that says the app's framework moved on (a `COOSE` warning
     /// beside the actions) still carries the actions' results, so it is
-    /// kept, and the new framework id is used from then on. Only when an
-    /// action has no result in it is the request sent once more, with the
-    /// new id.
+    /// kept, and the new framework id is used from then on. When some
+    /// actions have no result in it, only those are posted once more, with
+    /// the new id, and their results take their places in the answer: an
+    /// action that ran is never sent twice. An action still without a
+    /// result after that is exit 5 when it is read.
     pub async fn call(&mut self, actions: &[Action]) -> Result<Answer, CliError> {
-        let answer = self.post(actions).await?;
+        let mut answer = self.post(actions).await?;
         if !answer.out_of_sync {
             return Ok(answer);
         }
@@ -110,10 +119,14 @@ impl<T: Transport> Client<T> {
             }
             _ => false,
         };
-        if !moved || (0..actions.len()).all(|n| answer.has(n)) {
+        let missing: Vec<usize> = (0..actions.len()).filter(|&n| !answer.has(n)).collect();
+        if !moved || missing.is_empty() {
             return Ok(answer);
         }
-        self.post(actions).await
+        let again: Vec<Action> = missing.iter().map(|&n| actions[n].clone()).collect();
+        let retried = self.post(&again).await?;
+        answer.merge_retry(retried, &missing);
+        Ok(answer)
     }
 
     async fn post(&mut self, actions: &[Action]) -> Result<Answer, CliError> {
@@ -148,11 +161,13 @@ impl<T: Transport> Client<T> {
             return Err(e);
         }
         self.site.read_call_status(resp.status, &resp.body)?;
-        let parsed = protocol::parse(&resp.body);
-        if !matches!(parsed, Err(AuraError::InvalidSession)) {
+        // A lost session's answer (an invalid token, or a call that ran as
+        // the guest user) may set cookies too; they are not the session's.
+        let answer = protocol::parse(&resp.body).map_err(|e| e.into_cli(&self.site))?;
+        if !answer.is_lost_session() {
             self.absorb(&resp);
         }
-        parsed.map_err(|e| e.into_cli(&self.site))
+        Ok(answer)
     }
 
     /// The cookie header, refused (exit 3) before any request when it could
@@ -394,14 +409,48 @@ mod tests {
         let mut c = client(&script);
         let answer = block_on(c.call(&probe())).unwrap();
         assert_eq!(
-            answer
-                .take(0, "probe")
-                .unwrap_err()
-                .into_cli(c.site())
-                .exit_code(),
+            c.site().take(&answer, 0, "probe").unwrap_err().exit_code(),
             5
         );
         assert_eq!(script.sent.borrow().len(), 3);
+    }
+
+    #[test]
+    fn a_retry_posts_only_the_actions_without_a_result() {
+        // Two actions; the redeployed site answers the first and not the
+        // second.
+        let partial = r#"{"actions":[{"id":"1;a","state":"SUCCESS","returnValue":"first"},{"id":"COOSE","state":"warning"}],"context":{"fwuid":"NEW"}}"#;
+        let second = r#"{"actions":[{"id":"1;a","state":"SUCCESS","returnValue":"second"}],"context":{"fwuid":"NEW"}}"#;
+        let script = Script::new(vec![
+            home(),
+            HttpResponse::new(200, partial),
+            HttpResponse::new(200, second),
+        ]);
+        let mut c = client(&script);
+        let actions = [
+            Action::apex("ExampleController", "first", json!({})),
+            Action::apex("ExampleController", "second", json!({})),
+        ];
+        let answer = block_on(c.call(&actions)).unwrap();
+        assert_eq!(c.site().take(&answer, 0, "first").unwrap(), "first");
+        assert_eq!(c.site().take(&answer, 1, "second").unwrap(), "second");
+        let sent = script.sent.borrow();
+        assert_eq!(sent.len(), 3);
+        let message: serde_json::Value = serde_json::from_str(
+            &form_of(&sent[2])
+                .into_iter()
+                .find(|(n, _)| n == "message")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        let retried = message["actions"].as_array().unwrap();
+        assert_eq!(retried.len(), 1, "the action that ran is not sent again");
+        assert_eq!(
+            retried[0]["descriptor"],
+            "apex://ExampleController/ACTION$second"
+        );
+        assert!(sent[2].url.ends_with("other.ExampleController.second=1"));
     }
 
     #[test]
@@ -438,11 +487,7 @@ mod tests {
         let mut c = client(&script);
         let answer = block_on(c.call(&probe())).unwrap();
         assert_eq!(
-            answer
-                .take(0, "probe")
-                .unwrap_err()
-                .into_cli(c.site())
-                .exit_code(),
+            c.site().take(&answer, 0, "probe").unwrap_err().exit_code(),
             3
         );
     }
@@ -504,6 +549,20 @@ mod tests {
         ]);
         let mut c = client(&script);
         assert_eq!(block_on(c.call(&probe())).unwrap_err().exit_code(), 3);
+        assert!(c.refreshed().is_none());
+        // A call that ran as the guest user answers 200, with the guest's
+        // cookies.
+        let script = Script::new(vec![
+            home(),
+            HttpResponse::new(200, fixture("guest-no-access.json"))
+                .header("set-cookie", "sid=guest; Path=/"),
+        ]);
+        let mut c = client(&script);
+        let answer = block_on(c.call(&probe())).unwrap();
+        assert_eq!(
+            c.site().take(&answer, 0, "probe").unwrap_err().exit_code(),
+            3
+        );
         assert!(c.refreshed().is_none());
         let script = Script::new(vec![
             HttpResponse::new(302, "").header("set-cookie", "sid=guest; Path=/")

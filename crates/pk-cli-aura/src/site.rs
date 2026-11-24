@@ -4,7 +4,9 @@
 use pk_cli_core::transport::Inconclusive;
 use pk_cli_core::CliError;
 
-use crate::protocol::{bootstrap_context, is_sign_in_page, Context};
+use serde_json::Value;
+
+use crate::protocol::{bootstrap_context, is_sign_in_page, Answer, Context};
 
 /// An Experience Cloud site: its host, the path its pages live under, and
 /// the words its errors use. Built with [`Site::new`] and its `with_*` steps.
@@ -35,10 +37,14 @@ impl Site {
 
     /// The path the site's pages live under: `/s` unless the site has a URL
     /// prefix (`/members/s`). A missing leading `/` is added and a trailing
-    /// one dropped.
-    pub fn with_base_path(mut self, path: &str) -> Site {
-        let trimmed = path.trim_matches('/');
-        self.base = format!("/{trimmed}");
+    /// one dropped; an empty path is `/s`.
+    pub fn with_base_path(mut self, path: impl AsRef<str>) -> Site {
+        let trimmed = path.as_ref().trim_matches('/');
+        self.base = if trimmed.is_empty() {
+            "/s".into()
+        } else {
+            format!("/{trimmed}")
+        };
         self
     }
 
@@ -141,6 +147,17 @@ impl Site {
         ))
     }
 
+    /// The `n`th action's result in `answer`, labelled `label` for errors,
+    /// with the error mapped to its exit code ([`crate::AuraError::into_cli`]).
+    pub fn take(&self, answer: &Answer, n: usize, label: &str) -> Result<Value, CliError> {
+        answer.take(n, label).map_err(|e| e.into_cli(self))
+    }
+
+    /// [`Answer::take_apex`], with the error mapped to its exit code.
+    pub fn take_apex(&self, answer: &Answer, n: usize, label: &str) -> Result<Value, CliError> {
+        answer.take_apex(n, label).map_err(|e| e.into_cli(self))
+    }
+
     /// What a home-page answer that is not an edge answer means: the
     /// signed-in app's context, a lost session (a redirect, a 401, or the
     /// sign-in page under any status), or the site having changed.
@@ -199,7 +216,12 @@ mod tests {
             s.aura_url("r=1"),
             "https://example.my.site.com/s/sfsites/aura?r=1"
         );
-        let prefixed = site().with_base_path("members/s/");
+        assert_eq!(
+            site().with_base_path("").home_url(),
+            "https://example.my.site.com/s/"
+        );
+        assert_eq!(site().with_base_path("//").page_uri(), "/s/");
+        let prefixed = site().with_base_path(String::from("members/s/"));
         assert_eq!(
             prefixed.home_url(),
             "https://example.my.site.com/members/s/"
@@ -260,6 +282,21 @@ mod tests {
                 .unwrap_err()
                 .exit_code(),
             5
+        );
+    }
+
+    #[test]
+    fn a_result_is_read_with_its_exit_code() {
+        let ok = crate::parse(include_str!("../tests/fixtures/ok.json")).unwrap();
+        assert_eq!(site().take(&ok, 0, "p").unwrap()["returnValue"]["rows"], 2);
+        assert_eq!(site().take_apex(&ok, 0, "p").unwrap()["rows"], 2);
+        assert_eq!(site().take(&ok, 1, "p").unwrap_err().exit_code(), 5);
+        let guest = crate::parse(include_str!("../tests/fixtures/guest-no-access.json")).unwrap();
+        let lost = site().take_apex(&guest, 0, "p").unwrap_err();
+        assert_eq!(lost.exit_code(), 3);
+        assert!(
+            lost.to_string().contains("`ex auth login --browser`"),
+            "{lost}"
         );
     }
 

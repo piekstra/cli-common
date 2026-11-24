@@ -8,18 +8,21 @@
   name, the sign-in command and why a session ends. `Client` runs over core's `Transport`. It
   reads the app context once from the signed-in home page. It posts a batch of `Action`s
   (`apex`, `apex_execute`, `raw`) as the site's form does, with the cookie header and the token
-  and a user agent naming the CLI. Each result is read by position (`Answer::take`;
-  `take_apex` unwraps an `ApexActionController` result and reads a JSON string as JSON).
+  and a user agent naming the CLI. Each result is read by position with its exit code
+  (`Site::take`; `Site::take_apex` unwraps an `ApexActionController` result and reads a JSON
+  string as JSON); `Answer::take` keeps the cause (`AuraError`) for a caller that branches on it.
 - Answers map to exit codes in one place. A redirect, a 401, the sign-in page under any status,
   `aura:invalidSession`, and a call that ran as the guest user ("You do not have access to the
   Apex class") are exit 3, naming the sign-in command. A 429, a 5xx, or a 403 with another
   HTML page is exit 5 with its `Retry-After`, never a lost session. An action with no result
   (an unknown method answers 200 and an empty list) is exit 5, never "no data".
-- A stale framework id (a `COOSE` warning beside the results) keeps the answer and the new id;
-  the call is sent once more only when an action has no result. A `Set-Cookie` that changes a
-  cookie the session carries is merged (`merge_set_cookies`), and `Client::refreshed` hands
-  back the new header for the CLI to store. New cookies, removals and the cookies of a
-  lost-session answer are not merged. A cookie header with a line break or a control character
+- A stale framework id (a `COOSE` warning beside the results) keeps the answer and the new id.
+  Only the actions without a result are posted once more, and their results take their places,
+  so an action that ran is never sent twice. A `Set-Cookie` that changes a cookie the session
+  carries is merged (`merge_set_cookies`), and `Client::refreshed` hands back the new header.
+  The CLI stores it after every call, a failed one too, under its `RefreshLock`. New cookies,
+  removals and the cookies of a lost-session answer (an invalid token, a redirect, or a call
+  that ran as the guest user) are not merged. A cookie header with a line break or a control character
   is exit 3 before any request.
 - Moved out of the first family CLI that reads an Experience Cloud portal. The crate does not
   build for WebAssembly, because `pk-cli-secrets` does not.

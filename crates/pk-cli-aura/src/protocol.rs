@@ -45,7 +45,10 @@ impl Context {
     }
 }
 
-/// One server action.
+/// One server action. A batch is posted as one request; when a redeployed
+/// site answers it without a result for some of its actions, only those
+/// are posted again ([`crate::Client::call`]), so an action that ran is
+/// never sent twice.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Action {
     pub descriptor: String,
@@ -104,12 +107,12 @@ impl Action {
 }
 
 /// The id the `n`th action of a request carries (`1;a`, `2;a`, …).
-pub fn action_id(n: usize) -> String {
+pub(crate) fn action_id(n: usize) -> String {
     format!("{};a", n + 1)
 }
 
 /// The `message` field for `actions`, ids by position.
-pub fn message(actions: &[Action]) -> String {
+pub(crate) fn message(actions: &[Action]) -> String {
     let list: Vec<Value> = actions
         .iter()
         .enumerate()
@@ -127,7 +130,7 @@ pub fn message(actions: &[Action]) -> String {
 
 /// The query string the site's own requests carry: a counter and one flag
 /// per action. The server ignores it; it names the call in logs.
-pub fn query(counter: u32, actions: &[Action]) -> String {
+pub(crate) fn query(counter: u32, actions: &[Action]) -> String {
     let mut q = format!("r={counter}");
     for a in actions {
         let flag: String = a
@@ -148,7 +151,7 @@ pub fn query(counter: u32, actions: &[Action]) -> String {
 
 /// The form a request posts, in order: `message`, `aura.context`,
 /// `aura.pageURI`, `aura.token`.
-pub fn form(
+pub(crate) fn form(
     actions: &[Action],
     ctx: &Context,
     page_uri: &str,
@@ -301,8 +304,40 @@ impl Answer {
             .any(|a| a.get("id").and_then(Value::as_str) == Some(id.as_str()))
     }
 
+    /// Whether any action of the answer failed as a call without a live
+    /// session does: it ran as the site's guest user, or the session is
+    /// invalid. Such an answer's cookies are not the session's.
+    pub fn is_lost_session(&self) -> bool {
+        self.actions.iter().any(|entry| {
+            entry.get("state").and_then(Value::as_str) == Some("ERROR")
+                && entry_error(entry).is_some_and(|m| is_lost_message(&m))
+        })
+    }
+
+    /// Adds the results of `retried`, a request of the actions at
+    /// `positions` of this answer's request, under their places here; and
+    /// the framework id that answer names.
+    pub(crate) fn merge_retry(&mut self, retried: Answer, positions: &[usize]) {
+        for (k, &original) in positions.iter().enumerate() {
+            let id = action_id(k);
+            if let Some(mut entry) = retried
+                .actions
+                .iter()
+                .find(|a| a.get("id").and_then(Value::as_str) == Some(id.as_str()))
+                .cloned()
+            {
+                entry["id"] = Value::String(action_id(original));
+                self.actions.push(entry);
+            }
+        }
+        if retried.fwuid.is_some() {
+            self.fwuid = retried.fwuid;
+        }
+        self.out_of_sync = retried.out_of_sync;
+    }
+
     /// The return value of the `n`th action of the request, labelled `label`
-    /// for errors.
+    /// for errors. [`crate::Site::take`] gives the exit-code error instead.
     pub fn take(&self, n: usize, label: &str) -> Result<Value, AuraError> {
         let id = action_id(n);
         let entry = self
@@ -315,16 +350,9 @@ impl Answer {
         match entry.get("state").and_then(Value::as_str) {
             Some("SUCCESS") => Ok(entry.get("returnValue").cloned().unwrap_or(Value::Null)),
             state => {
-                let message = entry
-                    .get("error")
-                    .and_then(Value::as_array)
-                    .and_then(|errs| errs.first())
-                    .and_then(error_message)
+                let message = entry_error(entry)
                     .unwrap_or_else(|| format!("state {}", state.unwrap_or("absent")));
-                let lower = message.to_ascii_lowercase();
-                if lower.contains("invalid session")
-                    || lower.contains("do not have access to the apex class")
-                {
+                if is_lost_message(&message) {
                     return Err(AuraError::InvalidSession);
                 }
                 Err(AuraError::Failed {
@@ -347,6 +375,21 @@ impl Answer {
             wrapped.get("returnValue").cloned().unwrap_or(Value::Null),
         ))
     }
+}
+
+/// The first error message of an action's entry.
+fn entry_error(entry: &Value) -> Option<String> {
+    entry
+        .get("error")
+        .and_then(Value::as_array)
+        .and_then(|errs| errs.first())
+        .and_then(error_message)
+}
+
+/// An action error that means the call had no live session.
+fn is_lost_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("invalid session") || lower.contains("do not have access to the apex class")
 }
 
 /// The message of one entry of an action's `error` list. An Apex exception
@@ -548,6 +591,31 @@ mod tests {
             answer.take(0, "C.m").unwrap_err(),
             AuraError::InvalidSession
         );
+        assert!(answer.is_lost_session());
+        assert!(!parse(&fixture("ok.json")).unwrap().is_lost_session());
+        let failed = r#"{"actions":[{"id":"1;a","state":"ERROR","error":[{"message":"Attempt to de-reference a null object"}]}]}"#;
+        assert!(!parse(failed).unwrap().is_lost_session());
+    }
+
+    #[test]
+    fn a_retried_answer_fills_its_actions_places() {
+        let mut first = parse(
+            r#"{"actions":[{"id":"1;a","state":"SUCCESS","returnValue":"a"},{"id":"COOSE","state":"warning"}],"context":{"fwuid":"NEW"}}"#,
+        )
+        .unwrap();
+        let retried = parse(
+            r#"{"actions":[{"id":"1;a","state":"SUCCESS","returnValue":"c"}],"context":{"fwuid":"NEWER"}}"#,
+        )
+        .unwrap();
+        // The first request had three actions; the third had no result and
+        // was posted again on its own.
+        assert!(!first.has(2));
+        first.merge_retry(retried, &[2]);
+        assert_eq!(first.take(0, "a").unwrap(), "a");
+        assert_eq!(first.take(2, "c").unwrap(), "c");
+        assert!(!first.has(1));
+        assert_eq!(first.fwuid.as_deref(), Some("NEWER"));
+        assert!(!first.out_of_sync);
     }
 
     #[test]
