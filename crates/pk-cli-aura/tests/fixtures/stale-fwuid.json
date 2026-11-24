@@ -1,0 +1,25 @@
+{
+ "actions": [
+  {
+   "id": "1;a",
+   "state": "SUCCESS",
+   "returnValue": true,
+   "error": []
+  },
+  {
+   "coos": "This page has changes since the last refresh. To get the latest updates, save your work and finish your conversations before refreshing the page.",
+   "state": "warning",
+   "id": "COOSE"
+  }
+ ],
+ "context": {
+  "mode": "PROD",
+  "app": "siteforce:communityApp",
+  "contextPath": "/s/sfsites",
+  "pathPrefix": "",
+  "fwuid": "RFVNTVktRldVSUQtTkVX",
+  "loaded": {
+   "APPLICATION@markup://siteforce:communityApp": "dummy_loaded_version"
+  }
+ }
+}

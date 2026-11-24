@@ -1,0 +1,26 @@
+{
+ "actions": [
+  {
+   "id": "1;a",
+   "state": "ERROR",
+   "returnValue": {
+    "cacheable": true
+   },
+   "error": [
+    {
+     "message": "You do not have access to the Apex class named 'ExampleController'."
+    }
+   ]
+  }
+ ],
+ "context": {
+  "mode": "PROD",
+  "app": "siteforce:communityApp",
+  "contextPath": "/s/sfsites",
+  "pathPrefix": "",
+  "fwuid": "RFVNTVktRldVSUQtTkVX",
+  "loaded": {
+   "APPLICATION@markup://siteforce:communityApp": "dummy_loaded_version"
+  }
+ }
+}

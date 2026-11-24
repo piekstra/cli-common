@@ -1,0 +1,11 @@
+<!DOCTYPE HTML><html><head><script>
+function redirectOnLoad() {
+if (this.SfdcApp && this.SfdcApp.projectOneNavigator) { SfdcApp.projectOneNavigator.handleRedirect('https://example.my.site.com/s/login/?ec=302&startURL=%2Fs%2F'); }  else
+if (window.location.replace){
+window.location.replace('https://example.my.site.com/s/login/?ec=302&startURL=%2Fs%2F');
+} else {
+window.location.href ='https://example.my.site.com/s/login/?ec=302&startURL=%2Fs%2F';
+}
+}
+redirectOnLoad();
+</script></head></html>

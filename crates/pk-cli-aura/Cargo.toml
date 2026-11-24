@@ -1,0 +1,19 @@
+[package]
+name = "pk-cli-aura"
+description = "Read a Salesforce Experience Cloud site the way its pages do, for the piekstra CLI family: Aura actions replayed with a signed-in session, over Transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+pk-cli-core = { workspace = true }
+pk-cli-secrets = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# The crate-level example runs over the native transport.
+pk-cli-http = { workspace = true }

@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.38.0 — 2026-11-24
+
+- `pk-cli-aura`, new: a Salesforce Experience Cloud site read the way its own pages read it,
+  through Aura actions replayed with a session the owner signed in to. `Site` names the host,
+  the path its pages live under (`/s`, or `/<prefix>/s`), and the words its errors use: the
+  name, the sign-in command and why a session ends. `Client` runs over core's `Transport`. It
+  reads the app context once from the signed-in home page. It posts a batch of `Action`s
+  (`apex`, `apex_execute`, `raw`) as the site's form does, with the cookie header and the token
+  and a user agent naming the CLI. Each result is read by position (`Answer::take`;
+  `take_apex` unwraps an `ApexActionController` result and reads a JSON string as JSON).
+- Answers map to exit codes in one place. A redirect, a 401, the sign-in page under any status,
+  `aura:invalidSession`, and a call that ran as the guest user ("You do not have access to the
+  Apex class") are exit 3, naming the sign-in command. A 429, a 5xx, or a 403 with another
+  HTML page is exit 5 with its `Retry-After`, never a lost session. An action with no result
+  (an unknown method answers 200 and an empty list) is exit 5, never "no data".
+- A stale framework id (a `COOSE` warning beside the results) keeps the answer and the new id;
+  the call is sent once more only when an action has no result. A `Set-Cookie` that changes a
+  cookie the session carries is merged (`merge_set_cookies`), and `Client::refreshed` hands
+  back the new header for the CLI to store. New cookies, removals and the cookies of a
+  lost-session answer are not merged. A cookie header with a line break or a control character
+  is exit 3 before any request.
+- Moved out of the first family CLI that reads an Experience Cloud portal. The crate does not
+  build for WebAssembly, because `pk-cli-secrets` does not.
+
 ## v0.37.6 — 2026-11-23
 
 - `pk-cli-drive`: `drive client import --from-profile <NAME>` copies the OAuth client another
