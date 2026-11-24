@@ -685,7 +685,7 @@ something untrue about where the user's credentials are.
 
 ## Part 2 — The `cli-common` workspace
 
-Public repo `piekstra/cli-common`. Cargo workspace, dual-licensed MIT/Apache-2.0,
+Public repo `piekstra/cli-common`. Cargo workspace, licensed AGPL-3.0-only,
 AGENTS.md, same house style as the CLIs.
 
 ### Crates
