@@ -1,0 +1,13 @@
+{
+ "actions": [],
+ "context": {
+  "mode": "PROD",
+  "app": "siteforce:communityApp",
+  "contextPath": "/s/sfsites",
+  "pathPrefix": "",
+  "fwuid": "RFVNTVktRldVSUQtTkVX",
+  "loaded": {
+   "APPLICATION@markup://siteforce:communityApp": "dummy_loaded_version"
+  }
+ }
+}
