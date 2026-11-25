@@ -19,8 +19,11 @@ use crate::{CredentialStore, Secret};
 pub enum QuietRead {
     /// The item, without a dialog.
     Found(Secret),
-    /// No such item.
+    /// No such item, and storing one asks nobody.
     Absent,
+    /// No such item, in a keychain that is locked: the read needed nobody,
+    /// and storing one would raise the unlock dialog.
+    AbsentLocked,
     /// The item is there, and reading it needs a person: on macOS a dialog,
     /// which was not raised.
     NeedsPerson,
@@ -100,6 +103,7 @@ impl CredentialStore {
 mod macos {
     use std::sync::{Mutex, PoisonError};
 
+    use core_foundation::base::{CFTypeRef, TCFType};
     use keyring::macos::{MacCredential, MacKeychainDomain};
     use keyring::Entry;
     use pk_cli_core::CliError;
@@ -110,11 +114,37 @@ mod macos {
     use crate::Secret;
 
     const ITEM_NOT_FOUND: i32 = -25300;
+    /// `kSecUnlockStateStatus`.
+    const UNLOCKED: u32 = 1;
+
+    #[link(name = "Security", kind = "framework")]
+    extern "C" {
+        /// `SecKeychainStatus` is a `UInt32` (Security/SecKeychain.h).
+        fn SecKeychainGetStatus(keychain: CFTypeRef, state: *mut u32) -> i32;
+    }
 
     /// `errSecAuthFailed`, `errSecUserCanceled`,
     /// `errSecInteractionNotAllowed` and `errSecInteractionRequired`.
     pub(super) fn is_refusal(status: i32) -> bool {
         matches!(status, -25293 | -128 | -25308 | -25315)
+    }
+
+    /// A keychain whose state macOS does not give (its file is gone) is not
+    /// one a write can be promised in.
+    pub(super) fn is_unlocked(status: i32, state: u32) -> bool {
+        status == 0 && state & UNLOCKED != 0
+    }
+
+    fn unlocked(keychain: &SecKeychain) -> bool {
+        let mut state = 0;
+        // SAFETY: `keychain` outlives the call, which writes `state` alone.
+        let status = unsafe { SecKeychainGetStatus(keychain.as_CFTypeRef(), &mut state) };
+        is_unlocked(status, state)
+    }
+
+    fn login() -> Result<SecKeychain, CliError> {
+        SecKeychain::default_for_domain(SecPreferencesDomain::User)
+            .map_err(|e| CliError::Keychain(format!("opening the login keychain: {e}")))
     }
 
     /// Two quiet reads at once would turn the dialogs back on under each
@@ -147,6 +177,8 @@ mod macos {
         };
         Ok(match read(item)? {
             AskedRead::Found(secret) => QuietRead::Found(secret),
+            // macOS looks for an item in a locked keychain without asking.
+            AskedRead::Absent if !unlocked(&login()?) => QuietRead::AbsentLocked,
             AskedRead::Absent => QuietRead::Absent,
             AskedRead::Refused { .. } => QuietRead::NeedsPerson,
         })
@@ -159,9 +191,7 @@ mod macos {
 
     /// The read `keyring` makes, with macOS's own status kept.
     fn read(item: &MacCredential) -> Result<AskedRead, CliError> {
-        let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)
-            .map_err(|e| CliError::Keychain(format!("opening the login keychain: {e}")))?;
-        match find_generic_password(Some(&[keychain]), &item.service, &item.account) {
+        match find_generic_password(Some(&[login()?]), &item.service, &item.account) {
             Ok((bytes, _item)) => String::from_utf8(bytes.to_owned())
                 .map(|text| AskedRead::Found(Secret::new(text)))
                 .map_err(|_| CliError::Keychain("reading credential: not UTF-8".into())),
@@ -184,6 +214,15 @@ mod macos {
             for status in [0, ITEM_NOT_FOUND, -25291, -25294, -50] {
                 assert!(!is_refusal(status), "{status}");
             }
+        }
+
+        /// The states are those macOS gives for a scratch keychain.
+        #[test]
+        fn a_keychain_is_unlocked_only_where_macos_says_so() {
+            assert!(is_unlocked(0, 7));
+            assert!(!is_unlocked(0, 2), "locked: readable alone");
+            assert!(!is_unlocked(-25294, 0), "no such keychain");
+            assert!(!is_unlocked(-25294, 7));
         }
 
         /// macOS takes an empty attribute as a wildcard, so each of these

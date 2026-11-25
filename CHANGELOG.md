@@ -15,8 +15,9 @@
   macOS does not report which button was clicked. It lets the binary read again without asking
   only after Always Allow, so a second read with interaction turned off tells the two apart.
 - `pk-cli-auth`: `Vault::load_key_quietly` loads the key without ever raising a dialog and answers
-  `QuietLoad::NeedsPerson` when one is needed, for a scheduled or background run. It reads an empty
-  vault's key too, so a write after `Loaded` or `Empty` raises no dialog either.
+  `QuietLoad::NeedsPerson` when one is needed, for a scheduled or background run. It answers for
+  the write after it too: it reads an empty vault's key, and with no key says `NeedsPerson` where
+  the keychain is locked, so a write after `Loaded` or `Empty` raises no dialog either.
 - `pk-cli-secrets`: `CredentialStore::get_quiet` (a read that may not ask; on macOS through
   `SecKeychainSetUserInteractionAllowed`), `get_asking` (a read that may, with a refusal told from
   a failure) and `signing::running_binary`. On macOS the crate now names `security-framework` 3 and
@@ -30,8 +31,8 @@
   still the version alone), and `CliInfo::with_build(pk_cli_core::build_info!())` adds `build`
   (`commit`, `dirty`, `built_at`) to `cli-info/v1`. The stamp is taken in the CLI's own compile by
   a new proc-macro crate, `pk-cli-buildinfo`, with no dependencies. A commit, a checkout or a pull
-  recompiles the crate that holds it, with or without a log of HEAD. Where no git repository tracks the crate, the commit is
-  unknown and said so.
+  recompiles the crate that holds it, with or without a log of HEAD. Where no git repository tracks
+  the crate, the commit is unknown and said so.
 - `CliInfo` gains a public `build` field; code that builds the struct by hand adds `build: None`.
 
 ## v0.38.1 — 2026-11-24

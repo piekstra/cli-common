@@ -337,9 +337,10 @@ pub enum QuietLoad {
     Empty,
     /// Entries, but the keychain holds no key; a read reports the lost key.
     Missing,
-    /// Reading the key needs a person, and no dialog was raised: `auth key`
-    /// run at the screen raises it. A key left by an earlier sign-in counts
-    /// with no entries too, since a write would read it.
+    /// A person is needed, and no dialog was raised. Either reading the key
+    /// asks, with entries or without (`auth key` run at the screen raises
+    /// that dialog), or there is no key and the keychain is locked, so the
+    /// write that makes one would ask to unlock it.
     NeedsPerson,
     /// This keychain cannot be read without possibly asking; nothing was
     /// read. [`Vault::load_key`] bounds a read that may.
@@ -504,7 +505,8 @@ impl Vault {
                 QuietLoad::Loaded
             }
             QuietRead::Absent if self.entry_files()?.is_empty() => QuietLoad::Empty,
-            QuietRead::Absent => QuietLoad::Missing,
+            QuietRead::AbsentLocked if self.entry_files()?.is_empty() => QuietLoad::NeedsPerson,
+            QuietRead::Absent | QuietRead::AbsentLocked => QuietLoad::Missing,
             QuietRead::NeedsPerson => QuietLoad::NeedsPerson,
             QuietRead::Unsupported => QuietLoad::Unsupported,
         })

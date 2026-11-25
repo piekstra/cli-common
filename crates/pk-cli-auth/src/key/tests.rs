@@ -19,6 +19,7 @@ enum Person {
 struct AskingKeys {
     item: Mutex<Option<String>>,
     granted: Mutex<bool>,
+    locked: Mutex<bool>,
     person: Person,
     dialogs: AtomicUsize,
     quiet: AtomicUsize,
@@ -29,6 +30,7 @@ impl AskingKeys {
         Arc::new(Self {
             item: Mutex::new(item.map(str::to_string)),
             granted: Mutex::new(false),
+            locked: Mutex::new(false),
             person,
             dialogs: AtomicUsize::new(0),
             quiet: AtomicUsize::new(0),
@@ -68,6 +70,7 @@ impl KeyStore for AskingKeys {
     fn get_quiet(&self, _account: &str) -> Result<QuietRead, CliError> {
         self.quiet.fetch_add(1, Ordering::SeqCst);
         Ok(match self.item() {
+            None if *self.locked.lock().unwrap() => QuietRead::AbsentLocked,
             None => QuietRead::Absent,
             Some(item) if *self.granted.lock().unwrap() => QuietRead::Found(item),
             Some(_) => QuietRead::NeedsPerson,
@@ -84,9 +87,10 @@ impl KeyStore for AskingKeys {
                 Person::AlwaysAllows => *self.granted.lock().unwrap() = true,
                 Person::AllowsOnce => {}
                 Person::Denies => return Ok(AskedRead::Refused { status: -128 }),
-                Person::Away => loop {
-                    std::thread::park();
-                },
+                Person::Away => {
+                    std::thread::sleep(Duration::from_secs(60));
+                    panic!("a test waited on a dialog nobody answers");
+                }
             }
         }
         Ok(AskedRead::Found(item))
@@ -459,6 +463,35 @@ fn a_quiet_load_of_an_empty_vault_answers_for_the_write_after_it() {
     let vault = tmp.vault(Arc::clone(&keys));
     assert_eq!(vault.load_key_quietly().unwrap(), QuietLoad::Empty);
     assert!(!vault.dir().exists(), "a load creates nothing");
+}
+
+/// macOS finds an item absent from a locked keychain without asking, and
+/// asks to unlock it for the key a first write makes.
+#[test]
+fn a_quiet_load_with_no_key_in_a_locked_keychain_needs_a_person() {
+    let tmp = TempDir::new();
+    let keys = AskingKeys::new(None, Person::Away);
+    *keys.locked.lock().unwrap() = true;
+    let vault = tmp.vault(Arc::clone(&keys));
+    assert_eq!(vault.load_key_quietly().unwrap(), QuietLoad::NeedsPerson);
+    // `auth key` is about the read, which asks nobody.
+    for args in [KeyArgs::default(), no_dialog()] {
+        let absent = vault.check_key(&args).unwrap();
+        assert_eq!(absent.outcome, KeyOutcome::Absent);
+        assert_eq!(absent.dialog_needed, Some(false));
+        assert!(absent.failure().is_none());
+    }
+    // With entries, the key is lost, locked or not.
+    *keys.locked.lock().unwrap() = false;
+    *keys.granted.lock().unwrap() = true;
+    vault.put("entry", &Secret::new("x")).unwrap();
+    keys.delete(KEY_ACCOUNT).unwrap();
+    *keys.locked.lock().unwrap() = true;
+    assert_eq!(
+        tmp.vault(Arc::clone(&keys)).load_key_quietly().unwrap(),
+        QuietLoad::Missing
+    );
+    assert_eq!(keys.counts().0, 0);
 }
 
 #[test]

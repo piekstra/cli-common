@@ -230,7 +230,7 @@ pub fn check_item(
     let (answer, dialog_needed) =
         match keys.get_quiet(account) {
             Ok(QuietRead::Found(item)) => (End::Found(item), Some(false)),
-            Ok(QuietRead::Absent) => (End::Absent, Some(false)),
+            Ok(QuietRead::Absent | QuietRead::AbsentLocked) => (End::Absent, Some(false)),
             Ok(QuietRead::NeedsPerson) if args.no_dialog => (End::NeedsDialog, Some(true)),
             Ok(QuietRead::NeedsPerson) => (ask(keys, account, args.wait), Some(true)),
             Ok(QuietRead::Unsupported) if args.no_dialog => return Err(CliError::Usage(
