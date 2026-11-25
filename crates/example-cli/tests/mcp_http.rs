@@ -2,9 +2,10 @@
 //! with raw HTTP the way the connector's Worker reaches it through a tunnel.
 //! The token comes from the environment, so no test opens the keychain.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -33,9 +34,10 @@ struct Server {
 }
 
 impl Server {
-    /// The server on a free port, listening. A port taken in the moment
-    /// between `free_port` and the server's bind is retried on another; any
-    /// other early exit fails at once with the server's stderr.
+    /// The server on a free port, listening by its own word: another test's
+    /// server may have taken the port since `free_port`, and would answer in
+    /// its place until that test ends. A port taken is retried on another;
+    /// any other early exit fails at once with the server's stderr.
     fn start(extra: &[&str]) -> Self {
         for _ in 0..3 {
             let port = free_port();
@@ -48,30 +50,30 @@ impl Server {
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("example-cli starts");
+            // Read to its end, so the server never waits to write.
+            let stderr = BufReader::new(child.stderr.take().unwrap());
+            let (tx, lines) = mpsc::channel();
+            std::thread::spawn(move || {
+                for line in stderr.lines().map_while(Result::ok) {
+                    let _ = tx.send(line);
+                }
+            });
+            let serving = format!("at http://127.0.0.1:{port}/mcp");
             let deadline = Instant::now() + Duration::from_secs(20);
-            loop {
-                if TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).is_ok() {
-                    return Self { child, port };
+            let mut said = String::new();
+            let ended = loop {
+                match lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(line) if line.contains(&serving) => return Self { child, port },
+                    Ok(line) => said.push_str(&format!("{line}\n")),
+                    Err(e) => break e,
                 }
-                if let Some(status) = child.try_wait().unwrap() {
-                    let mut stderr = String::new();
-                    child
-                        .stderr
-                        .take()
-                        .unwrap()
-                        .read_to_string(&mut stderr)
-                        .unwrap();
-                    if stderr.contains("listening on") {
-                        break; // the port was taken: try another
-                    }
-                    panic!("the server exited ({status}) before listening: {stderr}");
-                }
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    panic!("the server did not listen on {port} within 20 s");
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            };
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(
+                said.contains("listening on"),
+                "the server on {port} did not start ({ended}): {said}"
+            );
         }
         panic!("no free port could be bound in three tries");
     }
