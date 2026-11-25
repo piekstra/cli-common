@@ -1326,11 +1326,11 @@ impl Drive {
     /// from. `None` when nothing is at a path; a wrong id is exit 4. Read only:
     /// nothing is shared.
     ///
-    /// Drive lists grants only for an account that may change them, as
-    /// [`ItemDetails::can_share`] says; another may be refused (reason
-    /// `permissions_hidden`). Where a grant comes from is Drive's own
-    /// answer when it gives one, and otherwise the folder above's grants,
-    /// which is one more request.
+    /// Google does not say what an account that may not change the grants
+    /// ([`ItemDetails::can_share`]) is answered. A refusal is exit 3, reason
+    /// `permissions_hidden`, never an empty list. Where a grant comes from is
+    /// Drive's own answer when it gives one, and otherwise the folder above's
+    /// grants, which is one more request.
     pub fn permissions(&self, rel: &str) -> Result<Option<Sharing>, CliError> {
         let Some((id, via)) = self.locate(rel)? else {
             return Ok(None);

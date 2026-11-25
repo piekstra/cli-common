@@ -273,7 +273,7 @@ machine's tokens.
 
 ## Sharing and parents
 
-What Google documents, and what is not yet tried against a real account:
+What Google documents:
 
 - **The scopes.** The v3 discovery document (revision 20261117) lists
   `drive.file` among the scopes `files.get` and `permissions.list` accept, as
@@ -298,6 +298,21 @@ What Google documents, and what is not yet tried against a real account:
 - **Link sharing.** A grant of type `anyone` is anyone with the link; one of
   type `domain` is anyone in that domain with it. `allowFileDiscovery` says
   whether the item also appears in search for them.
+
+Observed on a real account with the `drive` scope (2026-11-25, synthetic items
+the account owns in My Drive, through gdrv): a top-level folder's parent is My
+Drive's id, and the parent of anything below is the folder that holds it.
+`Drive::permissions` answers for a folder, a folder in it and a file there, and
+an unshared item lists its owner alone, as direct, with no link sharing.
+
+Not observed:
+
+- `drive.file`: which grants it lists, and whether `parents` is there, on an
+  item the app did not create.
+- An inherited grant to someone else, and whether a My Drive answer carries
+  `permissionDetails`.
+- An item another account owns and shared: its `parents`, and whether Drive
+  lists or refuses its grants.
 
 ## Tests
 
