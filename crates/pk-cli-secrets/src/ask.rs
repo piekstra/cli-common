@@ -54,7 +54,7 @@ impl CredentialStore {
     pub fn get_quiet(&self, account: &str) -> Result<QuietRead, CliError> {
         #[cfg(target_os = "macos")]
         {
-            macos::quiet(self.service(), account)
+            macos::quiet(&self.entry(account)?)
         }
         #[cfg(windows)]
         {
@@ -77,7 +77,14 @@ impl CredentialStore {
     pub fn get_asking(&self, account: &str) -> Result<AskedRead, CliError> {
         #[cfg(target_os = "macos")]
         {
-            macos::asking(self.service(), account)
+            match macos::asking(&self.entry(account)?)? {
+                Some(read) => Ok(read),
+                // Not the login keychain, whose statuses are known here.
+                None => self.get(account).map(|item| match item {
+                    Some(item) => AskedRead::Found(item),
+                    None => AskedRead::Absent,
+                }),
+            }
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -93,6 +100,8 @@ impl CredentialStore {
 mod macos {
     use std::sync::{Mutex, PoisonError};
 
+    use keyring::macos::{MacCredential, MacKeychainDomain};
+    use keyring::Entry;
     use pk_cli_core::CliError;
     use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
     use security_framework::os::macos::passwords::find_generic_password;
@@ -112,7 +121,21 @@ mod macos {
     /// other: the switch is the process's, not the call's.
     static QUIET: Mutex<()> = Mutex::new(());
 
-    pub(super) fn quiet(service: &str, account: &str) -> Result<QuietRead, CliError> {
+    /// The item `entry` names, in the login keychain. `keyring` is what
+    /// decides how an item is addressed: it refuses an empty service or
+    /// account, which macOS would read as a wildcard, and these reads are of
+    /// the item its own would be, or `None`.
+    fn item(entry: &Entry) -> Option<&MacCredential> {
+        entry
+            .get_credential()
+            .downcast_ref::<MacCredential>()
+            .filter(|item| item.domain == MacKeychainDomain::User)
+    }
+
+    pub(super) fn quiet(entry: &Entry) -> Result<QuietRead, CliError> {
+        let Some(item) = item(entry) else {
+            return Ok(QuietRead::Unsupported);
+        };
         let _one = QUIET.lock().unwrap_or_else(PoisonError::into_inner);
         let _off = match SecKeychain::user_interaction_allowed() {
             // Off already, and not this function's to turn back on.
@@ -122,18 +145,23 @@ mod macos {
                 Err(_) => return Ok(QuietRead::Unsupported),
             },
         };
-        Ok(match asking(service, account)? {
+        Ok(match read(item)? {
             AskedRead::Found(secret) => QuietRead::Found(secret),
             AskedRead::Absent => QuietRead::Absent,
             AskedRead::Refused { .. } => QuietRead::NeedsPerson,
         })
     }
 
+    /// `None` when the entry is not a login keychain item.
+    pub(super) fn asking(entry: &Entry) -> Result<Option<AskedRead>, CliError> {
+        item(entry).map(read).transpose()
+    }
+
     /// The read `keyring` makes, with macOS's own status kept.
-    pub(super) fn asking(service: &str, account: &str) -> Result<AskedRead, CliError> {
+    fn read(item: &MacCredential) -> Result<AskedRead, CliError> {
         let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)
             .map_err(|e| CliError::Keychain(format!("opening the login keychain: {e}")))?;
-        match find_generic_password(Some(&[keychain]), service, account) {
+        match find_generic_password(Some(&[keychain]), &item.service, &item.account) {
             Ok((bytes, _item)) => String::from_utf8(bytes.to_owned())
                 .map(|text| AskedRead::Found(Secret::new(text)))
                 .map_err(|_| CliError::Keychain("reading credential: not UTF-8".into())),
@@ -156,6 +184,34 @@ mod macos {
             for status in [0, ITEM_NOT_FOUND, -25291, -25294, -50] {
                 assert!(!is_refusal(status), "{status}");
             }
+        }
+
+        /// macOS takes an empty attribute as a wildcard, so each of these
+        /// would be some other item. They are refused before any read.
+        #[test]
+        fn an_empty_service_or_account_is_refused() {
+            use crate::CredentialStore;
+            let store = CredentialStore::new("piekstra.svc.hermetic-tests");
+            for refused in [
+                store.get_quiet("").map(drop),
+                store.get_asking("").map(drop),
+                CredentialStore::new("").get_quiet("session").map(drop),
+            ] {
+                let error = refused.unwrap_err();
+                assert!(error.to_string().contains("cannot be empty"), "{error}");
+            }
+        }
+
+        #[test]
+        fn the_item_read_is_the_one_keyring_names() {
+            let entry = Entry::new("piekstra.svc", "vault-key").unwrap();
+            let named = item(&entry).unwrap();
+            assert_eq!(
+                (named.service.as_str(), named.account.as_str()),
+                ("piekstra.svc", "vault-key")
+            );
+            let elsewhere = Entry::new_with_target("System", "piekstra.svc", "vault-key").unwrap();
+            assert!(item(&elsewhere).is_none());
         }
     }
 }

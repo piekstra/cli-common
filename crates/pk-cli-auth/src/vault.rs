@@ -332,12 +332,14 @@ pub enum QuietLoad {
     /// The key is in this vault's cache: its reads and writes ask the
     /// keychain nothing more.
     Loaded,
-    /// No entries: nothing needs the key, and none was read.
+    /// No entries and no key: nothing needs it, and the first write makes
+    /// one without asking.
     Empty,
     /// Entries, but the keychain holds no key; a read reports the lost key.
     Missing,
     /// Reading the key needs a person, and no dialog was raised: `auth key`
-    /// run at the screen raises it.
+    /// run at the screen raises it. A key left by an earlier sign-in counts
+    /// with no entries too, since a write would read it.
     NeedsPerson,
     /// This keychain cannot be read without possibly asking; nothing was
     /// read. [`Vault::load_key`] bounds a read that may.
@@ -481,7 +483,9 @@ impl Vault {
     /// say when that needs a person ([`CredentialStore::get_quiet`], with its
     /// note on other threads). For a scheduled or background run, which then
     /// reports at once instead of raising a dialog nobody is there to
-    /// answer. Reads nothing when the vault has no entries.
+    /// answer. Unlike [`load_key`](Self::load_key) it reads an empty vault's
+    /// key too, so a write after [`QuietLoad::Loaded`] or
+    /// [`QuietLoad::Empty`] raises no dialog either.
     pub fn load_key_quietly(&self) -> Result<QuietLoad, CliError> {
         let mut cached = self.key.lock().unwrap();
         if let Settled::Waiting = self.settle(&mut cached)? {
@@ -489,9 +493,6 @@ impl Vault {
         }
         if cached.is_some() {
             return Ok(QuietLoad::Loaded);
-        }
-        if self.entry_files()?.is_empty() {
-            return Ok(QuietLoad::Empty);
         }
         let id = self.current_id()?;
         Ok(match self.keys.get_quiet(KEY_ACCOUNT)? {
@@ -502,6 +503,7 @@ impl Vault {
                 });
                 QuietLoad::Loaded
             }
+            QuietRead::Absent if self.entry_files()?.is_empty() => QuietLoad::Empty,
             QuietRead::Absent => QuietLoad::Missing,
             QuietRead::NeedsPerson => QuietLoad::NeedsPerson,
             QuietRead::Unsupported => QuietLoad::Unsupported,

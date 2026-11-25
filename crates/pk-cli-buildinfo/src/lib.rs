@@ -10,10 +10,10 @@
 //! tree clean. The macro runs in the CLI's own compile, every time that code
 //! is compiled, so what it says is about the code in the binary.
 //!
-//! The expansion also makes the compiler track the repository's HEAD log,
-//! so a commit, a checkout or a pull recompiles the crate that holds the
-//! stamp even when no source file changed. Nothing of the log is in the
-//! binary.
+//! The expansion also makes the compiler track the repository's HEAD and its
+//! log (where HEAD has no log, the files a commit changes instead), so a
+//! commit, a checkout or a pull recompiles the crate that holds the stamp
+//! even when no source file changed. Nothing of them is in the binary.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -72,18 +72,11 @@ impl Stamp {
         };
         let dirty = git(dir, &["status", "--porcelain", "--untracked-files=no"])
             .map(|changed| !changed.is_empty());
-        // HEAD moves with a checkout, its log with every commit too.
-        let track = ["HEAD", "logs/HEAD"]
-            .iter()
-            .filter_map(|name| git(dir, &["rev-parse", "--git-path", name]))
-            .filter_map(|path| dir.join(path).canonicalize().ok())
-            .filter(|path| path.is_file() && path.to_str().is_some())
-            .collect();
         Stamp {
             commit: Some(commit),
             dirty,
             built,
-            track,
+            track: head_files(dir),
         }
     }
 
@@ -107,6 +100,33 @@ impl Stamp {
         let built = self.built;
         format!("{{ {track} ({commit}, {dirty}, {built}i64) }}")
     }
+}
+
+/// The files of the repository around `dir` that change when HEAD moves.
+/// HEAD changes with a checkout, and its log with every commit too. Without
+/// a log (`core.logAllRefUpdates` off) a commit changes the branch's own
+/// file, or `packed-refs` and the index until it has one, or a reftable.
+fn head_files(dir: &Path) -> Vec<PathBuf> {
+    let file = |name: &str| {
+        let path = git(dir, &["rev-parse", "--git-path", name])?;
+        let path = dir.join(path).canonicalize().ok()?;
+        (path.is_file() && path.to_str().is_some()).then_some(path)
+    };
+    let head = file("HEAD");
+    let mut files: Vec<PathBuf> = head.into_iter().collect();
+    match file("logs/HEAD") {
+        Some(log) => files.push(log),
+        None => {
+            let branch = git(dir, &["symbolic-ref", "-q", "HEAD"]);
+            files.extend(branch.as_deref().and_then(file));
+            files.extend(
+                ["packed-refs", "index", "reftable/tables.list"]
+                    .into_iter()
+                    .filter_map(file),
+            );
+        }
+    }
+    files
 }
 
 /// What git answers in `dir`, trimmed, or `None` when there is no git, no
@@ -275,6 +295,45 @@ mod tests {
         let before = read(&repo.stamp());
         repo.git(&["commit", "-q", "--allow-empty", "-m", "two"]);
         assert_ne!(read(&repo.stamp()), before);
+    }
+
+    /// Without a log of HEAD, a commit still changes a tracked file, whether
+    /// the branch has a file of its own or is only in `packed-refs`.
+    #[test]
+    fn a_commit_moves_a_tracked_file_where_head_has_no_log() {
+        let repo = Repo::new();
+        repo.git(&["init", "-q", "-b", "main"]);
+        repo.git(&["config", "core.logAllRefUpdates", "false"]);
+        repo.write("Cargo.toml", "[package]\n");
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-q", "-m", "one"]);
+        assert!(!repo.0.join(".git/logs/HEAD").exists());
+        let read = || -> Vec<Vec<u8>> {
+            let stamp = repo.stamp();
+            assert!(stamp.track.len() > 2, "{:?}", stamp.track);
+            stamp
+                .track
+                .iter()
+                .map(|p| std::fs::read(p).unwrap())
+                .collect()
+        };
+        let commit = |text: &str| {
+            repo.write("Cargo.toml", text);
+            repo.git(&["commit", "-qam", "next"]);
+        };
+        let before = read();
+        commit("[package]\n# two\n");
+        assert_ne!(read(), before);
+
+        repo.git(&["pack-refs", "--all"]);
+        assert!(!repo.0.join(".git/refs/heads/main").exists());
+        // The files tracked by a build now, as they are after a commit.
+        let tracked = repo.stamp().track;
+        let contents =
+            || -> Vec<Vec<u8>> { tracked.iter().map(|p| std::fs::read(p).unwrap()).collect() };
+        let before = contents();
+        commit("[package]\n# three\n");
+        assert_ne!(contents(), before);
     }
 
     #[test]

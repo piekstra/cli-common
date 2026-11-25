@@ -438,13 +438,31 @@ fn a_quiet_load_raises_no_dialog_and_caches_the_key_once_granted() {
     );
 }
 
+/// A key with no entries (a sign-out leaves it): the next write reads it, so
+/// a quiet load that said "empty" would send an unattended run into a dialog.
 #[test]
-fn a_quiet_load_reads_nothing_for_an_empty_vault_and_says_when_it_cannot() {
+fn a_quiet_load_of_an_empty_vault_answers_for_the_write_after_it() {
+    let tmp = TempDir::new();
     let keys = AskingKeys::new(Some(&key_item()), Person::Away);
-    let empty = TempDir::new().vault(Arc::clone(&keys));
-    assert_eq!(empty.load_key_quietly().unwrap(), QuietLoad::Empty);
-    assert_eq!(keys.counts(), (0, 0));
+    let vault = tmp.vault(Arc::clone(&keys));
+    assert_eq!(vault.load_key_quietly().unwrap(), QuietLoad::NeedsPerson);
+    assert_eq!(keys.counts(), (0, 1));
+    // Granted, the key is loaded, and the write raises nothing.
+    *keys.granted.lock().unwrap() = true;
+    assert_eq!(vault.load_key_quietly().unwrap(), QuietLoad::Loaded);
+    vault.put("entry", &Secret::new("x")).unwrap();
+    assert_eq!(keys.counts().0, 0);
 
+    // No key either: the write makes one, and asks nobody.
+    let tmp = TempDir::new();
+    let keys = AskingKeys::new(None, Person::Away);
+    let vault = tmp.vault(Arc::clone(&keys));
+    assert_eq!(vault.load_key_quietly().unwrap(), QuietLoad::Empty);
+    assert!(!vault.dir().exists(), "a load creates nothing");
+}
+
+#[test]
+fn a_quiet_load_says_when_the_store_cannot_be_read_quietly() {
     let tmp = TempDir::new();
     let plain = Arc::new(PlainKeys(MemoryKeys::new()));
     tmp.vault(Arc::clone(&plain))
