@@ -49,6 +49,9 @@
 //!   [`Vault::bound_key_reads`] holds every later keychain read of the key
 //!   to a bound the same way, so a key another process replaced while a
 //!   server ran is a timed-out read, not a hang.
+//!   [`Vault::load_key_quietly`] raises no dialog at all and says when one
+//!   is needed, for a run nobody is watching. [`Vault::check_key`] is `auth
+//!   key`, the command that raises it for someone at the screen.
 //!
 //! - **Moving in and resetting.** [`Vault::migrate_from`] moves a CLI's
 //!   old keychain items in, deleting each only once its copy reads back.
@@ -72,11 +75,13 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use pk_cli_core::private_file::{self, Replace};
 use pk_cli_core::CliError;
-use pk_cli_secrets::{CredentialStore, Secret};
+use pk_cli_secrets::{AskedRead, CredentialStore, QuietRead, Secret};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
+
+use crate::key::{self, KeyArgs, KeyCheck};
 
 /// The keychain account holding the vault's key.
 pub const KEY_ACCOUNT: &str = "vault-key";
@@ -108,11 +113,35 @@ pub const KEY_WAIT: Duration = Duration::from_secs(30);
 
 /// Where the vault's key item lives: the keychain, or memory in a test.
 /// Also the store [`Vault::migrate_from`] moves items out of.
+///
+/// A CLI's own store around a [`CredentialStore`] forwards the provided
+/// methods too: their defaults cannot tell whether the keychain asks, so
+/// `auth key` and [`Vault::load_key_quietly`] would not either.
 pub trait KeyStore: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<Secret>, CliError>;
     fn set(&self, account: &str, value: &Secret) -> Result<(), CliError>;
     /// `true` when there was an item to delete.
     fn delete(&self, account: &str) -> Result<bool, CliError>;
+
+    /// [`get`](Self::get), never asking the person anything
+    /// ([`CredentialStore::get_quiet`]).
+    fn get_quiet(&self, _account: &str) -> Result<QuietRead, CliError> {
+        Ok(QuietRead::Unsupported)
+    }
+
+    /// [`get`](Self::get), saying when it was refused
+    /// ([`CredentialStore::get_asking`]).
+    fn get_asking(&self, account: &str) -> Result<AskedRead, CliError> {
+        Ok(match self.get(account)? {
+            Some(item) => AskedRead::Found(item),
+            None => AskedRead::Absent,
+        })
+    }
+
+    /// The keychain service the items are under, to name in a report.
+    fn keychain_service(&self) -> Option<&str> {
+        None
+    }
 }
 
 impl KeyStore for CredentialStore {
@@ -126,6 +155,18 @@ impl KeyStore for CredentialStore {
 
     fn delete(&self, account: &str) -> Result<bool, CliError> {
         CredentialStore::delete(self, account)
+    }
+
+    fn get_quiet(&self, account: &str) -> Result<QuietRead, CliError> {
+        CredentialStore::get_quiet(self, account)
+    }
+
+    fn get_asking(&self, account: &str) -> Result<AskedRead, CliError> {
+        CredentialStore::get_asking(self, account)
+    }
+
+    fn keychain_service(&self) -> Option<&str> {
+        Some(self.service())
     }
 }
 
@@ -177,6 +218,13 @@ impl KeyStore for MemoryKeys {
     fn delete(&self, account: &str) -> Result<bool, CliError> {
         Ok(self.items.lock().unwrap().remove(account).is_some())
     }
+
+    fn get_quiet(&self, account: &str) -> Result<QuietRead, CliError> {
+        Ok(match self.get(account)? {
+            Some(item) => QuietRead::Found(item),
+            None => QuietRead::Absent,
+        })
+    }
 }
 
 impl<K: KeyStore + ?Sized> KeyStore for std::sync::Arc<K> {
@@ -190,6 +238,18 @@ impl<K: KeyStore + ?Sized> KeyStore for std::sync::Arc<K> {
 
     fn delete(&self, account: &str) -> Result<bool, CliError> {
         (**self).delete(account)
+    }
+
+    fn get_quiet(&self, account: &str) -> Result<QuietRead, CliError> {
+        (**self).get_quiet(account)
+    }
+
+    fn get_asking(&self, account: &str) -> Result<AskedRead, CliError> {
+        (**self).get_asking(account)
+    }
+
+    fn keychain_service(&self) -> Option<&str> {
+        (**self).keychain_service()
     }
 }
 
@@ -263,6 +323,25 @@ pub enum KeyLoad {
     /// (exit 3) instead of asking again or blocking, and a later
     /// [`Vault::load_key`] waits on the same read.
     Waiting,
+}
+
+/// What [`Vault::load_key_quietly`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum QuietLoad {
+    /// The key is in this vault's cache: its reads and writes ask the
+    /// keychain nothing more.
+    Loaded,
+    /// No entries: nothing needs the key, and none was read.
+    Empty,
+    /// Entries, but the keychain holds no key; a read reports the lost key.
+    Missing,
+    /// Reading the key needs a person, and no dialog was raised: `auth key`
+    /// run at the screen raises it.
+    NeedsPerson,
+    /// This keychain cannot be read without possibly asking; nothing was
+    /// read. [`Vault::load_key`] bounds a read that may.
+    Unsupported,
 }
 
 /// A bounded key read left to answer in the background, with the vault's
@@ -396,6 +475,51 @@ impl Vault {
             }
             std::thread::sleep(left.min(Duration::from_millis(20)));
         }
+    }
+
+    /// Read the key into this vault's cache without raising a dialog, and
+    /// say when that needs a person ([`CredentialStore::get_quiet`], with its
+    /// note on other threads). For a scheduled or background run, which then
+    /// reports at once instead of raising a dialog nobody is there to
+    /// answer. Reads nothing when the vault has no entries.
+    pub fn load_key_quietly(&self) -> Result<QuietLoad, CliError> {
+        let mut cached = self.key.lock().unwrap();
+        if let Settled::Waiting = self.settle(&mut cached)? {
+            return Ok(QuietLoad::NeedsPerson);
+        }
+        if cached.is_some() {
+            return Ok(QuietLoad::Loaded);
+        }
+        if self.entry_files()?.is_empty() {
+            return Ok(QuietLoad::Empty);
+        }
+        let id = self.current_id()?;
+        Ok(match self.keys.get_quiet(KEY_ACCOUNT)? {
+            QuietRead::Found(item) => {
+                *cached = Some(Cached {
+                    key: parse_key(&item)?,
+                    id,
+                });
+                QuietLoad::Loaded
+            }
+            QuietRead::Absent => QuietLoad::Missing,
+            QuietRead::NeedsPerson => QuietLoad::NeedsPerson,
+            QuietRead::Unsupported => QuietLoad::Unsupported,
+        })
+    }
+
+    /// `auth key`: read the vault's key from the keychain once, past this
+    /// vault's cache and leaving it as it was, and say what the keychain did
+    /// ([`key`](crate::key)). Whether or not there are entries: the point is
+    /// the keychain's answer. A key that is missing while there are entries,
+    /// or is not a key, is the report's failure (exit 1), and with neither
+    /// key nor entries there is none.
+    pub fn check_key(&self, args: &KeyArgs) -> Result<KeyCheck, CliError> {
+        key::check_item(&self.keys, KEY_ACCOUNT, args, |found| match found {
+            Some(item) => parse_key(item).map(drop),
+            None if self.entry_files()?.is_empty() => Ok(()),
+            None => Err(key_lost(&self.dir)),
+        })
     }
 
     /// A keychain read of the key on a thread of its own, holding none of
@@ -994,16 +1118,20 @@ fn unreadable(path: &Path) -> CliError {
 
 /// The vault's key as `keys` holds it, or `None` when it holds none.
 fn read_key_from(keys: &dyn KeyStore) -> KeyRead {
-    let Some(secret) = keys.get(KEY_ACCOUNT)? else {
-        return Ok(None);
-    };
-    let item: KeyItem = serde_json::from_str(secret.expose()).map_err(|_| bad_key())?;
+    keys.get(KEY_ACCOUNT)?
+        .map(|item| parse_key(&item))
+        .transpose()
+}
+
+/// The key a key item holds.
+fn parse_key(item: &Secret) -> Result<Key, CliError> {
+    let item: KeyItem = serde_json::from_str(item.expose()).map_err(|_| bad_key())?;
     if item.format != KEY_FORMAT {
         return Err(bad_key());
     }
     let mut key: Key = Zeroizing::new([0u8; 32]);
     unhex(&item.key, key.as_mut()).ok_or_else(bad_key)?;
-    Ok(Some(key))
+    Ok(key)
 }
 
 fn waiting_for_keychain() -> CliError {

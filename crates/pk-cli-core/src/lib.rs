@@ -10,6 +10,7 @@
 
 pub mod args;
 mod block_on;
+pub mod buildinfo;
 pub mod confirm;
 pub mod dates;
 pub mod error;
@@ -23,6 +24,11 @@ pub mod transport;
 
 pub use args::CommonArgs;
 pub use block_on::block_on;
+pub use buildinfo::BuildInfo;
 pub use error::{CliError, Reason};
 pub use list::{ListWarning, Paged, RangeArgs};
 pub use money::Money;
+
+/// What [`build_info!`] expands to; not for a CLI to call.
+#[doc(hidden)]
+pub use pk_cli_buildinfo::stamp as __build_stamp;

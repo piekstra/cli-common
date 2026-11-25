@@ -4,6 +4,7 @@
 //! its own credential verification; this crate owns the shapes so drivers can
 //! treat every CLI identically.
 
+pub mod key;
 pub mod oauth;
 pub mod otp;
 pub mod reauth;
@@ -15,6 +16,7 @@ use pk_cli_core::output;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use key::{KeyArgs, KeyCheck};
 pub use pk_cli_secrets::SecretSourceArgs;
 
 /// How a CLI authenticates to its provider.

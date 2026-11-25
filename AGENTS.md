@@ -91,7 +91,10 @@ endef
 
 Verify with `codesign -dv $(which <bin>)`: you want the stable
 `pk-cli-codesign` signature, not `Signature=adhoc`. Every new binary prompts
-once per keychain item it reads, as the signing section above explains.
+once per keychain item it reads, as the signing section above explains. A
+CLI's `auth key` (DESIGN.md §1.4) is the first call after an install: it reads
+the key and says whether macOS asked, and `auth key --no-dialog` says whether
+it would ask without raising the dialog, so it is safe when nobody is there.
 
 `install` passes `--locked`. Without it `cargo install` ignores Cargo.lock and
 resolves dependencies afresh, so the installed binary is built from newer

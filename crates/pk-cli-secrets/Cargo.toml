@@ -21,6 +21,10 @@ zeroize = { workspace = true }
 # Linux Secret Service with pure-Rust crypto).
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { workspace = true, features = ["apple-native"] }
+# The reads that say whether macOS asked, and the running binary's signature:
+# the same crates keyring's macOS backend uses, already in the lockfile.
+security-framework = "3"
+core-foundation = "0.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { workspace = true, features = ["windows-native"] }

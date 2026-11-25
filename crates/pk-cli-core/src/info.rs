@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::BuildInfo;
+
 pub const SPEC: &str = "piekstra-cli/1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +21,10 @@ pub struct CliInfo {
     /// `utility/v1`. Additive: absent for CLIs that predate profiles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<String>,
+    /// What this binary was built from ([`build_info!`](crate::build_info)).
+    /// Additive: absent for a CLI that does not stamp its builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,12 +53,19 @@ impl CliInfo {
             auth,
             capabilities: capabilities.iter().map(|s| s.to_string()).collect(),
             profiles: Vec::new(),
+            build: None,
         }
     }
 
     /// Declare domain-profile conformance (e.g. `utility/v1`).
     pub fn with_profiles(mut self, profiles: &[&str]) -> Self {
         self.profiles = profiles.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    /// Say what the binary was built from: `pk_cli_core::build_info!()`.
+    pub fn with_build(mut self, build: BuildInfo) -> Self {
+        self.build = Some(build);
         self
     }
 }
@@ -81,6 +94,39 @@ mod tests {
         assert!(v["auth"].get("login_hint").is_none());
         // profiles is omitted entirely when empty (additive within v1)
         assert!(v.get("profiles").is_none());
+        // as is build, by a CLI that does not stamp its builds
+        assert!(v.get("build").is_none());
+        let read: CliInfo = serde_json::from_value(v).unwrap();
+        assert!(read.build.is_none());
+    }
+
+    #[test]
+    fn info_says_what_the_binary_was_built_from() {
+        let info = CliInfo::new(
+            "demo",
+            "0.1.0",
+            "https://github.com/piekstra/demo",
+            AuthInfo {
+                required: false,
+                method: "none".into(),
+                login_hint: None,
+            },
+            &[],
+        )
+        .with_build(BuildInfo::new(
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            Some(false),
+            1_700_000_000,
+        ));
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            v["build"],
+            serde_json::json!({
+                "commit": "0123456789abcdef0123456789abcdef01234567",
+                "dirty": false,
+                "built_at": "2023-11-14T22:13:20Z",
+            })
+        );
     }
 
     #[test]

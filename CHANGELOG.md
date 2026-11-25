@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.39.0 — 2026-11-24
+
+- `pk-cli-auth`: `auth key` (`auth-key/v1`), the one command sure to read the keychain. A command
+  that answers from a cache, or finds nothing stored, exits 0 having read nothing, so it does not
+  show whether a newly installed binary may read its key. `Vault::check_key(&KeyArgs)` reads the
+  vault's key past the vault's cache and reports whether it was read, the source (`keychain` or
+  `none`), the outcome, whether a dialog was needed, what the answer allows (`always` or `once`),
+  the elapsed milliseconds and the running binary's signature (`kind`, certificate name,
+  identifier, team ID, `cdhash`). A refused read is exit 3. At most one read may raise a dialog,
+  and it is never tried again. `--no-dialog` raises none and is exit 3 when one would be needed;
+  `--wait <SECONDS>` bounds the wait for an answer. A failure is the same one JSON document with
+  the `error` object in it. `key::check_item` does it for a CLI with a keychain item and no vault.
+  macOS does not report which button was clicked. It lets the binary read again without asking
+  only after Always Allow, so a second read with interaction turned off tells the two apart.
+- `pk-cli-auth`: `Vault::load_key_quietly` loads the key without ever raising a dialog and answers
+  `QuietLoad::NeedsPerson` when one is needed, for a scheduled or background run.
+- `pk-cli-secrets`: `CredentialStore::get_quiet` (a read that may not ask; on macOS through
+  `SecKeychainSetUserInteractionAllowed`), `get_asking` (a read that may, with a refusal told from
+  a failure) and `signing::running_binary`. On macOS the crate now names `security-framework` 3 and
+  `core-foundation` 0.10, both already in the tree through `keyring`.
+- `pk_cli_auth::vault::KeyStore` gains `get_quiet`, `get_asking` and `keychain_service` with
+  defaults. A CLI's own store around a `CredentialStore` compiles as it is, and forwards the three
+  for `auth key` to say whether macOS asked.
+- `pk-cli-core`: what a binary was built from. `#[command(version, long_version =
+  pk_cli_core::version!())]` makes `--version` print `svc 0.4.0 (0123456789ab, built
+  2026-11-24T21:00:00Z)`, with `modified` after the commit for a tree with local changes (`-V` is
+  still the version alone), and `CliInfo::with_build(pk_cli_core::build_info!())` adds `build`
+  (`commit`, `dirty`, `built_at`) to `cli-info/v1`. The stamp is taken in the CLI's own compile by
+  a new proc-macro crate, `pk-cli-buildinfo`, with no dependencies. A commit, a checkout or a pull
+  recompiles the crate that holds it. Where no git repository tracks the crate, the commit is
+  unknown and said so.
+- `CliInfo` gains a public `build` field; code that builds the struct by hand adds `build: None`.
+
 ## v0.38.0 — 2026-11-24
 
 - `pk-cli-aura`, new: a Salesforce Experience Cloud site read the way its own pages read it,

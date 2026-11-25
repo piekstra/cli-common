@@ -9,6 +9,10 @@
 //!
 //! Secrets never appear in `Debug`/`Display` output and are zeroized on drop.
 //!
+//! [`ask`] reads an item without ever raising a dialog, or says that it was
+//! the person who refused; [`signing`] is the running binary's signature,
+//! which decides whether macOS asks.
+//!
 //! # One keychain item per credential set
 //!
 //! On macOS, every keychain item a freshly built binary reads is a permission
@@ -31,12 +35,16 @@
 //! at runtime through a [`SecretResolver`], which walks env, keychain and
 //! 1Password in a configurable [`SourceOrder`] ([`resolve`]).
 
+pub mod ask;
 pub mod op;
 pub mod resolve;
+pub mod signing;
 mod split;
 
+pub use ask::{AskedRead, QuietRead};
 pub use op::{OnePassword, OpArgs, OpRef};
 pub use resolve::{KeychainRead, Resolved, SecretResolver, SecretSpec, SourceKind, SourceOrder};
+pub use signing::{Signing, SigningKind};
 
 use std::fmt;
 use std::io::Read;
