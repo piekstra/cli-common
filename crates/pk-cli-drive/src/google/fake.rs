@@ -5,7 +5,8 @@
 //! `files.list` (the query forms the backend sends: `name`, `in parents`,
 //! `trashed`, `mimeType`, with `and`, `or` and parentheses; paged), metadata,
 //! `alt=media` with `Range`, folder and metadata creates, `PATCH` (rename,
-//! move, trash), multipart, media and resumable uploads, `about`, the token
+//! move, trash), multipart, media and resumable uploads, `permissions.list`
+//! (grants reach what a folder holds), `about`, the token
 //! endpoint (authorization code with PKCE S256, and refresh), revoke, and
 //! an authorization endpoint that approves at once.
 //!
@@ -77,6 +78,36 @@ impl FakeFile {
     }
 }
 
+/// A grant on one item, as a test adds it ([`FakeDrive::share`]).
+#[derive(Debug, Clone)]
+struct FakeGrant {
+    id: String,
+    kind: String,
+    role: String,
+    /// The email (`user`, `group`) or the domain (`domain`).
+    who: Option<String>,
+    discoverable: Option<bool>,
+    view: Option<String>,
+}
+
+/// One grant as it reaches an item.
+struct Reached {
+    grant: FakeGrant,
+    direct: bool,
+    from: Option<String>,
+}
+
+fn role_rank(role: &str) -> u8 {
+    match role {
+        "owner" => 6,
+        "organizer" => 5,
+        "fileOrganizer" => 4,
+        "writer" => 3,
+        "commenter" => 2,
+        _ => 1,
+    }
+}
+
 /// When a queued fault answers: before the request does anything, or after
 /// it took effect (a timeout or a 5xx that hides a success).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +160,20 @@ struct State {
     corrupt_md5: usize,
     /// Files whose next download comes with one byte changed.
     damaged: std::collections::HashSet<String>,
+    /// Grants on items, by item id; the account's own ownership is implied.
+    grants: HashMap<String, Vec<FakeGrant>>,
+    /// Items that list no inherited grants (`inheritedPermissionsDisabled`).
+    limited: std::collections::HashSet<String>,
+    /// Items this sign-in may not share.
+    no_share: std::collections::HashSet<String>,
+    /// Items owned by another account.
+    others: std::collections::HashSet<String>,
+    /// Items whose metadata names no parent.
+    hidden_parents: std::collections::HashSet<String>,
+    /// Items whose grants Drive refuses to list.
+    unlistable: std::collections::HashSet<String>,
+    /// Whether a grant carries `permissionDetails`.
+    grant_details: bool,
     /// How long each Drive request waits before it is answered.
     latency: std::time::Duration,
     in_flight: usize,
@@ -192,6 +237,13 @@ impl FakeDrive {
             foreign_sessions: false,
             corrupt_md5: 0,
             damaged: std::collections::HashSet::new(),
+            grants: HashMap::new(),
+            limited: Default::default(),
+            no_share: Default::default(),
+            others: Default::default(),
+            hidden_parents: Default::default(),
+            unlistable: Default::default(),
+            grant_details: false,
             latency: std::time::Duration::ZERO,
             in_flight: 0,
             peak_in_flight: 0,
@@ -411,6 +463,88 @@ impl FakeDrive {
         }
     }
 
+    /// Give a grant on the item `id`; its id. `kind` is `user`, `group`,
+    /// `domain` or `anyone`, `who` the email or domain (ignored for `anyone`).
+    /// Grants on a folder reach everything in it. A grant's id depends only
+    /// on `kind` and `who`, as Drive's does.
+    pub fn share(&self, id: &str, kind: &str, role: &str, who: &str) -> String {
+        let grant = FakeGrant {
+            id: grant_id(kind, who),
+            kind: kind.into(),
+            role: role.into(),
+            who: (kind != "anyone").then(|| who.to_string()),
+            discoverable: matches!(kind, "domain" | "anyone").then_some(false),
+            view: None,
+        };
+        let gid = grant.id.clone();
+        self.state()
+            .grants
+            .entry(id.to_string())
+            .or_default()
+            .push(grant);
+        gid
+    }
+
+    /// Let a grant on the item `id`, given by [`share`](Self::share) with the
+    /// same `kind` and `who`, show up in search.
+    pub fn discoverable(&self, id: &str, kind: &str, who: &str) {
+        let gid = grant_id(kind, who);
+        if let Some(list) = self.state().grants.get_mut(id) {
+            for g in list.iter_mut().filter(|g| g.id == gid) {
+                g.discoverable = Some(true);
+            }
+        }
+    }
+
+    /// Make a grant on a limited folder a `metadata` view entry, as Drive
+    /// does for the people the folder above is shared with.
+    pub fn view_only(&self, id: &str, email: &str) {
+        let gid = grant_id("user", email);
+        self.state()
+            .grants
+            .entry(id.to_string())
+            .or_default()
+            .push(FakeGrant {
+                id: gid,
+                kind: "user".into(),
+                role: "reader".into(),
+                who: Some(email.into()),
+                discoverable: None,
+                view: Some("metadata".into()),
+            });
+    }
+
+    /// Turn off inherited grants on the item `id` (limited access).
+    pub fn limit_access(&self, id: &str) {
+        self.state().limited.insert(id.to_string());
+    }
+
+    /// This sign-in may not share the item `id`.
+    pub fn may_not_share(&self, id: &str) {
+        self.state().no_share.insert(id.to_string());
+    }
+
+    /// Another account owns the item `id`.
+    pub fn owned_by_another(&self, id: &str) {
+        self.state().others.insert(id.to_string());
+    }
+
+    /// Drive names no parent for the item `id` (an item shared with the
+    /// account, or one whose folder this sign-in cannot see).
+    pub fn hide_parent(&self, id: &str) {
+        self.state().hidden_parents.insert(id.to_string());
+    }
+
+    /// Refuse to list who may open the item `id` (403).
+    pub fn unlistable(&self, id: &str) {
+        self.state().unlistable.insert(id.to_string());
+    }
+
+    /// Answer `permissions.list` with `permissionDetails`.
+    pub fn grant_details(&self) {
+        self.state().grant_details = true;
+    }
+
     /// Move the item `id` to the trash, as another app might.
     pub fn trash(&self, id: &str) {
         if let Some(f) = self.state().files.get_mut(id) {
@@ -491,6 +625,66 @@ impl FakeDrive {
     pub fn is_trashed(&self, id: &str) -> bool {
         self.state().files.get(id).is_some_and(|f| f.trashed)
     }
+}
+
+fn grant_id(kind: &str, who: &str) -> String {
+    let digest = hex(&Md5::digest(format!("{kind}:{who}").as_bytes()));
+    format!("perm{}", &digest[..12])
+}
+
+/// The grants that reach the item `id`: its own, its owner's, and those of
+/// the folders above it unless it has limited access.
+fn reached(s: &State, id: &str) -> Vec<Reached> {
+    let mut out: Vec<Reached> = Vec::new();
+    let owner = if s.others.contains(id) {
+        "owner@example.test".to_string()
+    } else {
+        s.email.clone()
+    };
+    out.push(Reached {
+        grant: FakeGrant {
+            id: grant_id("user", &owner),
+            kind: "user".into(),
+            role: "owner".into(),
+            who: Some(owner),
+            discoverable: None,
+            view: None,
+        },
+        direct: true,
+        from: None,
+    });
+    for g in s.grants.get(id).into_iter().flatten() {
+        out.push(Reached {
+            grant: g.clone(),
+            direct: true,
+            from: None,
+        });
+    }
+    let parent = s.files.get(id).and_then(|f| f.parents.first()).cloned();
+    let above = parent.filter(|_| !s.limited.contains(id));
+    if let Some(parent) = above {
+        for r in reached(s, &parent) {
+            if r.grant.role == "owner" || r.grant.view.is_some() {
+                continue;
+            }
+            match out.iter_mut().find(|o| o.grant.id == r.grant.id) {
+                Some(mine) => {
+                    if role_rank(&r.grant.role) > role_rank(&mine.grant.role) {
+                        mine.grant.role = r.grant.role;
+                    }
+                    if mine.from.is_none() {
+                        mine.from = Some(parent.clone());
+                    }
+                }
+                None => out.push(Reached {
+                    grant: r.grant,
+                    direct: false,
+                    from: Some(parent.clone()),
+                }),
+            }
+        }
+    }
+    out
 }
 
 impl Drop for FakeDrive {
@@ -841,6 +1035,15 @@ fn route(req: &Request, addr: SocketAddr, s: &mut State) -> Response {
             _ => Response::error(405, "badMethod", "method"),
         };
     }
+    if let Some(id) = path
+        .strip_prefix("/drive/v3/files/")
+        .and_then(|rest| rest.strip_suffix("/permissions"))
+    {
+        return match req.method.as_str() {
+            "GET" => permissions(req, s, id),
+            _ => Response::error(405, "badMethod", "method"),
+        };
+    }
     if let Some(id) = path.strip_prefix("/drive/v3/files/") {
         // `root` is My Drive's alias wherever a file id goes. Drive answers
         // it with My Drive's own id, which is also what its children name
@@ -852,7 +1055,9 @@ fn route(req: &Request, addr: SocketAddr, s: &mut State) -> Response {
                 }
                 "GET" => Response::json(
                     200,
-                    json!({"id": MY_DRIVE, "name": "My Drive", "mimeType": FOLDER_MIME}),
+                    json!({"id": MY_DRIVE, "name": "My Drive", "mimeType": FOLDER_MIME,
+                        "trashed": false, "ownedByMe": true, "shared": false,
+                        "capabilities": {"canShare": false}}),
                 ),
                 _ => Response::error(403, "insufficientFilePermissions", "My Drive"),
             };
@@ -867,7 +1072,7 @@ fn route(req: &Request, addr: SocketAddr, s: &mut State) -> Response {
         };
         return match req.method.as_str() {
             "GET" if req.param("alt") == Some("media") => media(req, &file),
-            "GET" => Response::json(200, file.to_json()),
+            "GET" => Response::json(200, details(s, &file)),
             "PATCH" => {
                 let meta: Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
                 let tick = s.tick();
@@ -903,6 +1108,103 @@ fn route(req: &Request, addr: SocketAddr, s: &mut State) -> Response {
         };
     }
     Response::error(404, "notFound", "no such endpoint")
+}
+
+/// A file's metadata, with the fields a metadata read adds to a listing's.
+fn details(s: &State, f: &FakeFile) -> Value {
+    let mut v = f.to_json();
+    let shared = reached(s, &f.id).len() > 1;
+    let mine = !s.others.contains(&f.id);
+    v["trashed"] = json!(f.trashed);
+    v["ownedByMe"] = json!(mine);
+    v["shared"] = json!(shared);
+    v["capabilities"] = json!({"canShare": mine && !s.no_share.contains(&f.id)});
+    if s.limited.contains(&f.id) {
+        v["inheritedPermissionsDisabled"] = json!(true);
+    }
+    if s.hidden_parents.contains(&f.id) {
+        if let Some(o) = v.as_object_mut() {
+            o.remove("parents");
+        }
+    }
+    v
+}
+
+/// Who may open the item `id`: one grant per grantee, with details when
+/// asked of the fake.
+fn permissions(req: &Request, s: &State, id: &str) -> Response {
+    let id = if id == "root" { MY_DRIVE } else { id };
+    if id != MY_DRIVE && !s.files.get(id).is_some_and(|f| !f.trashed) {
+        return Response::error(404, "notFound", &format!("File not found: {id}."));
+    }
+    if s.unlistable.contains(id) {
+        return Response::error(
+            403,
+            "insufficientFilePermissions",
+            "The user does not have sufficient permissions for this file.",
+        );
+    }
+    let all: Vec<Value> = if id == MY_DRIVE {
+        vec![grant_json(
+            s,
+            &Reached {
+                grant: FakeGrant {
+                    id: grant_id("user", &s.email),
+                    kind: "user".into(),
+                    role: "owner".into(),
+                    who: Some(s.email.clone()),
+                    discoverable: None,
+                    view: None,
+                },
+                direct: true,
+                from: None,
+            },
+        )]
+    } else {
+        reached(s, id).iter().map(|r| grant_json(s, r)).collect()
+    };
+    let size = req
+        .param("pageSize")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100)
+        .min(s.page_size);
+    let start = req
+        .param("pageToken")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut answer = json!({"permissions": all.iter().skip(start).take(size).collect::<Vec<_>>()});
+    if start + size < all.len() {
+        answer["nextPageToken"] = json!((start + size).to_string());
+    }
+    Response::json(200, answer)
+}
+
+fn grant_json(s: &State, r: &Reached) -> Value {
+    let g = &r.grant;
+    let mut v = json!({"id": g.id, "type": g.kind, "role": g.role, "kind": "drive#permission"});
+    match (g.kind.as_str(), &g.who) {
+        ("domain", Some(d)) => v["domain"] = json!(d),
+        ("user" | "group", Some(e)) => v["emailAddress"] = json!(e),
+        _ => {}
+    }
+    if let Some(d) = g.discoverable {
+        v["allowFileDiscovery"] = json!(d);
+    }
+    if let Some(view) = &g.view {
+        v["view"] = json!(view);
+    }
+    if s.grant_details {
+        let mut details = Vec::new();
+        if r.direct {
+            details.push(json!({"permissionType": "file", "role": g.role, "inherited": false}));
+        }
+        if let Some(from) = &r.from {
+            details.push(json!({"permissionType": "file", "role": g.role,
+                "inherited": true, "inheritedFrom": from}));
+        }
+        v["permissionDetails"] = json!(details);
+    }
+    v
 }
 
 fn media(req: &Request, f: &FakeFile) -> Response {

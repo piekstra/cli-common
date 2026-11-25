@@ -33,6 +33,30 @@
   unknown and said so.
 - `CliInfo` gains a public `build` field; code that builds the struct by hand adds `build: None`.
 
+## v0.38.1 — 2026-11-24
+
+- `pk-cli-drive`: `Drive::details(rel)` reads one item beyond a listing: its id, name, kind, the
+  Drive id of the folder that holds it (`None` where Drive names none this sign-in can see), size,
+  modified time, md5, whether it is trashed, owned by the account and shared, and whether the
+  account may share it. The empty path is the item the spec's id names, so any file or folder can be read
+  by its id. `Drive::permissions(rel)` adds everyone who may open the item: `Permission` has the
+  type, the role, the email or domain, whether it shows in search, an expiry, and whether it is
+  inherited from a folder above (and which), given on the item, or not known. The answer is Drive's
+  `permissionDetails` where it gives them, and otherwise the folder above's grants, one request
+  more; `inherited` is `None` where the folder above is out of the sign-in's sight.
+  `Sharing` is the item and its grants; `Permission::by_link` tells link sharing (`anyone`,
+  `domain`) apart. Both read only. A caller Drive will not list grants for gets exit 3, reason
+  `permissions_hidden`.
+- `pk-cli-drive`: `ListedItem` gains a `parent` field, the Drive id of the folder the item is
+  listed in (for a followed shortcut, the folder holding the shortcut). Code that builds the struct by
+  hand adds it; a reader needs no change. It and the new `ItemDetails`, `Permission` and `Sharing` are
+  `#[non_exhaustive]`, so a later field adds nothing to fix; no CLI in the family builds `ListedItem`.
+- `pk-cli-drive` (feature `fake-google`): the fake server answers `permissions.list` and gives each
+  file's metadata `ownedByMe`, `shared`, `capabilities.canShare` and `inheritedPermissionsDisabled`.
+  Grants on a folder reach what it holds. `FakeDrive::share`, `discoverable`, `view_only`,
+  `limit_access`, `may_not_share`, `owned_by_another`, `hide_parent`, `unlistable` and
+  `grant_details` set up what a test needs.
+
 ## v0.38.0 — 2026-11-24
 
 - `pk-cli-aura`, new: a Salesforce Experience Cloud site read the way its own pages read it,

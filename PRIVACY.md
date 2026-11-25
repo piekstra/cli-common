@@ -9,6 +9,10 @@ through their OAuth client. On Google's consent screen that client is named
 
 - **Google Drive files and folders**, at the scope shown on the consent screen:
   only the files the tool made (`drive.file`), or your whole Drive (`drive`).
+- **Who a file or folder is shared with**, when you run a command that asks: the
+  email addresses of people and groups, the domains, the roles and expiry dates
+  of their access, for the item and for the folder that holds it. The crate does
+  not store them; they go only to the output of that command.
 - **Your Google account's email address and Drive storage quota**, to show
   which account a sign-in belongs to and how much space is free.
 

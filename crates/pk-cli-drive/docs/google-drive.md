@@ -173,6 +173,8 @@ prints, caches and hands a background refresh the same text. Under full
 | Deletes | To Drive's trash (recoverable for 30 days). `delete_file` trashes a file. `trash_empty_folder` trashes an empty folder, and refuses one holding anything outside the trash (exit 2, reason `not_empty`), the store's own folder, and a shortcut (reason `shortcut`) |
 | Moves | One `files.update` with `addParents`/`removeParents`. A clobbering move renames first and only then trashes the old destination, so a failure between leaves two files of the name (an error naming both), never none; `move_no_clobber` refuses an occupied one with exit 2 (reason `occupied`) |
 | Retries | 429, a 403 with reason `rateLimitExceeded` or `userRateLimitExceeded`, and 5xx, with exponential backoff and jitter (1 s doubling to 32 s, 7 attempts), honouring `Retry-After` in seconds or as a date. A 5xx or lost answer to a create is not blindly retried: the folder is looked up again, or the new file found by name and md5. A file of that name with other bytes is another writer's: the upload stops with reason `duplicate_name` and replaces nothing. A resumable piece that keeps failing for a reason that may pass resumes from what the session holds; a refusal (auth, a full Drive, an expired session) stops at once |
+| One item's metadata | `Drive::details(rel)` reads an item (a folder, a file, or by the spec's own id any item): id, name, kind, its parent's id, size, modified time, md5, whether it is in the trash, owned by the account, shared, and whether the account may share it (`capabilities.canShare`). The parent is `None` when Drive names none this sign-in can see: My Drive itself, and often an item shared with the account. `list_items` names the folder each item is listed in (for a followed shortcut, the one holding the shortcut) |
+| Who may open an item | `Drive::permissions(rel)` lists the grants (`Permission`: type, role, email or domain, whether it shows in search, expiry) with the item's details. Read only. A grant's `inherited` is Drive's own answer (`permissionDetails`) where it gives one. Otherwise it is worked out from the folder above's grants, one more request: a grant the folder above also holds, at the same role or higher, reaches the item from it. A grant with a higher role on the item, the owner's, and every grant on an item with limited access (`inheritedPermissionsDisabled`) are on the item itself; a `view: metadata` grant of a limited-access folder is from above, and gives no one its content. Where the folder above is not visible to the sign-in, `inherited` is `None`. An item whose grants Drive will not list is exit 3 with reason `permissions_hidden`, and `can_share` in its details says why. See [Sharing and parents](#sharing-and-parents) |
 | Refusals | A full Drive is exit 5 with reason `drive_storage_full`; a scope or permission refusal exit 3; a missing file exit 4 |
 | Tokens | Renewed under the CLI's refresh lock, so two processes never spend one refresh twice; a 401 renews once and retries |
 | Bounds | `with_budget` caps every request of the store to the time left, as the cache's background refresh needs |
@@ -268,6 +270,34 @@ owner's web app, a Web client of the same project, reads that folder under
 project: `logout --revoke` in one CLI signs the owner out of the others
 and of the web app, on every machine. Plain `logout` removes only this
 machine's tokens.
+
+## Sharing and parents
+
+What Google documents, and what is not yet tried against a real account:
+
+- **The scopes.** The v3 discovery document (revision 20261117) lists
+  `drive.file` among the scopes `files.get` and `permissions.list` accept, as
+  it does `drive` and `drive.readonly`. It does not say which grants an
+  app sees on a file it did not create. An item the app may not see is a 404
+  under any of them, so exit 4.
+- **`parents`.** Drive documents one parent folder per file. It does not say
+  when a `drive.file` sign-in, or an item shared with the account, gets an
+  empty `parents`. `details` reports the parent Drive names and `None`
+  otherwise, so a folder is another's parent only where Drive says so.
+- **`permissions.list`.** Drive does not say whether a caller who may not
+  change an item's sharing gets the list or a refusal, only that
+  `files.permissions` "is only available if the requesting user can share the
+  file". `Drive::permissions` reports the refusal as `permissions_hidden` and
+  never an empty list.
+- **Inherited or direct.** `permissionDetails.inherited` is "always populated",
+  but `inheritedFrom` "is only populated for items in shared drives", and the
+  guide's example is a shared drive. So a My Drive answer may carry
+  no details, and the comparison with the folder above covers that case. Drive
+  documents that a folder's grants reach everything in it and cannot be
+  reduced below it.
+- **Link sharing.** A grant of type `anyone` is anyone with the link; one of
+  type `domain` is anyone in that domain with it. `allowFileDiscovery` says
+  whether the item also appears in search for them.
 
 ## Tests
 
