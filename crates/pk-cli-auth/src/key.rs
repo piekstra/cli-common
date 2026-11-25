@@ -202,12 +202,12 @@ impl KeyCheck {
 }
 
 /// How a read ended, with what it gave.
-enum Answer {
+enum End {
     Found(Secret),
     Absent,
     Refused(i32),
     NeedsDialog,
-    NoAnswer(u64),
+    Unanswered(u64),
     Failed(CliError),
 }
 
@@ -229,9 +229,9 @@ pub fn check_item(
     let started = Instant::now();
     let (answer, dialog_needed) =
         match keys.get_quiet(account) {
-            Ok(QuietRead::Found(item)) => (Answer::Found(item), Some(false)),
-            Ok(QuietRead::Absent) => (Answer::Absent, Some(false)),
-            Ok(QuietRead::NeedsPerson) if args.no_dialog => (Answer::NeedsDialog, Some(true)),
+            Ok(QuietRead::Found(item)) => (End::Found(item), Some(false)),
+            Ok(QuietRead::Absent) => (End::Absent, Some(false)),
+            Ok(QuietRead::NeedsPerson) if args.no_dialog => (End::NeedsDialog, Some(true)),
             Ok(QuietRead::NeedsPerson) => (ask(keys, account, args.wait), Some(true)),
             Ok(QuietRead::Unsupported) if args.no_dialog => return Err(CliError::Usage(
                 "--no-dialog needs a keychain that can be read without possibly asking; this one \
@@ -239,12 +239,12 @@ pub fn check_item(
                     .into(),
             )),
             Ok(QuietRead::Unsupported) => (ask(keys, account, args.wait), None),
-            Err(e) => (Answer::Failed(e), None),
+            Err(e) => (End::Failed(e), None),
         };
     let elapsed = started.elapsed();
     let grant = match (&answer, dialog_needed) {
-        (Answer::Found(_), Some(false)) => Some(KeyGrant::Always),
-        (Answer::Found(_), Some(true)) => match keys.get_quiet(account) {
+        (End::Found(_), Some(false)) => Some(KeyGrant::Always),
+        (End::Found(_), Some(true)) => match keys.get_quiet(account) {
             Ok(QuietRead::Found(_)) => Some(KeyGrant::Always),
             Ok(QuietRead::NeedsPerson) => Some(KeyGrant::Once),
             _ => None,
@@ -252,12 +252,12 @@ pub fn check_item(
         _ => None,
     };
     let (outcome, failure) = match answer {
-        Answer::Found(item) => (KeyOutcome::Read, judge(Some(&item)).err()),
-        Answer::Absent => (KeyOutcome::Absent, judge(None).err()),
-        Answer::Refused(status) => (KeyOutcome::Refused, Some(refused(status))),
-        Answer::NeedsDialog => (KeyOutcome::NeedsDialog, Some(needs_dialog())),
-        Answer::NoAnswer(secs) => (KeyOutcome::NoAnswer, Some(no_answer(secs))),
-        Answer::Failed(e) => (KeyOutcome::Failed, Some(e)),
+        End::Found(item) => (KeyOutcome::Read, judge(Some(&item)).err()),
+        End::Absent => (KeyOutcome::Absent, judge(None).err()),
+        End::Refused(status) => (KeyOutcome::Refused, Some(refused(status))),
+        End::NeedsDialog => (KeyOutcome::NeedsDialog, Some(needs_dialog())),
+        End::Unanswered(secs) => (KeyOutcome::NoAnswer, Some(no_answer(secs))),
+        End::Failed(e) => (KeyOutcome::Failed, Some(e)),
     };
     let read = outcome == KeyOutcome::Read;
     Ok(KeyCheck {
@@ -282,7 +282,7 @@ pub fn check_item(
 /// The one read that may raise a dialog, waiting for it at most `wait`
 /// seconds. One left unanswered goes on in the background until the process
 /// ends.
-fn ask(keys: &Arc<dyn KeyStore>, account: &str, wait: Option<u64>) -> Answer {
+fn ask(keys: &Arc<dyn KeyStore>, account: &str, wait: Option<u64>) -> End {
     let answered = match wait {
         None => keys.get_asking(account),
         Some(secs) => {
@@ -293,7 +293,7 @@ fn ask(keys: &Arc<dyn KeyStore>, account: &str, wait: Option<u64>) -> Answer {
             });
             match rx.recv_timeout(Duration::from_secs(secs)) {
                 Ok(answered) => answered,
-                Err(mpsc::RecvTimeoutError::Timeout) => return Answer::NoAnswer(secs),
+                Err(mpsc::RecvTimeoutError::Timeout) => return End::Unanswered(secs),
                 Err(mpsc::RecvTimeoutError::Disconnected) => Err(CliError::Keychain(
                     "the keychain read ended without an answer".into(),
                 )),
@@ -301,10 +301,10 @@ fn ask(keys: &Arc<dyn KeyStore>, account: &str, wait: Option<u64>) -> Answer {
         }
     };
     match answered {
-        Ok(AskedRead::Found(item)) => Answer::Found(item),
-        Ok(AskedRead::Absent) => Answer::Absent,
-        Ok(AskedRead::Refused { status }) => Answer::Refused(status),
-        Err(e) => Answer::Failed(e),
+        Ok(AskedRead::Found(item)) => End::Found(item),
+        Ok(AskedRead::Absent) => End::Absent,
+        Ok(AskedRead::Refused { status }) => End::Refused(status),
+        Err(e) => End::Failed(e),
     }
 }
 
