@@ -24,8 +24,8 @@ pub struct ItemDetails {
     pub name: String,
     pub kind: ItemKind,
     /// The Drive id of the folder that holds it. `None` when Drive names
-    /// none this sign-in can see: My Drive itself, and often an item shared
-    /// with the account.
+    /// none this sign-in can see, as for My Drive itself. An item shared with
+    /// the account may have none.
     pub parent: Option<String>,
     pub size: Option<u64>,
     /// Unix seconds.
