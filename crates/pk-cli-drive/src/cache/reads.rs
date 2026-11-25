@@ -18,7 +18,8 @@ pub struct Reads {
     pub stale: usize,
     /// Of `cache`: from a copy that stood in for a remote that failed.
     pub unreachable: usize,
-    /// Answered by the remote. A file that is not there counts.
+    /// Answered by the remote. No file there is an answer to a file read and
+    /// to `exists`; a download of a missing file fails, so it does not count.
     pub remote: usize,
     /// How old the oldest copy in `cache` was when it was served: the time
     /// since this machine fetched or wrote it. `None` when `cache` is 0, or

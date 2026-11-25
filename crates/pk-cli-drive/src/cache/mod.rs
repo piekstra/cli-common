@@ -301,8 +301,9 @@ impl<R: RemoteRead> CachedRemote<R> {
     /// Where this handle's answers came from so far: what
     /// [`cat`](Self::cat), [`list_entries`](Self::list_entries),
     /// [`exists`](Self::exists) and [`crate::Backend::local_copy`] answered.
-    /// Not counted: the forced refreshes below, the re-reads a write makes
-    /// ([`is_stale_write_refusal`]), and what a caller reads through
+    /// Not counted: the forced refreshes below, what a write reads for itself
+    /// (the re-reads behind [`is_stale_write_refusal`], and the check
+    /// [`crate::Backend::ensure_dir`] makes), and what a caller reads through
     /// [`remote`](Self::remote) itself.
     pub fn reads(&self) -> Reads {
         self.tally.reads()
@@ -490,15 +491,30 @@ impl<R: RemoteStore> CachedRemote<R> {
     /// A fresh cached copy proves existence; otherwise ask the remote directly
     /// (always correct — never cached as a negative).
     pub fn exists(&self, rel: &str) -> Result<bool, CliError> {
-        if !self.policy.bypass_reads {
-            if let Some((_, age)) = self.cache.file(rel) {
-                if self.freshness(age) == Freshness::Fresh {
-                    self.served(age, false);
-                    return Ok(true);
-                }
-            }
+        if let Some(age) = self.fresh_copy(rel) {
+            self.served(Some(age), false);
+            return Ok(true);
         }
         self.answered(self.remote.exists(rel))
+    }
+
+    /// The age of `rel`'s copy, where a read may be served it as fresh.
+    fn fresh_copy(&self, rel: &str) -> Option<Duration> {
+        if self.policy.bypass_reads {
+            return None;
+        }
+        let (_, age) = self.cache.file(rel)?;
+        age.filter(|_| self.freshness(age) == Freshness::Fresh)
+    }
+
+    /// [`mkdir`](Self::mkdir) unless something is at `rel`: whether the folder
+    /// was made. The check is the write's own, so it is not counted as a read.
+    pub(crate) fn ensure_dir(&self, rel: &str) -> Result<bool, CliError> {
+        if self.fresh_copy(rel).is_some() || self.remote.exists(rel)? {
+            return Ok(false);
+        }
+        self.mkdir(rel)?;
+        Ok(true)
     }
 
     // ── writes (write-through) ──────────────────────────────────────────
@@ -1247,6 +1263,17 @@ mod tests {
         assert!(stub.calls().len() > calls);
         assert_eq!((c.reads().cache, c.reads().remote), (2, 2));
         assert_eq!(c.reads().stale, 0);
+
+        // With reads bypassed the remote is asked, a fresh copy or not.
+        c.write("notes.md", "two").unwrap();
+        let bypass = CachePolicy {
+            bypass_reads: true,
+            ..POLICY
+        };
+        let c = CachedRemote::new(stub.remote(), cache.path().to_path_buf(), bypass);
+        fs::remove_file(stub.file("notes.md")).unwrap();
+        assert!(!c.exists("notes.md").unwrap());
+        assert_eq!((c.reads().cache, c.reads().remote), (0, 1));
     }
 
     /// The backend a CLI holds answers for the cache behind it: a download
@@ -1271,7 +1298,16 @@ mod tests {
         let reads = b.reads().unwrap();
         assert_eq!((reads.cache, reads.remote), (2, 2));
         assert_eq!(b.local_copy("none.pdf").err().unwrap().exit_code(), 4);
-        assert_eq!(b.reads().unwrap().remote, 2);
+        assert_eq!(b.reads().unwrap(), reads, "a failed download");
+
+        // The check before a folder is made is the write's, whichever
+        // answers it: the remote, or a fresh copy of a file of that name.
+        assert!(b.ensure_dir("inbox").unwrap());
+        assert!(!b.ensure_dir("inbox").unwrap());
+        let calls = stub.calls().len();
+        assert!(!b.ensure_dir("notes.md").unwrap());
+        assert_eq!(stub.calls().len(), calls, "a fresh copy proves existence");
+        assert_eq!(b.reads().unwrap(), reads);
 
         assert_eq!(Backend::Remote(stub.remote()).reads(), None);
         assert_eq!(Backend::Mount(cache.path().into()).reads(), None);
