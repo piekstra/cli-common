@@ -74,7 +74,7 @@ use std::time::{Duration, Instant};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use pk_cli_core::private_file::{self, Replace};
-use pk_cli_core::CliError;
+use pk_cli_core::{CliError, Reason};
 use pk_cli_secrets::{AskedRead, CredentialStore, QuietRead, Secret};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -349,12 +349,14 @@ pub enum QuietLoad {
     /// No entries and no key: nothing needs it, and the first write makes
     /// one without asking.
     Empty,
+    /// No entries and no key, in a keychain that is locked: nothing needs
+    /// the key, and the write that makes one would ask to unlock it.
+    EmptyLocked,
     /// Entries, but the keychain holds no key; a read reports the lost key.
     Missing,
-    /// A person is needed, and no dialog was raised. Either reading the key
-    /// asks, with entries or without (`auth key` run at the screen raises
-    /// that dialog), or there is no key and the keychain is locked, so the
-    /// write that makes one would ask to unlock it.
+    /// Reading the key needs a person, and no dialog was raised: `auth key`
+    /// run at the screen raises it. A key left by an earlier sign-in counts
+    /// with no entries too, since a write would read it.
     NeedsPerson,
     /// This keychain cannot be read without possibly asking; nothing was
     /// read. [`Vault::load_key`] bounds a read that may.
@@ -363,8 +365,9 @@ pub enum QuietLoad {
 
 impl QuietLoad {
     /// What a CLI that stops on this answer fails with, so that every CLI
-    /// says the same and exits the same: exit 3 (reason
-    /// `credential_unreadable`) for [`NeedsPerson`](Self::NeedsPerson), 1
+    /// says the same and exits the same: exit 3 for
+    /// [`NeedsPerson`](Self::NeedsPerson) (reason `credential_unreadable`)
+    /// and [`EmptyLocked`](Self::EmptyLocked) (reason `no_credential`), 1
     /// for [`Missing`](Self::Missing) and
     /// [`Unsupported`](Self::Unsupported). `None` where the vault can be
     /// used, [`Empty`](Self::Empty) among them: what an empty vault means is
@@ -384,12 +387,20 @@ impl QuietLoad {
     pub fn failure(self) -> Option<CliError> {
         match self {
             Self::Loaded | Self::Empty => None,
+            Self::EmptyLocked => Some(
+                CliError::Auth(
+                    "nothing is stored, and storing a sign-in needs someone to unlock the login \
+                     keychain"
+                        .into(),
+                )
+                .because(Reason::NoCredential)
+                .with_remedy("unlock the login keychain, then sign in"),
+            ),
             Self::Missing => Some(lost("the vault")),
             Self::NeedsPerson => Some(key::unread(
                 "the vault's key cannot be used until someone answers the keychain at the screen"
                     .into(),
-                "unlock the login keychain if it is locked, then run `auth key` at the screen \
-                 and choose Always Allow",
+                "run `auth key` at the screen and choose Always Allow",
             )),
             Self::Unsupported => Some(
                 CliError::Keychain(
@@ -564,7 +575,7 @@ impl Vault {
                 QuietLoad::Loaded
             }
             QuietRead::Absent if self.entry_files()?.is_empty() => QuietLoad::Empty,
-            QuietRead::AbsentLocked if self.entry_files()?.is_empty() => QuietLoad::NeedsPerson,
+            QuietRead::AbsentLocked if self.entry_files()?.is_empty() => QuietLoad::EmptyLocked,
             QuietRead::Absent | QuietRead::AbsentLocked => QuietLoad::Missing,
             QuietRead::NeedsPerson => QuietLoad::NeedsPerson,
             // `Unsupported`, as any answer not known here is taken to be.

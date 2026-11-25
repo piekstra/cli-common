@@ -4,9 +4,12 @@
 
 - `pk-cli-auth`: `QuietLoad::failure` and `KeyLoad::failure` give the error a CLI that stops on a
   load's answer returns, so every CLI uses one exit code and one message. `NeedsPerson` and
-  `Waiting` are exit 3 with reason `credential_unreadable`, `Missing` is exit 1 with the lost key's
-  remedy, and `Unsupported` is exit 1. `Loaded` and `Empty` are no failure. A later answer gets its
-  words here, so a CLI that calls it needs no arm for one.
+  `Waiting` are exit 3 with reason `credential_unreadable`, `EmptyLocked` is exit 3 with reason
+  `no_credential`, `Missing` is exit 1 with the lost key's remedy, and `Unsupported` is exit 1.
+  `Loaded` and `Empty` are no failure. A later answer gets its words here, so a CLI that calls it
+  needs no arm for one.
+- `pk-cli-auth`: `QuietLoad::EmptyLocked` is new: no entries and no key, in a locked keychain. v0.39.0
+  answered `NeedsPerson` there, which read as a stored credential that cannot be read.
 - `pk-cli-auth`: a vault read or write that fails because the keychain has not answered
   (`bound_key_reads`) now carries the reason `credential_unreadable`. Its exit code, message and
   remedy are unchanged.

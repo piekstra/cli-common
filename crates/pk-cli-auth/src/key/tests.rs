@@ -465,12 +465,12 @@ fn a_quiet_load_of_an_empty_vault_answers_for_the_write_after_it() {
 /// macOS finds an item absent from a locked keychain without asking, and
 /// asks to unlock it for the key a first write makes.
 #[test]
-fn a_quiet_load_with_no_key_in_a_locked_keychain_needs_a_person() {
+fn a_quiet_load_with_no_key_in_a_locked_keychain_is_told_from_an_empty_one() {
     let tmp = TempDir::new();
     let keys = AskingKeys::new(None, Person::Away);
     *keys.locked.lock().unwrap() = true;
     let vault = tmp.vault(Arc::clone(&keys));
-    assert_eq!(vault.load_key_quietly().unwrap(), QuietLoad::NeedsPerson);
+    assert_eq!(vault.load_key_quietly().unwrap(), QuietLoad::EmptyLocked);
     // `auth key` is about the read, which asks nobody.
     for args in [KeyArgs::default(), no_dialog()] {
         let absent = vault.check_key(&args).unwrap();
@@ -529,29 +529,32 @@ fn a_quiet_load_leaves_an_open_dialog_alone() {
 /// gives, the same in every CLI.
 #[test]
 fn a_load_that_stops_a_command_says_how_it_fails() {
-    let failures = [
-        (QuietLoad::Loaded.failure(), None),
-        (QuietLoad::Empty.failure(), None),
-        (QuietLoad::NeedsPerson.failure(), Some(3)),
-        (QuietLoad::Missing.failure(), Some(1)),
-        (QuietLoad::Unsupported.failure(), Some(1)),
-        (KeyLoad::Loaded.failure(), None),
-        (KeyLoad::Empty.failure(), None),
-        (KeyLoad::Waiting.failure(), Some(3)),
-        (KeyLoad::Missing.failure(), Some(1)),
-    ];
-    for (failure, exit) in &failures {
-        assert_eq!(failure.as_ref().map(CliError::exit_code), *exit);
-        if let Some(failure) = failure {
-            let unreadable = (*exit == Some(3)).then_some(Reason::CredentialUnreadable);
-            assert_eq!(failure.reason(), unreadable, "{failure}");
-            assert!(failure.remedy().is_some(), "{failure}");
-        }
+    let unreadable = Some(Reason::CredentialUnreadable);
+    for (failure, exit, reason) in [
+        (QuietLoad::NeedsPerson.failure(), 3, unreadable),
+        (
+            QuietLoad::EmptyLocked.failure(),
+            3,
+            Some(Reason::NoCredential),
+        ),
+        (QuietLoad::Missing.failure(), 1, None),
+        (QuietLoad::Unsupported.failure(), 1, None),
+        (KeyLoad::Waiting.failure(), 3, unreadable),
+        (KeyLoad::Missing.failure(), 1, None),
+    ] {
+        let failure = failure.unwrap();
+        assert_eq!((failure.exit_code(), failure.reason()), (exit, reason));
+        assert!(failure.remedy().is_some(), "{failure}");
+    }
+    for usable in [QuietLoad::Loaded, QuietLoad::Empty] {
+        assert_eq!(usable.failure(), None);
+    }
+    for usable in [KeyLoad::Loaded, KeyLoad::Empty] {
+        assert_eq!(usable.failure(), None);
     }
     let remedy = |load: QuietLoad| load.failure().unwrap().remedy().unwrap().to_string();
-    let person = remedy(QuietLoad::NeedsPerson);
-    assert!(person.contains("`auth key`"), "{person}");
-    assert!(person.contains("unlock the login keychain"), "{person}");
+    assert!(remedy(QuietLoad::NeedsPerson).contains("`auth key`"));
+    assert!(remedy(QuietLoad::EmptyLocked).contains("unlock the login keychain"));
     assert_eq!(remedy(QuietLoad::Missing), REMEDY_CLEAR);
     assert!(remedy(QuietLoad::Unsupported).contains("update this CLI"));
     assert_eq!(QuietLoad::Missing.failure(), KeyLoad::Missing.failure());
