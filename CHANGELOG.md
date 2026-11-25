@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.39.3 — 2026-11-25
+
+- `pk-cli-drive`: the remedy on `permissions_hidden` for an account that may not share the item
+  says what happened (Google Drive would not list who can open it) and no longer says that Drive
+  lists grants only to accounts that may share. Google does not document that. The docs separate
+  what Google documents, what a real account answered and what has not been observed.
+
 ## v0.39.2 — 2026-11-25
 
 - `pk-cli-drive`: `CachedRemote::reads` says where a command's answers came from, for one that

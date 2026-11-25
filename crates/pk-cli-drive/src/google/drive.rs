@@ -1775,8 +1775,8 @@ fn hidden(e: CliError, can_share: bool) -> CliError {
             "this account may share the item, but Google Drive would not list who can open it; \
              sign in again, or look in Google Drive (Share)"
         } else {
-            "this account may not share the item, so Google Drive lists who can open it only to \
-             an account that may; ask its owner, or look as that account"
+            "this account may not share the item, and Google Drive would not list who can open \
+             it; ask its owner, or look as an account that may share it"
         })
 }
 
