@@ -2385,7 +2385,7 @@ fn where_the_folder_above_is_out_of_sight_the_source_of_a_grant_is_unknown() {
         (3, Some(Reason::CredentialRefused)),
         "{e}"
     );
-    assert_eq!(e.remedy().is_some(), true);
+    assert!(e.remedy().is_some());
 
     // A failure that may pass is reported, not taken for "unknown".
     let h = Harness::new();
