@@ -233,12 +233,13 @@ pub fn check_item(
             Ok(QuietRead::Absent | QuietRead::AbsentLocked) => (End::Absent, Some(false)),
             Ok(QuietRead::NeedsPerson) if args.no_dialog => (End::NeedsDialog, Some(true)),
             Ok(QuietRead::NeedsPerson) => (ask(keys, account, args.wait), Some(true)),
-            Ok(QuietRead::Unsupported) if args.no_dialog => return Err(CliError::Usage(
+            // `Unsupported`, as any answer not known here is taken to be.
+            Ok(_) if args.no_dialog => return Err(CliError::Usage(
                 "--no-dialog needs a keychain that can be read without possibly asking; this one \
                  cannot"
                     .into(),
             )),
-            Ok(QuietRead::Unsupported) => (ask(keys, account, args.wait), None),
+            Ok(_) => (ask(keys, account, args.wait), None),
             Err(e) => (End::Failed(e), None),
         };
     let elapsed = started.elapsed();
@@ -304,6 +305,9 @@ fn ask(keys: &Arc<dyn KeyStore>, account: &str, wait: Option<u64>) -> End {
         Ok(AskedRead::Found(item)) => End::Found(item),
         Ok(AskedRead::Absent) => End::Absent,
         Ok(AskedRead::Refused { status }) => End::Refused(status),
+        Ok(_) => End::Failed(CliError::Keychain(
+            "the keychain's answer is not one this build knows".into(),
+        )),
         Err(e) => End::Failed(e),
     }
 }

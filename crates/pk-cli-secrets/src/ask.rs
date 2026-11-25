@@ -16,6 +16,7 @@ use crate::{CredentialStore, Secret};
 
 /// What a read that may not ask the person anything found.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum QuietRead {
     /// The item, without a dialog.
     Found(Secret),
@@ -33,6 +34,7 @@ pub enum QuietRead {
 
 /// What a read that may ask the person found.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum AskedRead {
     /// The item.
     Found(Secret),

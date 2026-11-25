@@ -508,7 +508,8 @@ impl Vault {
             QuietRead::AbsentLocked if self.entry_files()?.is_empty() => QuietLoad::NeedsPerson,
             QuietRead::Absent | QuietRead::AbsentLocked => QuietLoad::Missing,
             QuietRead::NeedsPerson => QuietLoad::NeedsPerson,
-            QuietRead::Unsupported => QuietLoad::Unsupported,
+            // `Unsupported`, as any answer not known here is taken to be.
+            _ => QuietLoad::Unsupported,
         })
     }
 

@@ -54,7 +54,7 @@ impl KeyStore for AskingKeys {
         match self.get_asking(account)? {
             AskedRead::Found(item) => Ok(Some(item)),
             AskedRead::Absent => Ok(None),
-            AskedRead::Refused { .. } => Err(CliError::Keychain("refused".into())),
+            _ => Err(CliError::Keychain("refused".into())),
         }
     }
 
