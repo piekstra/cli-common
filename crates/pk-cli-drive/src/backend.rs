@@ -9,7 +9,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
-use crate::cache::CachedRemote;
+use crate::cache::{CachedRemote, Reads};
 #[cfg(feature = "google")]
 use crate::google::Drive;
 use crate::rclone::Remote;
@@ -121,7 +121,8 @@ trait Store {
     fn move_no_clobber(&self, rel_from: &str, rel_to: &str) -> Result<(), CliError>;
     fn delete_file(&self, rel: &str) -> Result<bool, CliError>;
     fn exists(&self, rel: &str) -> Result<bool, CliError>;
-    fn mkdir(&self, rel: &str) -> Result<(), CliError>;
+    /// Make the folder `rel` unless something is there: whether it was made.
+    fn ensure_dir(&self, rel: &str) -> Result<bool, CliError>;
     fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError>;
     /// A download, never cached.
     fn download(&self, rel: &str) -> Result<LocalCopy, CliError>;
@@ -153,8 +154,12 @@ impl<R: RemoteStore> Store for R {
     fn exists(&self, rel: &str) -> Result<bool, CliError> {
         RemoteStore::exists(self, rel)
     }
-    fn mkdir(&self, rel: &str) -> Result<(), CliError> {
-        RemoteStore::mkdir(self, rel)
+    fn ensure_dir(&self, rel: &str) -> Result<bool, CliError> {
+        if RemoteStore::exists(self, rel)? {
+            return Ok(false);
+        }
+        RemoteStore::mkdir(self, rel)?;
+        Ok(true)
     }
     fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
         RemoteRead::list_entries(self, rel)
@@ -192,14 +197,14 @@ impl<R: RemoteStore> Store for CachedRemote<R> {
     fn exists(&self, rel: &str) -> Result<bool, CliError> {
         CachedRemote::exists(self, rel)
     }
-    fn mkdir(&self, rel: &str) -> Result<(), CliError> {
-        CachedRemote::mkdir(self, rel)
+    fn ensure_dir(&self, rel: &str) -> Result<bool, CliError> {
+        CachedRemote::ensure_dir(self, rel)
     }
     fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
         CachedRemote::list_entries(self, rel)
     }
     fn download(&self, rel: &str) -> Result<LocalCopy, CliError> {
-        download(self.remote(), rel)
+        self.answered(download(self.remote(), rel))
     }
     fn write_many(&self, files: &[(&str, &[u8])]) -> Result<usize, CliError> {
         CachedRemote::write_many(self, files)
@@ -461,13 +466,21 @@ impl Backend {
                     .map_err(|e| CliError::Other(format!("creating {}: {e}", dir.display())))?;
                 Ok(true)
             }
-            Ok(s) => {
-                if s.exists(rel)? {
-                    return Ok(false);
-                }
-                s.mkdir(rel)?;
-                Ok(true)
-            }
+            Ok(s) => s.ensure_dir(rel),
+        }
+    }
+
+    /// Where the read cache's answers came from so far
+    /// ([`CachedRemote::reads`]); `None` for a backend with no cache, where
+    /// every answer came from the store itself.
+    pub fn reads(&self) -> Option<Reads> {
+        match self {
+            Backend::Cached(c) => Some(c.reads()),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => Some(c.reads()),
+            Backend::Mount(_) | Backend::Remote(_) => None,
+            #[cfg(feature = "google")]
+            Backend::Drive(_) => None,
         }
     }
 

@@ -29,9 +29,9 @@ impl Stub {
     }
 
     /// A stub backed by a plain directory: `cat`, `copyto` (both ways),
-    /// `deletefile` and `lsf` (an existence check, or `-R` for a listing
-    /// whose times and sizes are 0) act on `<stub dir>/remote/<path after
-    /// the colon>`.
+    /// `deletefile`, `mkdir` and `lsf` (an existence check, or `-R` for a
+    /// listing whose times and sizes are 0) act on `<stub dir>/remote/<path
+    /// after the colon>`.
     pub fn backed() -> Stub {
         Stub::new(
             r#"root="$(dirname "$0")/remote"
@@ -45,6 +45,7 @@ case "$1" in
       *) mkdir -p "$(dirname "$(path "$3")")"; cp "$2" "$(path "$3")";;
     esac;;
   deletefile) [ -f "$(path "$2")" ] || exit 4; rm "$(path "$2")";;
+  mkdir) mkdir -p "$(path "$2")";;
   lsf)
     case "$2" in
       -R) [ -d "$(path "$target")" ] || exit 3

@@ -530,7 +530,11 @@ fn the_cache_and_the_backend_work_over_drive() {
     let copy = b.local_copy("state/x.json").unwrap();
     assert_eq!(std::fs::read_to_string(&copy.path).unwrap(), "1");
     assert!(b.display_path("state/x.json").starts_with("gdrive:adult1/"));
+    // The read was the cache's and the download Drive's.
+    let reads = b.reads().unwrap();
+    assert_eq!((reads.cache, reads.remote), (1, 1));
     let direct = Backend::Drive(h.drive());
+    assert_eq!(direct.reads(), None);
     assert_eq!(
         direct.list_files_recursive("").unwrap(),
         vec!["state/x.json"]

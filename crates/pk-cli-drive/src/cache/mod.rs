@@ -35,6 +35,10 @@
 //!   generation under a lock; a fetch (foreground or background) stores its
 //!   result only if the generation is unchanged since before it fetched, so a
 //!   refresh that read the pre-write remote cannot land after the write.
+//! - **A command can say where its answers came from.**
+//!   [`CachedRemote::reads`] counts what the cache answered (how much of it
+//!   past its TTL, how much because the remote failed, the oldest copy's
+//!   age) and what the remote answered.
 //! - **Bounded background work.** The revalidator's rclone calls are killed
 //!   at [`CachePolicy::revalidate_timeout`] (default 120s), so the child
 //!   outlives the command that spawned it by at most that long; a per-entry
@@ -61,6 +65,7 @@
 //! | `<BIN>_CACHE_NO_REVALIDATE` | serve stale copies without starting a refresh | off |
 
 mod policy;
+mod reads;
 mod revalidate;
 mod store;
 
@@ -68,6 +73,7 @@ pub use policy::{
     cache_base, cache_dir_for, env_prefix, CachePolicy, DEFAULT_MAX_STALE_SECS,
     DEFAULT_REVALIDATE_TIMEOUT_SECS, DEFAULT_TTL_SECS,
 };
+pub use reads::Reads;
 pub use revalidate::{
     background_revalidator, run_revalidation, Revalidator, SpawnRevalidator, REMOTE_SPEC_ARG,
     REVALIDATE_FILE_ARG, REVALIDATE_LISTING_ARG,
@@ -85,6 +91,7 @@ use pk_cli_core::CliError;
 use crate::backend::FileEntry;
 use crate::rclone::Remote;
 use crate::remote::{RemoteRead, RemoteStore};
+use reads::{Served, Tally};
 use store::{claim_marker, CacheDir, MarkerGuard};
 
 /// How a stale serve's refresh went, for the stderr note.
@@ -182,6 +189,9 @@ pub struct CachedRemote<R: RemoteRead = Remote> {
     policy: CachePolicy,
     revalidator: Option<Box<dyn Revalidator>>,
     stale_reads: Mutex<Vec<StaleRead>>,
+    /// Boxed, so a cached [`crate::Backend`] stays near the size of an
+    /// uncached one.
+    tally: Box<Tally>,
 }
 
 impl<R: RemoteRead> CachedRemote<R> {
@@ -192,6 +202,7 @@ impl<R: RemoteRead> CachedRemote<R> {
             policy,
             revalidator: None,
             stale_reads: Mutex::new(Vec::new()),
+            tally: Box::default(),
         }
     }
 
@@ -217,12 +228,16 @@ impl<R: RemoteRead> CachedRemote<R> {
     /// than fail. With `bypass_reads`, straight to the remote.
     pub fn cat(&self, rel: &str) -> Result<Option<String>, CliError> {
         if self.policy.bypass_reads {
-            return self.remote.cat(rel);
+            return self.answered(self.remote.cat(rel));
         }
         if let Some((content, age)) = self.cache.file(rel) {
             match self.freshness(age) {
-                Freshness::Fresh => return Ok(Some(content)),
+                Freshness::Fresh => {
+                    self.served(age, false);
+                    return Ok(Some(content));
+                }
                 Freshness::Stale => {
+                    self.served(age, false);
                     self.served_stale(Kind::File, rel, digest(content.as_bytes()), age);
                     return Ok(Some(content));
                 }
@@ -230,13 +245,14 @@ impl<R: RemoteRead> CachedRemote<R> {
             }
         }
         let generation = self.cache.generation();
-        match self.remote.cat(rel) {
+        match self.answered(self.remote.cat(rel)) {
             Ok(content) => {
                 self.cache.commit_file(rel, content.as_deref(), generation);
                 Ok(content)
             }
             Err(e) => match self.cache.file(rel) {
-                Some((stale, _)) => {
+                Some((stale, age)) => {
+                    self.served(age, true);
                     warn_unreachable(&self.target(rel), &e);
                     Ok(Some(stale))
                 }
@@ -249,12 +265,16 @@ impl<R: RemoteRead> CachedRemote<R> {
     /// freshness tiers and self-healing fallback as [`cat`](Self::cat).
     pub fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
         if self.policy.bypass_reads {
-            return self.remote.list_entries(rel);
+            return self.answered(self.remote.list_entries(rel));
         }
         if let Some((entries, age)) = self.cache.listing(rel) {
             match self.freshness(age) {
-                Freshness::Fresh => return Ok(entries),
+                Freshness::Fresh => {
+                    self.served(age, false);
+                    return Ok(entries);
+                }
                 Freshness::Stale => {
+                    self.served(age, false);
                     self.served_stale(Kind::Listing, rel, listing_digest(&entries), age);
                     return Ok(entries);
                 }
@@ -262,19 +282,49 @@ impl<R: RemoteRead> CachedRemote<R> {
             }
         }
         let generation = self.cache.generation();
-        match self.remote.list_entries(rel) {
+        match self.answered(self.remote.list_entries(rel)) {
             Ok(entries) => {
                 self.cache.commit_listing(rel, &entries, generation);
                 Ok(entries)
             }
             Err(e) => match self.cache.listing(rel) {
-                Some((stale, _)) => {
+                Some((stale, age)) => {
+                    self.served(age, true);
                     warn_unreachable(&self.target(rel), &e);
                     Ok(stale)
                 }
                 None => Err(e),
             },
         }
+    }
+
+    /// Where this handle's answers came from so far: what
+    /// [`cat`](Self::cat), [`list_entries`](Self::list_entries),
+    /// [`exists`](Self::exists) and [`crate::Backend::local_copy`] answered.
+    /// Not counted: the forced refreshes below, what a write reads for itself
+    /// (the re-reads behind [`is_stale_write_refusal`], and the check
+    /// [`crate::Backend::ensure_dir`] makes), and what a caller reads through
+    /// [`remote`](Self::remote) itself.
+    pub fn reads(&self) -> Reads {
+        self.tally.reads()
+    }
+
+    /// Count a read the remote answered; a failed one answered nothing.
+    pub(crate) fn answered<T>(&self, read: Result<T, CliError>) -> Result<T, CliError> {
+        if read.is_ok() {
+            self.tally.remote();
+        }
+        read
+    }
+
+    /// Count a copy served from the cache, whether or not because the remote
+    /// failed.
+    fn served(&self, age: Option<Duration>, unreachable: bool) {
+        self.tally.cache(Served {
+            age,
+            stale: self.freshness(age) != Freshness::Fresh,
+            unreachable,
+        });
     }
 
     // ── forced refresh (a warming command, and the background revalidator) ─
@@ -441,14 +491,30 @@ impl<R: RemoteStore> CachedRemote<R> {
     /// A fresh cached copy proves existence; otherwise ask the remote directly
     /// (always correct — never cached as a negative).
     pub fn exists(&self, rel: &str) -> Result<bool, CliError> {
-        if !self.policy.bypass_reads {
-            if let Some((_, age)) = self.cache.file(rel) {
-                if self.freshness(age) == Freshness::Fresh {
-                    return Ok(true);
-                }
-            }
+        if let Some(age) = self.fresh_copy(rel) {
+            self.served(Some(age), false);
+            return Ok(true);
         }
-        self.remote.exists(rel)
+        self.answered(self.remote.exists(rel))
+    }
+
+    /// The age of `rel`'s copy, where a read may be served it as fresh.
+    fn fresh_copy(&self, rel: &str) -> Option<Duration> {
+        if self.policy.bypass_reads {
+            return None;
+        }
+        let (_, age) = self.cache.file(rel)?;
+        age.filter(|_| self.freshness(age) == Freshness::Fresh)
+    }
+
+    /// [`mkdir`](Self::mkdir) unless something is at `rel`: whether the folder
+    /// was made. The check is the write's own, so it is not counted as a read.
+    pub(crate) fn ensure_dir(&self, rel: &str) -> Result<bool, CliError> {
+        if self.fresh_copy(rel).is_some() || self.remote.exists(rel)? {
+            return Ok(false);
+        }
+        self.mkdir(rel)?;
+        Ok(true)
     }
 
     // ── writes (write-through) ──────────────────────────────────────────
@@ -674,6 +740,7 @@ mod tests {
         files: RefCell<HashMap<String, String>>,
         cats: Cell<usize>,
         lists: Cell<usize>,
+        down: Cell<bool>,
     }
 
     impl FakeRemote {
@@ -681,6 +748,13 @@ mod tests {
             self.files
                 .borrow_mut()
                 .insert(rel.to_string(), content.to_string());
+        }
+
+        fn up(&self) -> Result<(), CliError> {
+            match self.down.get() {
+                true => Err(CliError::Upstream("the remote is down".into())),
+                false => Ok(()),
+            }
         }
     }
 
@@ -690,10 +764,12 @@ mod tests {
         }
         fn cat(&self, rel: &str) -> Result<Option<String>, CliError> {
             self.cats.set(self.cats.get() + 1);
+            self.up()?;
             Ok(self.files.borrow().get(rel).cloned())
         }
         fn list_entries(&self, rel: &str) -> Result<Vec<FileEntry>, CliError> {
             self.lists.set(self.lists.get() + 1);
+            self.up()?;
             let prefix = format!("{rel}/");
             let mut out: Vec<FileEntry> = self
                 .files
@@ -902,6 +978,158 @@ mod tests {
         assert_eq!(c.remote.cats.get(), 2);
     }
 
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    /// `(cache, stale, unreachable, remote)`.
+    fn counts(c: &CachedRemote<FakeRemote>) -> (usize, usize, usize, usize) {
+        let r = c.reads();
+        (r.cache, r.stale, r.unreachable, r.remote)
+    }
+
+    /// Every way a read is answered, and only the answered ones, for a file
+    /// and for a listing alike.
+    #[test]
+    fn reads_are_counted_by_where_the_answer_came_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (kind, rel, copy) in [
+            (Kind::File, "f/a.json", "f/a.json"),
+            (Kind::Listing, "f", ".listings-v2/f.json"),
+        ] {
+            let copy = tmp.path().join(copy);
+            let fresh = || {
+                let c = cached(tmp.path());
+                c.remote.put("f/a.json", "v1");
+                c
+            };
+            let read = |c: &CachedRemote<FakeRemote>| match kind {
+                Kind::File => c.cat(rel).map(|_| ()),
+                Kind::Listing => c.list_entries(rel).map(|_| ()),
+            };
+
+            let c = fresh();
+            assert_eq!(c.reads(), Reads::default());
+            // With no copy and no remote the read fails: nothing was answered.
+            c.remote.down.set(true);
+            read(&c).unwrap_err();
+            assert_eq!(c.reads(), Reads::default(), "{kind:?}");
+            c.remote.down.set(false);
+
+            read(&c).unwrap();
+            assert_eq!(counts(&c), (0, 0, 0, 1), "{kind:?}");
+            assert_eq!(c.reads().oldest, None, "no copy was served");
+
+            read(&c).unwrap();
+            assert_eq!(counts(&c), (1, 0, 0, 1), "{kind:?}");
+            assert!(c.reads().oldest.unwrap() < HOUR, "{kind:?}");
+
+            // Past the TTL: both reads count, though only the first is noted.
+            backdate(&copy, 2 * 3600);
+            read(&c).unwrap();
+            read(&c).unwrap();
+            assert_eq!(counts(&c), (3, 2, 0, 1), "{kind:?}");
+            let oldest = c.reads().oldest.unwrap();
+            assert!(oldest >= 2 * HOUR && oldest < 3 * HOUR, "{oldest:?}");
+
+            // Past the bound, with the remote down: the copy stands in for it.
+            backdate(&copy, 48 * 3600);
+            c.remote.down.set(true);
+            read(&c).unwrap();
+            assert_eq!(counts(&c), (4, 3, 1, 1), "{kind:?}");
+            assert!(c.reads().oldest.unwrap() >= 48 * HOUR, "{kind:?}");
+
+            // Fetched again, then served fresh: the oldest stays the oldest.
+            c.remote.down.set(false);
+            read(&c).unwrap();
+            read(&c).unwrap();
+            assert_eq!(counts(&c), (5, 3, 1, 2), "{kind:?}");
+            assert!(c.reads().oldest.unwrap() >= 48 * HOUR, "{kind:?}");
+
+            // The count is the handle's own.
+            assert_eq!(fresh().reads(), Reads::default());
+        }
+    }
+
+    /// A copy dated in the future is served only where the remote fails. Its
+    /// age is unknown, so the oldest age is too, whatever is served beside it.
+    #[test]
+    fn a_copy_of_unknown_age_leaves_the_oldest_age_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cached(tmp.path());
+        c.remote.put("a.json", "v1");
+        c.remote.put("b.json", "v1");
+        c.cat("a.json").unwrap();
+        c.cat("b.json").unwrap();
+        c.cat("b.json").unwrap();
+        assert!(c.reads().oldest.is_some());
+
+        fs::File::options()
+            .write(true)
+            .open(tmp.path().join("a.json"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + 2 * HOUR)
+            .unwrap();
+        c.remote.down.set(true);
+        assert_eq!(c.cat("a.json").unwrap().as_deref(), Some("v1"));
+        assert_eq!(counts(&c), (2, 1, 1, 2));
+        assert_eq!(c.reads().oldest, None);
+        c.cat("b.json").unwrap();
+        assert_eq!(counts(&c), (3, 1, 1, 2));
+        assert_eq!(c.reads().oldest, None);
+    }
+
+    /// A missing file is an answer, and with reads bypassed every answer is
+    /// the remote's.
+    #[test]
+    fn a_missing_file_and_a_bypassed_read_count_as_the_remotes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cached(tmp.path());
+        assert_eq!(c.cat("none.json").unwrap(), None);
+        assert_eq!(counts(&c), (0, 0, 0, 1));
+        c.remote.put("a.json", "v1");
+        c.cat("a.json").unwrap();
+
+        let bypass = CachedRemote::new(
+            FakeRemote::default(),
+            tmp.path().to_path_buf(),
+            CachePolicy {
+                bypass_reads: true,
+                ..POLICY
+            },
+        );
+        bypass.remote.put("a.json", "v1");
+        bypass.cat("a.json").unwrap();
+        bypass.cat("none.json").unwrap();
+        bypass.list_entries("").unwrap();
+        assert_eq!(counts(&bypass), (0, 0, 0, 3));
+        bypass.remote.down.set(true);
+        bypass.cat("a.json").unwrap_err();
+        bypass.list_entries("").unwrap_err();
+        assert_eq!(counts(&bypass), (0, 0, 0, 3));
+        assert_eq!(bypass.reads().oldest, None);
+    }
+
+    /// What the cache reads for its own ends is no answer to the command.
+    #[test]
+    fn a_refresh_and_a_writes_re_read_are_not_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cached(tmp.path());
+        c.remote.put("f/a.json", "v1");
+        c.revalidate(Kind::File, "f/a.json").unwrap();
+        c.revalidate(Kind::Listing, "f").unwrap();
+        c.revalidate_claimed(Kind::File, "f/a.json").unwrap();
+        assert!(c.refresh_file("f/a.json").unwrap());
+        assert_eq!(c.reads(), Reads::default());
+
+        backdate(&tmp.path().join("f/a.json"), 3600);
+        backdate(&tmp.path().join(".listings-v2/f.json"), 3600);
+        c.cat("f/a.json").unwrap();
+        c.list_entries("f").unwrap();
+        let before = c.reads();
+        assert_eq!(counts(&c), (2, 2, 0, 0));
+        c.confirm_stale_reads().unwrap();
+        assert_eq!(c.reads(), before);
+    }
+
     #[test]
     fn a_stale_listing_is_served_and_a_revalidation_refreshes_it() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1024,6 +1252,65 @@ mod tests {
         assert_eq!(stub.calls().len(), calls, "served from the written copy");
         assert!(c.exists("notes.md").unwrap());
         assert_eq!(stub.calls().len(), calls, "a fresh copy proves existence");
+        assert_eq!((c.reads().cache, c.reads().remote), (2, 0));
+        assert!(c.reads().oldest.is_some());
+
+        // A copy past its TTL proves nothing, so the remote is asked, as it
+        // is for a file with no copy.
+        backdate(&cache.path().join("notes.md"), 3600);
+        assert!(c.exists("notes.md").unwrap());
+        assert!(!c.exists("none.md").unwrap());
+        assert!(stub.calls().len() > calls);
+        assert_eq!((c.reads().cache, c.reads().remote), (2, 2));
+        assert_eq!(c.reads().stale, 0);
+
+        // With reads bypassed the remote is asked, a fresh copy or not.
+        c.write("notes.md", "two").unwrap();
+        let bypass = CachePolicy {
+            bypass_reads: true,
+            ..POLICY
+        };
+        let c = CachedRemote::new(stub.remote(), cache.path().to_path_buf(), bypass);
+        fs::remove_file(stub.file("notes.md")).unwrap();
+        assert!(!c.exists("notes.md").unwrap());
+        assert_eq!((c.reads().cache, c.reads().remote), (0, 1));
+    }
+
+    /// The backend a CLI holds answers for the cache behind it: a download
+    /// counts as the remote's, and a backend with no cache has no count.
+    #[cfg(unix)]
+    #[test]
+    fn a_backend_says_what_its_cache_answered() {
+        use crate::Backend;
+        let stub = crate::stub::Stub::backed();
+        let cache = tempfile::tempdir().unwrap();
+        let b = Backend::Cached(CachedRemote::new(
+            stub.remote(),
+            cache.path().to_path_buf(),
+            POLICY,
+        ));
+        b.write_file("notes.md", "one").unwrap();
+        assert_eq!(b.reads(), Some(Reads::default()), "a write is no read");
+        b.read_file("notes.md").unwrap();
+        b.local_copy("notes.md").unwrap();
+        b.list_files_recursive("").unwrap();
+        b.list_entries("").unwrap();
+        let reads = b.reads().unwrap();
+        assert_eq!((reads.cache, reads.remote), (2, 2));
+        assert_eq!(b.local_copy("none.pdf").err().unwrap().exit_code(), 4);
+        assert_eq!(b.reads().unwrap(), reads, "a failed download");
+
+        // The check before a folder is made is the write's, whichever
+        // answers it: the remote, or a fresh copy of a file of that name.
+        assert!(b.ensure_dir("inbox").unwrap());
+        assert!(!b.ensure_dir("inbox").unwrap());
+        let calls = stub.calls().len();
+        assert!(!b.ensure_dir("notes.md").unwrap());
+        assert_eq!(stub.calls().len(), calls, "a fresh copy proves existence");
+        assert_eq!(b.reads().unwrap(), reads);
+
+        assert_eq!(Backend::Remote(stub.remote()).reads(), None);
+        assert_eq!(Backend::Mount(cache.path().into()).reads(), None);
     }
 
     #[cfg(unix)]

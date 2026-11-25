@@ -88,7 +88,7 @@ pub mod reason;
 pub mod remote;
 
 pub use backend::{private_temp_dir, Backend, FileEntry, LocalCopy, TempDir};
-pub use cache::{CachePolicy, CachedRemote, Kind, Outcome, Revalidator};
+pub use cache::{CachePolicy, CachedRemote, Kind, Outcome, Reads, Revalidator};
 pub use rclone::Remote;
 pub use remote::{RemoteRead, RemoteStore};
 

@@ -814,6 +814,7 @@ per-machine accelerator, never a second source of truth:
 | A write is never undone by a refresh | each write bumps a generation counter under a lock; a fetch stores its result only if the generation is unchanged since before it read |
 | A write never derives from an unconfirmed stale copy | before a write, every copy the command was served stale is re-read; if one changed, the write is refused, nothing written, the cache now current |
 | Fail-open | a cache miss or disk error falls through to the remote; an unreachable remote with a cached copy serves the copy with a stderr warning |
+| Answers say where they came from | `CachedRemote::reads` (and `Backend::reads`) counts what one handle's reads were answered from: the cache, of that how many past the TTL and how many because the remote failed, and the remote; with the age of the oldest copy served |
 | Bounded background work | the refresh is a detached child (`<bin> <command> --revalidate-file=<rel> --remote-spec=<spec>`, null stdio, own process group) whose rclone calls are killed at the revalidate timeout (120 s); a per-entry marker stops duplicates |
 
 Location `$XDG_CACHE_HOME/<bin>/<slug>-<hash>/` (else `~/.cache/<bin>/…`),
