@@ -9,7 +9,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use pk_cli_config::profile::ProfileName;
-use pk_cli_core::{CliError, Reason};
+use pk_cli_core::CliError;
 
 use super::api::Api;
 use super::files::{md5_file, quote, About, DriveFile, Source, Target};
