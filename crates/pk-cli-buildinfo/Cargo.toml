@@ -1,0 +1,13 @@
+[package]
+name = "pk-cli-buildinfo"
+description = "The compile-time stamp behind pk-cli-core's `build_info!` and `version!`: which commit a CLI was built from, whether its tree was modified, and when."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[lib]
+proc-macro = true

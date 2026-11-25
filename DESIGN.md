@@ -45,6 +45,9 @@ spellings are kept one major version):
 <bin> auth status       # canonical DTO (see 1.4). Works logged-out.
 <bin> auth logout       # clear session (and, for a --browser CLI, the kept browser profile); --forget also clears stored credential+config identity.
 <bin> auth set-credential  # raw keychain write for rotation/headless (--stdin | --from-env, --overwrite).
+<bin> auth key          # read the credential's key from the keychain once and say what the
+                        #   keychain did (see 1.4). --no-dialog, --wait <SECONDS>. For a CLI
+                        #   with a keychain credential: the first call after an install.
 
 <bin> config path|show|init         # non-secret settings
 <bin> config set <key> <value>      # e.g. `config set account 1234567-0`
@@ -52,7 +55,8 @@ spellings are kept one major version):
 
 <bin> self-update [--check] [-y|--yes]   # GitHub-release update; `--check` never installs.
 <bin> completions <shell>
-<bin> info                                # machine discovery, see 1.5
+<bin> info                                # machine discovery, see 1.6
+<bin> --version                           # the version and what it was built from, see 1.6; -V the version alone
 <bin> api <METHOD> <PATH> [--data JSON]   # raw passthrough, where an upstream API exists
 ```
 
@@ -137,6 +141,39 @@ that profile is signed in; §2.2. `verified` is set only by a login that answers
 with this schema, below.) This retires utiman's
 `authenticated-field` per-provider config.
 
+**`auth key --json` (schema `auth-key/v1`):**
+```json
+{
+  "schema": "auth-key/v1",
+  "read": true,
+  "source": "keychain",
+  "outcome": "read",
+  "service": "piekstra.svc",
+  "account": "vault-key",
+  "dialog_needed": true,
+  "grant": "always",
+  "elapsed_ms": 4120,
+  "signing": {
+    "kind": "certificate", "identity": "pk-cli-codesign",
+    "identifier": "svc", "cdhash": "…"
+  }
+}
+```
+| Field | |
+|---|---|
+| `read`, `source` | whether the keychain gave the item, and `keychain` or `none`. The command has no cache, so what it read never came from one |
+| `outcome` | `read`, `absent` (no such item; no dialog is raised for one), `refused` (denied, or it could not ask), `needs_dialog` (`--no-dialog`), `no_answer` (`--wait` ran out), `failed` |
+| `dialog_needed` | whether reading the item needed a dialog: with `read`, that one was raised and answered. Absent off macOS |
+| `grant` | `always` (no dialog was needed, or it was answered Always Allow) or `once` (Allow: the next read asks again). Absent off macOS and when nothing was read |
+| `signing` | the running binary's signature: `kind` (`certificate`, `ad-hoc`, `unsigned`), the certificate's name, the identifier, the team ID and the `cdhash` a keychain item's partition list holds. macOS only |
+
+A failure is the same one document with the `error` object in it and a nonzero
+exit: 3 for `refused`, `needs_dialog` and `no_answer` (reason
+`credential_unreadable`), 1 for a key that is missing while the vault has entries
+or is not a key, and for a keychain that fails otherwise. `absent` with nothing
+stored is exit 0: there is no key and nothing needs one. A CLI emits it with
+`KeyCheck::emit` and ends with the code that returns.
+
 **A login result under `--json` (schema `auth-login/v1`):**
 ```json
 { "schema": "auth-login/v1", "stored": true, "verified": true }
@@ -197,11 +234,32 @@ when it does.
   "spec": "piekstra-cli/1",
   "repo": "https://github.com/piekstra/fpl-cli",
   "auth": { "required": true, "method": "password", "login_hint": "fpl auth login" },
-  "capabilities": ["accounts", "bills", "payments", "usage", "transactions", "outages", "api"]
+  "capabilities": ["accounts", "bills", "payments", "usage", "transactions", "outages", "api"],
+  "build": { "commit": "0123456789abcdef0123456789abcdef01234567", "dirty": false,
+             "built_at": "2026-11-24T21:00:00Z" }
 }
 ```
 `utiman` (and the new driver tool) can bootstrap a provider from `info` +
 conventions alone; TOML manifests stay as the escape hatch for non-conforming CLIs.
+
+**`build`** says what the binary was built from, which its version does not: one
+built from a branch or a modified tree carries the last release's version.
+`--version` prints the same (`svc 0.4.0 (0123456789ab, built 2026-11-24T21:00:00Z)`,
+the commit followed by `modified` for a dirty tree) and `-V` the version alone. A CLI
+gets both from two macros, written in its own code:
+
+```rust
+#[command(name = BIN, version, long_version = pk_cli_core::version!(), about, long_about = None)]
+CliInfo::new(/* … */).with_build(pk_cli_core::build_info!())
+```
+
+| Rule | |
+|---|---|
+| `commit` | the full commit of the repository that tracks the CLI's crate, read when the CLI's code is compiled. Left out, with `dirty`, where there is none (an archive, a crate in another repository's ignored directory) or no git; `--version` then says `commit unknown` |
+| `dirty` | whether a tracked file differed from that commit. Untracked files do not count |
+| `built_at` | when the CLI's code was compiled, RFC 3339 in UTC; `SOURCE_DATE_EPOCH` when set |
+| Staleness | a commit, a checkout or a pull recompiles the crate the macro is in: the compiler tracks HEAD and its log, or, where HEAD has no log (`core.logAllRefUpdates` off), the branch's file, `packed-refs` and the index. Editing a file that is not compiled in recompiles nothing |
+| Why a macro | a dependency's build script runs in the dependency's directory, once for every CLI sharing a target directory, and not when the CLI's code changes, so it can name another repository's commit or call a modified tree clean. The macro (`pk-cli-buildinfo`) runs in the CLI's own compile |
 
 ### 1.7 Security & privacy invariants
 
@@ -693,10 +751,11 @@ AGENTS.md, same house style as the CLIs.
 | Crate | Contents | Replaces (today) |
 |---|---|---|
 | `pk-cli-core` | `GlobalArgs` clap flatten struct; `ExitCode` enum per 1.5; error type with `code` slugs, a typed `Reason` and a remedy apart from the message; output renderer (key/value blocks, pipe tables, JSON emit incl. error shape, `emit_list`/`emit_one` for plain lists and single resources); date/money types (`Money` and its grouped `$1,234.56` text display, ISO parsing helpers, UTC and local-timezone `today`); the §1.3 confirmation gate (`confirm`); reference resolution (`resolve::pick` — exact name, exact id, case-insensitive name, unique partial; ties are exit 4 naming the candidates) | fpl/xfin `output.rs`+`dates.rs`+`error.rs`, lrfl `formatter.rs`, tojfl `output.rs`; ghome/govee/lofty `confirm`, ghome/govee resolve ladders |
-| `pk-cli-secrets` | keychain read/write/delete under `piekstra.<bin>`; typed one-item JSON credentials (`get_json`/`set_json`) and legacy-service migration (`migrate_from`); secret ingestion (`--stdin`/`--from-env`/`--op` args + logic); 1Password reads through `op` (`OpRef`, `OnePassword`); runtime source precedence (`SecretResolver`, `SourceOrder`); `auth set-credential` command impl | fpl/xfin `secrets.rs`, lrfl `auth/secrets.rs`; ghome `session.rs`/tplc `keychain.rs` item consolidation |
+| `pk-cli-buildinfo` | the compile-time stamp behind core's `build_info!` and `version!` (§1.6): the commit, whether the tree was modified and the build time, read in the CLI's own compile. A proc macro with no dependencies; a CLI uses the core macros | dating an installed binary by its file time |
+| `pk-cli-secrets` | keychain read/write/delete under `piekstra.<bin>`; typed one-item JSON credentials (`get_json`/`set_json`) and legacy-service migration (`migrate_from`); reads that raise no dialog, or say who refused (`get_quiet`, `get_asking`), and the running binary's signature (`signing`); secret ingestion (`--stdin`/`--from-env`/`--op` args + logic); 1Password reads through `op` (`OpRef`, `OnePassword`); runtime source precedence (`SecretResolver`, `SourceOrder`); `auth set-credential` command impl | fpl/xfin `secrets.rs`, lrfl `auth/secrets.rs`; ghome `session.rs`/tplc `keychain.rs` item consolidation |
 | `pk-cli-config` | `~/.config/<bin>/config.json` load/save (owner-only, replaced atomically), typed get/set, `config` subcommand impl, `--config` override; `profile`, one profile per login, `--profile` resolution and `profile-list/v1` (§2.5) | four `config.rs` variants |
 | `pk-cli-selfupdate` | GitHub-release check + in-place replace, `--check`/`-y`/`--json`, `self-update/v1` DTO, release-asset naming convention, a note after an install (`run_noting`) | ~580 duplicated lines across 4 repos |
-| `pk-cli-auth` | `AuthCmd` clap enum + driver trait: CLI supplies `verify()`/`login()`, crate supplies status DTO (`auth-status/v1`), logout, prompting rules; `otp`, the one-time-code login (request, park for `--code`, mailbox read or prompt); `refresh_lock`, the cross-process lock around a rotating refresh token's renewal (§1.7); `oauth`, OAuth 2 sign-in for a native CLI: the authorization code with PKCE S256 and `state`, the loopback redirect, the code exchange, the refresh grant and dynamic client registration, over `Transport` (§2.4); `vault`, every secret a CLI keeps under one keychain item (§2.5) | four auth command modules; the per-CLI park-and-resume code loops; rhap's `token_refresh.rs` and `oauth.rs` |
+| `pk-cli-auth` | `AuthCmd` clap enum + driver trait: CLI supplies `verify()`/`login()`, crate supplies status DTO (`auth-status/v1`), logout, prompting rules; `otp`, the one-time-code login (request, park for `--code`, mailbox read or prompt); `refresh_lock`, the cross-process lock around a rotating refresh token's renewal (§1.7); `oauth`, OAuth 2 sign-in for a native CLI: the authorization code with PKCE S256 and `state`, the loopback redirect, the code exchange, the refresh grant and dynamic client registration, over `Transport` (§2.4); `vault`, every secret a CLI keeps under one keychain item (§2.5); `key`, the `auth key` command (`auth-key/v1`, §1.4) | four auth command modules; the per-CLI park-and-resume code loops; rhap's `token_refresh.rs` and `oauth.rs` |
 | `pk-cli-http` | reqwest client builder (UA, cookie store, timeouts, retry-with-backoff), `BlockingTransport` (a blocking client behind core's `Transport`: no redirects, cookies or default headers), `api` passthrough command impl, error→exit-code-5 mapping | per-CLI `client.rs` boilerplate (session logic stays per-CLI) |
 | `pk-cli-core` (transport) | the seam a provider client is written against so it runs natively and in a WebAssembly Worker: `HttpRequest` (query parameters percent-encoded), `HttpResponse` (status, headers and body text), the async `Transport` trait with no `Send` bound and one contract for every implementation (no redirects followed, no state between sends, a request with no HTTP answer is `Upstream` naming the origin only), the separate `PlatformSigner` trait for platform ECDSA (so a transport wrapper cannot silently drop it), and `block_on` to drive a blocking transport's futures | a per-CLI `http.rs` seam, and a second copy of every provider client for the Worker |
 | `pk-cli-core` (private_file) | the one owner-only writer for files that hold the owner's data: `write(path, bytes, Replace)` creates `0600`, and `Replace::Always` replaces by a synced temporary file renamed over the path (a symlink at the path replaced, not followed; the directory sync after the rename best effort); `create_dir_all` makes missing directories `0700` and leaves existing ones; `resolve_links` follows a symlink chain to its final target, which need not exist, for a caller that keeps a link. Used by `ConfigStore::save`, the vault and `pk-cli-drive` | three writers (config, vault, drive) that had drifted on symlinks and directory syncs, and the copy each CLI wrote for its own config |
@@ -1154,11 +1213,12 @@ secret in a file of its own:
 
 | Rule | |
 |---|---|
-| The key | one keychain item, account `vault-key` in `piekstra.<bin>`: a random 256-bit key. It is read once per `Vault` value and kept (a process that opens its secrets more than once shares one `Arc<Vault>`, and `Vault::load_key` bounds that first read; `Vault::bound_key_reads` bounds every later one, for a server or a scheduled run), and only when an entry exists or is written, so a logged-out run reads nothing and raises no dialog. The first write creates it, under a lock file in the vault so two processes never make two keys, reads it back, and only then seals anything. It is never replaced while entries exist: a key missing with entries present is an error naming the remedy, since a new key would lose them silently. A random key id (`.key.id`) changes whenever a key is made or the vault cleared; a write holds the key lock and checks it, so a process that cached a key before another cleared the vault makes a new key instead of sealing with the deleted one, and a read that fails to decrypt reloads the key once when the id moved |
+| The key | one keychain item, account `vault-key` in `piekstra.<bin>`: a random 256-bit key. It is read once per `Vault` value and kept (a process that opens its secrets more than once shares one `Arc<Vault>`, and `Vault::load_key` bounds that first read; `Vault::bound_key_reads` bounds every later one, for a server or a scheduled run; `Vault::load_key_quietly` raises no dialog and answers `NeedsPerson` when one is needed, for a run nobody is watching; it answers for the write after it too, so it reads an empty vault's key, and with no key says `NeedsPerson` for a locked keychain), and only when an entry exists or is written, so a logged-out run reads nothing and raises no dialog. The first write creates it, under a lock file in the vault so two processes never make two keys, reads it back, and only then seals anything. It is never replaced while entries exist: a key missing with entries present is an error naming the remedy, since a new key would lose them silently. A random key id (`.key.id`) changes whenever a key is made or the vault cleared; a write holds the key lock and checks it, so a process that cached a key before another cleared the vault makes a new key instead of sealing with the deleted one, and a read that fails to decrypt reloads the key once when the id moved |
 | Where | `~/.config/<bin>/vault/` (`Vault::for_binary`), anchored to the home directory alone as `RefreshLock`'s file is (§1.7), so a launchd agent and a terminal open one vault. The directory is `0700`, and each entry, `.key.lock` (empty) and `.key.id` (random, renewed at key creation and by `clear`) are `0600`. `clear` leaves the last two, which hold no secret: removing a lock another run waits on splits it, and the renewed id is how a process holding the old key learns it is gone |
 | An entry | `PKV1`, a 24-byte random nonce, and the XChaCha20-Poly1305 ciphertext of `{"name", "value"}`, in a file named by the SHA-256 of the name, so no name is on disk in the clear (the hash is unkeyed, so a reader of the owner-only directory could test a guessed name, never read one). The file name is the authenticated data and the decrypted name must be the one asked for, so a file copied over another reads as an error, never as the other entry. An error names the file and never a value |
 | Writes | to a temporary file, synced, renamed over the entry, and the directory synced: a crash leaves the old entry or the new one. Entries are apart, so a write to one never touches another; writes to one entry are serialised the way the CLI already serialises them (a session under `RefreshLock`) |
 | API | `get`, `put`, `delete` (no key needed), `contains` (whether an entry's file exists; reads no key and does not decrypt, so an entry sealed with a lost key still counts and `get` reports it), `names` (sorted) and `list` (the names, and apart from them the files that do not decrypt, so one damaged entry leaves the others listed), `get_json` and `put_json` (an entry that does not parse is an error, never `None`, as `CredentialStore::get_json`), `clear` (every entry and the key item, under the key lock: the reset after a lost or damaged key, safe against another run's write in flight) |
+| `auth key` | `Vault::check_key` (`auth-key/v1`, §1.4): the key read from the keychain past the vault's cache, whether or not there are entries. At most one read may raise a dialog, and it is never tried again. On macOS a read with interaction turned off (`SecKeychainSetUserInteractionAllowed`) comes first and says whether a dialog is needed, and another follows a dialog that was answered: macOS does not report the button, and lets this binary read again without asking only after Always Allow. Neither can raise a dialog: macOS refuses them in milliseconds, for the access list, the partition list (a newly built binary) and a locked keychain alike. An item absent from a locked keychain is found absent without asking (`QuietRead::AbsentLocked`, told apart because storing one there would ask to unlock it). `--no-dialog` stops at the first; `--wait` bounds the one that may ask. The CLI dispatches it before anything else that opens the vault. `KeyStore` gains `get_quiet`, `get_asking` and `keychain_service` with defaults that claim nothing, so a CLI's own store around a `CredentialStore` forwards them. A CLI with a keychain item and no vault checks the item with `key::check_item` |
 | Remedies | an entry that does not decrypt is `REMEDY_DELETE_ENTRY` (that one sign-in; the others are unaffected); a missing or malformed key is `REMEDY_CLEAR` (`clear` and sign in again). A CLI replaces each with its own command |
 | The key lock | waited for at most 30 seconds (`KEY_WAIT`, `wait_at_most`), then exit 5 naming the file, so a first write stalled on a keychain dialog never hangs another run |
 | Tests | `Vault::new(MemoryKeys::new(), dir)` with a directory of the test's own; `MemoryKeys` counts reads and writes, so a test can show what reaches the keychain. A CLI's surface tests give it their `<PREFIX>_KEYCHAIN_SERVICE` override and a temporary `HOME` |

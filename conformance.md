@@ -12,7 +12,8 @@ status here.
 - [ ] `config path|show|set|unset`
 - [ ] `self-update [--check] [-y]` with self-update/v1 DTO
 - [ ] `completions <shell>`
-- [ ] `info` emitting cli-info/v1
+- [ ] `info` emitting cli-info/v1, with `build` (`with_build(pk_cli_core::build_info!())`), and `--version` saying the same (`long_version = pk_cli_core::version!()`); cli-common v0.39.0 or later (DESIGN.md §1.6)
+- [ ] A CLI with a keychain credential: `auth key` (auth-key/v1, `--no-dialog`, `--wait`) through `Vault::check_key`, or `key::check_item` without a vault, dispatched before anything that opens the vault; a `KeyStore` of its own forwards `get_quiet`, `get_asking` and `keychain_service`; cli-common v0.39.0 or later (DESIGN.md §1.4, §2.5)
 - [ ] Secrets only via keychain (`piekstra.<bin>`), stdin, env, or 1Password through `op` (`--op <REF>`) — never argv
 - [ ] A URL or host from outside the binary goes through `pk_cli_core::transport::require_secure_url` before a credential travels with it; an `api` passthrough resolves its path with `pk_cli_http::ApiArgs::secure_url`. A passthrough or a host override may name any `https` host, since the user chose it. A URL from a provider's response maps a refusal to `CliError::Upstream`, and gets no credential unless its parsed host is the provider's
 - [ ] A provider client that attaches a credential follows no redirects (`Policy::none()`, as `BlockingTransport` does, and every client behind `Transport` keeps that), or sets `transport::secure_redirects`, or `transport::same_host_redirects` if it sends a provider's own auth header, which reqwest keeps on every hop

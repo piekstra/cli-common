@@ -7,7 +7,10 @@
 //! `confirm` gate). Credentials show both 1Password paths: `auth login --op`
 //! (or a configured `op_ref`) at login, and a `SecretResolver` walking env,
 //! keychain and 1Password in the configured `secret_sources` order when
-//! `summary` needs the credential. The `state` noun keeps small files in the
+//! `summary` needs the credential. `auth key` is the first call after an
+//! install: the one command sure to read the keychain, saying whether macOS
+//! asked. `--version` and `info` say which commit the binary was built from
+//! (`version!`, `build_info!`). The `state` noun keeps small files in the
 //! owner's Drive (`pk-cli-drive`): a mounted folder (`data_root`) or an
 //! rclone remote (`remote`) behind the stale-while-revalidate read cache,
 //! with `state sync` as the background refresh's child. `auth login
@@ -20,9 +23,12 @@
 //! serves the demo devices as MCP tools
 //! (`pk-cli-mcp`) over stdio, for Claude and other MCP clients.
 
+use std::sync::Arc;
+
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use pk_cli_auth::{AuthStatus, LoginArgs, LogoutArgs, SetCredentialArgs};
+use pk_cli_auth::vault::KeyStore;
+use pk_cli_auth::{key, AuthStatus, KeyArgs, LoginArgs, LogoutArgs, SetCredentialArgs};
 use pk_cli_browser::{BrowserArgs, BrowserError, Capture, Captured, Confirm, HostRule, Launch};
 use pk_cli_config::ConfigStore;
 use pk_cli_core::info::{AuthInfo, CliInfo};
@@ -44,7 +50,14 @@ const CONFIG_KEYS: &str = "username, account, op_ref, secret_sources, data_root,
 
 /// Example member of the piekstra CLI family (conforms to piekstra-cli/1).
 #[derive(Parser, Debug)]
-#[command(name = BIN, version, about, long_about = None)]
+// `--version` says what the binary was built from; `-V` is the version alone.
+#[command(
+    name = BIN,
+    version,
+    long_version = pk_cli_core::version!(),
+    about,
+    long_about = None
+)]
 struct Cli {
     #[command(flatten)]
     common: CommonArgs,
@@ -93,6 +106,9 @@ enum AuthCmd {
     Login(LoginCmd),
     /// Report credential/session state (auth-status/v1).
     Status,
+    /// Read the stored credential from the keychain once, past every cache,
+    /// and say what the keychain did (auth-key/v1).
+    Key(KeyArgs),
     /// Clear the session and the browser profile a --browser sign-in keeps;
     /// --forget also removes the stored credential.
     Logout(LogoutArgs),
@@ -421,7 +437,8 @@ fn run(cli: &Cli) -> Result<(), CliError> {
                     "mcp",
                 ],
             )
-            .with_profiles(&[pk_cli_utility::PROFILE, pk_cli_documents::PROFILE]);
+            .with_profiles(&[pk_cli_utility::PROFILE, pk_cli_documents::PROFILE])
+            .with_build(pk_cli_core::build_info!());
             output::json(&serde_json::to_value(&info).expect("CliInfo serializes to JSON"));
             Ok(())
         }
@@ -503,6 +520,17 @@ fn auth(
             status.authenticated = stored;
             status.browser_profile = browser_profile_status(|| pk_cli_browser::profile_exists(BIN));
             status.emit(cli.common.json);
+            Ok(())
+        }
+        AuthCmd::Key(args) => {
+            // A CLI that keeps a vault checks its key instead:
+            // `Vault::for_binary(BIN)?.check_key(args)`.
+            let keys: Arc<dyn KeyStore> = Arc::new(CredentialStore::for_binary(BIN));
+            let code = key::check_item(&keys, &user, args, |_| Ok(()))?.emit(cli.common.json);
+            if code != 0 {
+                // The report is the one document; an error would be another.
+                std::process::exit(code);
+            }
             Ok(())
         }
         AuthCmd::Logout(args) => {
