@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use super::*;
-use crate::vault::{MemoryKeys, QuietLoad, Vault, KEY_ACCOUNT};
+use crate::vault::{KeyLoad, MemoryKeys, QuietLoad, Vault, KEY_ACCOUNT, REMEDY_CLEAR};
 
 /// What the person does with the dialog.
 #[derive(Clone, Copy, PartialEq)]
@@ -239,10 +239,7 @@ fn nothing_stored_is_no_failure_and_a_lost_key_is_one() {
     let lost = vault.check_key(&KeyArgs::default()).unwrap();
     assert_eq!(lost.outcome, KeyOutcome::Absent);
     assert_eq!(lost.failure().unwrap().exit_code(), 1);
-    assert_eq!(
-        lost.failure().unwrap().remedy(),
-        Some(crate::vault::REMEDY_CLEAR)
-    );
+    assert_eq!(lost.failure().unwrap().remedy(), Some(REMEDY_CLEAR));
 }
 
 #[test]
@@ -522,8 +519,58 @@ fn a_quiet_load_leaves_an_open_dialog_alone() {
     *keys.granted.lock().unwrap() = false;
     let vault = tmp.vault(Arc::clone(&keys));
     let waited = vault.load_key(Duration::from_millis(50)).unwrap();
-    assert_eq!(waited, crate::vault::KeyLoad::Waiting);
+    assert_eq!(waited, KeyLoad::Waiting);
     let before = keys.counts();
     assert_eq!(vault.load_key_quietly().unwrap(), QuietLoad::NeedsPerson);
     assert_eq!(keys.counts(), before);
+}
+
+/// The exit code, reason and remedy a CLI that stops on a load's answer
+/// gives, the same in every CLI.
+#[test]
+fn a_load_that_stops_a_command_says_how_it_fails() {
+    let failures = [
+        (QuietLoad::Loaded.failure(), None),
+        (QuietLoad::Empty.failure(), None),
+        (QuietLoad::NeedsPerson.failure(), Some(3)),
+        (QuietLoad::Missing.failure(), Some(1)),
+        (QuietLoad::Unsupported.failure(), Some(1)),
+        (KeyLoad::Loaded.failure(), None),
+        (KeyLoad::Empty.failure(), None),
+        (KeyLoad::Waiting.failure(), Some(3)),
+        (KeyLoad::Missing.failure(), Some(1)),
+    ];
+    for (failure, exit) in &failures {
+        assert_eq!(failure.as_ref().map(CliError::exit_code), *exit);
+        if let Some(failure) = failure {
+            let unreadable = (*exit == Some(3)).then_some(Reason::CredentialUnreadable);
+            assert_eq!(failure.reason(), unreadable, "{failure}");
+            assert!(failure.remedy().is_some(), "{failure}");
+        }
+    }
+    let remedy = |load: QuietLoad| load.failure().unwrap().remedy().unwrap().to_string();
+    let person = remedy(QuietLoad::NeedsPerson);
+    assert!(person.contains("`auth key`"), "{person}");
+    assert!(person.contains("unlock the login keychain"), "{person}");
+    assert_eq!(remedy(QuietLoad::Missing), REMEDY_CLEAR);
+    assert!(remedy(QuietLoad::Unsupported).contains("update this CLI"));
+    assert_eq!(QuietLoad::Missing.failure(), KeyLoad::Missing.failure());
+}
+
+/// A lost key reads the same from the load and from the read after it, but
+/// for the directory.
+#[test]
+fn a_lost_key_fails_a_load_as_it_fails_a_read() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(MemoryKeys::new());
+    tmp.vault(Arc::clone(&keys))
+        .put("entry", &Secret::new("x"))
+        .unwrap();
+    keys.forget();
+    let vault = tmp.vault(keys);
+    let load = vault.load_key_quietly().unwrap().failure().unwrap();
+    let read = vault.get("entry").unwrap_err();
+    assert_eq!(load.exit_code(), read.exit_code());
+    assert_eq!(load.code(), read.code());
+    assert_eq!(load.remedy(), read.remedy());
 }

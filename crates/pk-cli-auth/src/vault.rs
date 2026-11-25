@@ -325,6 +325,20 @@ pub enum KeyLoad {
     Waiting,
 }
 
+impl KeyLoad {
+    /// What a CLI that stops on this answer fails with, so that every CLI
+    /// says the same and exits the same. `None` where the vault can be used,
+    /// [`Empty`](Self::Empty) among them: what an empty vault means is the
+    /// command's own answer.
+    pub fn failure(self) -> Option<CliError> {
+        match self {
+            Self::Loaded | Self::Empty => None,
+            Self::Missing => Some(lost("the vault")),
+            Self::Waiting => Some(waiting_for_keychain()),
+        }
+    }
+}
+
 /// What [`Vault::load_key_quietly`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -345,6 +359,51 @@ pub enum QuietLoad {
     /// This keychain cannot be read without possibly asking; nothing was
     /// read. [`Vault::load_key`] bounds a read that may.
     Unsupported,
+}
+
+impl QuietLoad {
+    /// What a CLI that stops on this answer fails with, so that every CLI
+    /// says the same and exits the same: exit 3 (reason
+    /// `credential_unreadable`) for [`NeedsPerson`](Self::NeedsPerson), 1
+    /// for [`Missing`](Self::Missing) and
+    /// [`Unsupported`](Self::Unsupported). `None` where the vault can be
+    /// used, [`Empty`](Self::Empty) among them: what an empty vault means is
+    /// the command's own answer.
+    ///
+    /// ```no_run
+    /// # fn run(vault: &pk_cli_auth::vault::Vault) -> Result<(), pk_cli_core::CliError> {
+    /// if let Some(failure) = vault.load_key_quietly()?.failure() {
+    ///     return Err(failure);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// A later answer gets its words here, so a CLI that calls this needs no
+    /// arm for it.
+    pub fn failure(self) -> Option<CliError> {
+        match self {
+            Self::Loaded | Self::Empty => None,
+            Self::Missing => Some(lost("the vault")),
+            Self::NeedsPerson => Some(key::unread(
+                "the vault's key cannot be used until someone answers the keychain at the screen"
+                    .into(),
+                "unlock the login keychain if it is locked, then run `auth key` at the screen \
+                 and choose Always Allow",
+            )),
+            Self::Unsupported => Some(
+                CliError::Keychain(
+                    "this keychain cannot be read without possibly asking someone; nothing was \
+                     read"
+                        .into(),
+                )
+                .with_remedy(
+                    "run this where someone can answer the keychain; on macOS or Windows, update \
+                     this CLI",
+                ),
+            ),
+        }
+    }
 }
 
 /// A bounded key read left to answer in the background, with the vault's
@@ -1140,21 +1199,22 @@ fn parse_key(item: &Secret) -> Result<Key, CliError> {
 }
 
 fn waiting_for_keychain() -> CliError {
-    CliError::Auth(
+    key::unread(
         "the keychain has not yet answered whether this program may read the vault's key; \
          on macOS a dialog asking for it is open"
             .into(),
-    )
-    .with_remedy(
         "answer the keychain dialog, choosing Always Allow so it does not ask again, then try \
          again",
     )
 }
 
 fn key_lost(dir: &Path) -> CliError {
+    lost(&format!("the vault at {}", dir.display()))
+}
+
+fn lost(vault: &str) -> CliError {
     CliError::Keychain(format!(
-        "the vault at {} has entries but its key ({KEY_ACCOUNT}) is not in the keychain",
-        dir.display()
+        "{vault} has entries but its key ({KEY_ACCOUNT}) is not in the keychain"
     ))
     .with_remedy(REMEDY_CLEAR)
 }

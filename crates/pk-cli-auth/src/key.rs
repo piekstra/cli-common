@@ -312,7 +312,7 @@ fn ask(keys: &Arc<dyn KeyStore>, account: &str, wait: Option<u64>) -> End {
     }
 }
 
-fn unread(message: String, remedy: &str) -> CliError {
+pub(crate) fn unread(message: String, remedy: &str) -> CliError {
     CliError::Auth(message)
         .because(Reason::CredentialUnreadable)
         .with_remedy(remedy)
