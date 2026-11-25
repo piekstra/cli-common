@@ -218,7 +218,10 @@ mod macos {
             }
         }
 
-        /// The states are those macOS gives for a scratch keychain.
+        /// The states are those macOS gave for a scratch keychain, checked by
+        /// hand. Such a probe opens only a keychain file that exists, and
+        /// asserts so first: a write through a `SecKeychain` whose
+        /// file is gone succeeds, into the login keychain.
         #[test]
         fn a_keychain_is_unlocked_only_where_macos_says_so() {
             assert!(is_unlocked(0, 7));

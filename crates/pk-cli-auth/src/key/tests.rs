@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use super::*;
-use crate::vault::{MemoryKeys, QuietLoad, Vault, KEY_ACCOUNT};
+use crate::vault::{KeyLoad, MemoryKeys, QuietLoad, Vault, KEY_ACCOUNT, REMEDY_CLEAR};
 
 /// What the person does with the dialog.
 #[derive(Clone, Copy, PartialEq)]
@@ -239,10 +239,7 @@ fn nothing_stored_is_no_failure_and_a_lost_key_is_one() {
     let lost = vault.check_key(&KeyArgs::default()).unwrap();
     assert_eq!(lost.outcome, KeyOutcome::Absent);
     assert_eq!(lost.failure().unwrap().exit_code(), 1);
-    assert_eq!(
-        lost.failure().unwrap().remedy(),
-        Some(crate::vault::REMEDY_CLEAR)
-    );
+    assert_eq!(lost.failure().unwrap().remedy(), Some(REMEDY_CLEAR));
 }
 
 #[test]
@@ -468,12 +465,12 @@ fn a_quiet_load_of_an_empty_vault_answers_for_the_write_after_it() {
 /// macOS finds an item absent from a locked keychain without asking, and
 /// asks to unlock it for the key a first write makes.
 #[test]
-fn a_quiet_load_with_no_key_in_a_locked_keychain_needs_a_person() {
+fn a_quiet_load_with_no_key_in_a_locked_keychain_is_told_from_an_empty_one() {
     let tmp = TempDir::new();
     let keys = AskingKeys::new(None, Person::Away);
     *keys.locked.lock().unwrap() = true;
     let vault = tmp.vault(Arc::clone(&keys));
-    assert_eq!(vault.load_key_quietly().unwrap(), QuietLoad::NeedsPerson);
+    assert_eq!(vault.load_key_quietly().unwrap(), QuietLoad::EmptyLocked);
     // `auth key` is about the read, which asks nobody.
     for args in [KeyArgs::default(), no_dialog()] {
         let absent = vault.check_key(&args).unwrap();
@@ -522,8 +519,61 @@ fn a_quiet_load_leaves_an_open_dialog_alone() {
     *keys.granted.lock().unwrap() = false;
     let vault = tmp.vault(Arc::clone(&keys));
     let waited = vault.load_key(Duration::from_millis(50)).unwrap();
-    assert_eq!(waited, crate::vault::KeyLoad::Waiting);
+    assert_eq!(waited, KeyLoad::Waiting);
     let before = keys.counts();
     assert_eq!(vault.load_key_quietly().unwrap(), QuietLoad::NeedsPerson);
     assert_eq!(keys.counts(), before);
+}
+
+/// The exit code, reason and remedy a CLI that stops on a load's answer
+/// gives, the same in every CLI.
+#[test]
+fn a_load_that_stops_a_command_says_how_it_fails() {
+    let unreadable = Some(Reason::CredentialUnreadable);
+    for (failure, exit, reason) in [
+        (QuietLoad::NeedsPerson.failure(), 3, unreadable),
+        (
+            QuietLoad::EmptyLocked.failure(),
+            3,
+            Some(Reason::NoCredential),
+        ),
+        (QuietLoad::Missing.failure(), 1, None),
+        (QuietLoad::Unsupported.failure(), 1, None),
+        (KeyLoad::Waiting.failure(), 3, unreadable),
+        (KeyLoad::Missing.failure(), 1, None),
+    ] {
+        let failure = failure.unwrap();
+        assert_eq!((failure.exit_code(), failure.reason()), (exit, reason));
+        assert!(failure.remedy().is_some(), "{failure}");
+    }
+    for usable in [QuietLoad::Loaded, QuietLoad::Empty] {
+        assert_eq!(usable.failure(), None);
+    }
+    for usable in [KeyLoad::Loaded, KeyLoad::Empty] {
+        assert_eq!(usable.failure(), None);
+    }
+    let remedy = |load: QuietLoad| load.failure().unwrap().remedy().unwrap().to_string();
+    assert!(remedy(QuietLoad::NeedsPerson).contains("`auth key`"));
+    assert!(remedy(QuietLoad::EmptyLocked).contains("unlock the login keychain"));
+    assert_eq!(remedy(QuietLoad::Missing), REMEDY_CLEAR);
+    assert!(remedy(QuietLoad::Unsupported).contains("update this CLI"));
+    assert_eq!(QuietLoad::Missing.failure(), KeyLoad::Missing.failure());
+}
+
+/// A lost key reads the same from the load and from the read after it, but
+/// for the directory.
+#[test]
+fn a_lost_key_fails_a_load_as_it_fails_a_read() {
+    let tmp = TempDir::new();
+    let keys = Arc::new(MemoryKeys::new());
+    tmp.vault(Arc::clone(&keys))
+        .put("entry", &Secret::new("x"))
+        .unwrap();
+    keys.forget();
+    let vault = tmp.vault(keys);
+    let load = vault.load_key_quietly().unwrap().failure().unwrap();
+    let read = vault.get("entry").unwrap_err();
+    assert_eq!(load.exit_code(), read.exit_code());
+    assert_eq!(load.code(), read.code());
+    assert_eq!(load.remedy(), read.remedy());
 }
