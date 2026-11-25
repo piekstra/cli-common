@@ -9,7 +9,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
-use crate::cache::CachedRemote;
+use crate::cache::{CachedRemote, Reads};
 #[cfg(feature = "google")]
 use crate::google::Drive;
 use crate::rclone::Remote;
@@ -199,7 +199,7 @@ impl<R: RemoteStore> Store for CachedRemote<R> {
         CachedRemote::list_entries(self, rel)
     }
     fn download(&self, rel: &str) -> Result<LocalCopy, CliError> {
-        download(self.remote(), rel)
+        self.answered(download(self.remote(), rel))
     }
     fn write_many(&self, files: &[(&str, &[u8])]) -> Result<usize, CliError> {
         CachedRemote::write_many(self, files)
@@ -468,6 +468,20 @@ impl Backend {
                 s.mkdir(rel)?;
                 Ok(true)
             }
+        }
+    }
+
+    /// Where the read cache's answers came from so far
+    /// ([`CachedRemote::reads`]); `None` for a backend with no cache, where
+    /// every answer came from the store itself.
+    pub fn reads(&self) -> Option<Reads> {
+        match self {
+            Backend::Cached(c) => Some(c.reads()),
+            #[cfg(feature = "google")]
+            Backend::CachedDrive(c) => Some(c.reads()),
+            Backend::Mount(_) | Backend::Remote(_) => None,
+            #[cfg(feature = "google")]
+            Backend::Drive(_) => None,
         }
     }
 

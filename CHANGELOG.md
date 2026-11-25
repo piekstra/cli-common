@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.39.2 — 2026-11-25
+
+- `pk-cli-drive`: `CachedRemote::reads` says where a command's answers came from, for one that
+  reports whether its output is the read cache's or the remote's and how old it is. `Reads` counts
+  the reads the cache answered (`cache`; of those, `stale` past the TTL and `unreachable` because
+  the remote failed) and those the remote answered (`remote`), and gives the age of the oldest copy
+  served (`oldest`; `None` when none was, or when a copy's age is unknown). It covers file reads,
+  listings, `exists` and `Backend::local_copy` downloads. A refresh, the re-reads before a write
+  and a failed read are not counted. `Backend::reads` is the same for the backend a CLI holds,
+  `None` where it has no cache. No read behaves differently.
+
 ## v0.39.1 — 2026-11-24
 
 - `pk-cli-auth`: `QuietLoad::failure` and `KeyLoad::failure` give the error a CLI that stops on a
