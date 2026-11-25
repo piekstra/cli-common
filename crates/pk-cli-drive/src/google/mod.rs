@@ -42,6 +42,7 @@ mod error;
 mod files;
 mod pool;
 mod profiles;
+mod sharing;
 
 #[cfg(any(test, feature = "fake-google"))]
 pub mod fake;
@@ -60,3 +61,4 @@ pub use drive::{
 pub use endpoints::Endpoints;
 pub use files::{md5_file, About, DriveFile, ShortcutDetails, RESUMABLE_ABOVE};
 pub use profiles::{client_entry, token_entry, DriveProfile, ProfileStore};
+pub use sharing::{ItemDetails, Permission, Sharing};
