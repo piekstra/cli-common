@@ -13,7 +13,7 @@ use pk_cli_core::{CliError, Reason};
 
 use super::api::Api;
 use super::files::{md5_file, quote, About, DriveFile, Source, Target};
-use super::sharing::{ItemDetails, Sharing};
+use super::sharing::{refused, ItemDetails, Sharing};
 use crate::backend::{check_deletable, occupied, FileEntry};
 use crate::remote::{RemoteRead, RemoteStore};
 
@@ -170,6 +170,7 @@ pub enum ItemKind {
 
 /// One item of a listing for showing ([`Drive::list_items`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
 pub struct ListedItem {
     /// Its path under the listed folder. Two items can share one.
     pub rel: String,
@@ -1302,21 +1303,28 @@ impl Drive {
 
     /// What Drive says of the item at `rel`, beyond a listing: its parent,
     /// its owner, whether this account may share it. `None` when nothing is
-    /// there. The empty path is the folder id the spec names, or the folder
-    /// at the spec's own path. A path that two items share is an error
+    /// there. The empty path is the item the spec's id names (a folder, a file
+    /// or a trashed item), or the folder at the spec's own path; an id Drive
+    /// does not know is exit 4, as it is everywhere else in this store. A path that two items share is an error
     /// (`duplicate_name`). Under [`Listing::Whole`] a shortcut on the path is
     /// followed to its target.
     ///
     /// Trashed items are reached only by the id a spec names, and say so.
     pub fn details(&self, rel: &str) -> Result<Option<ItemDetails>, CliError> {
-        match self.locate(rel)? {
-            Some((id, via)) => self.api.details(&self.reading(rel), &id, via),
-            None => Ok(None),
+        let Some((id, via)) = self.locate(rel)? else {
+            return Ok(None);
+        };
+        let what = self.reading(rel);
+        let item = self.api.details(&what, &id, via)?;
+        if item.is_none() && Self::segments(rel)?.is_empty() {
+            return Err(self.unknown_item(&what));
         }
+        Ok(item)
     }
 
     /// Everyone who may open the item at `rel`, and where each grant comes
-    /// from. `None` when nothing is there. Read only: nothing is shared.
+    /// from. `None` when nothing is at a path; a wrong id is exit 4. Read only:
+    /// nothing is shared.
     ///
     /// Drive lists grants only for an account that may change them, as
     /// [`ItemDetails::can_share`] says; another may be refused (reason
@@ -1329,6 +1337,9 @@ impl Drive {
         };
         let what = self.reading(rel);
         let Some(item) = self.api.details(&what, &id, via)? else {
+            if Self::segments(rel)?.is_empty() {
+                return Err(self.unknown_item(&what));
+            }
             return Ok(None);
         };
         let can_share = item.can_share;
@@ -1340,6 +1351,19 @@ impl Drive {
 
     fn reading(&self, rel: &str) -> String {
         format!("reading {}", self.shown(&self.abs(rel)))
+    }
+
+    /// The spec names an item Drive does not know, or this sign-in may not
+    /// see: exit 4, as every other operation on a wrong id is.
+    fn unknown_item(&self, what: &str) -> CliError {
+        CliError::NotFound(format!(
+            "{what}: Google Drive has no item with that id that this sign-in may see"
+        ))
+        .with_remedy(
+            "check the id (the part of the item's URL after /folders/ or /d/); under the \
+             drive.file scope an item is visible only when one of this app's OAuth clients made \
+             or opened it",
+        )
     }
 
     /// The Drive id of the item at `rel`, and whether the path went through
@@ -1743,7 +1767,7 @@ impl Drive {
 /// Drive's refusal to list who may open an item. A refusal of the sign-in's
 /// scopes keeps its own remedy; one of the item is its owner's to fix.
 fn hidden(e: CliError, can_share: bool) -> CliError {
-    if e.exit_code() != 3 || e.reason() != Some(Reason::Forbidden) || e.remedy().is_some() {
+    if e.exit_code() != 3 || !refused(&e) {
         return e;
     }
     e.because(crate::reason::PERMISSIONS_HIDDEN)

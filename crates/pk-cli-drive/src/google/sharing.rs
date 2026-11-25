@@ -1,7 +1,7 @@
 //! What Drive says of one item beyond a listing: its parent, whether this
 //! account may share it, and who may open it (`permissions.list`). Read only.
 
-use pk_cli_core::CliError;
+use pk_cli_core::{CliError, Reason};
 use serde::{Deserialize, Serialize};
 
 use super::api::Api;
@@ -18,6 +18,7 @@ allowFileDiscovery,expirationTime,deleted,pendingOwner,view,permissionDetails)";
 
 /// One item, as Drive's metadata describes it ([`super::Drive::details`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ItemDetails {
     pub id: String,
     pub name: String,
@@ -46,6 +47,7 @@ pub struct ItemDetails {
 
 /// One grant of access to an item ([`super::Drive::permissions`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct Permission {
     /// Drive's id for the grant, the same for a person on every item.
     pub id: String,
@@ -80,9 +82,18 @@ pub struct Permission {
 
 /// An item and everyone who may open it ([`super::Drive::permissions`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct Sharing {
     pub item: ItemDetails,
     pub permissions: Vec<Permission>,
+}
+
+/// Whether an error is Drive's refusal of the item itself: a 404, or a 403
+/// the sign-in's scopes do not explain. Anything else (a lost sign-in, a
+/// missing scope, a rate limit) stands, with its own remedy.
+pub(super) fn refused(e: &CliError) -> bool {
+    e.exit_code() == 4
+        || (e.exit_code() == 3 && e.reason() == Some(Reason::Forbidden) && e.remedy().is_none())
 }
 
 impl Permission {
@@ -318,12 +329,12 @@ impl Api {
         let open = |p: &&Permission| p.inherited.is_none() && p.role != "owner";
         let parent = match &item.parent {
             Some(id) if !item.limited_access && permissions.iter().any(|p| open(&p)) => {
-                // A folder this sign-in may not read, or is not there to
-                // read, leaves where its grants reach unknown. A failure
-                // that may pass is a failure.
+                // A folder this sign-in may not read leaves where its grants
+                // reach unknown. Any other failure, a lost sign-in included,
+                // is the caller's to see.
                 match self.grants(what, id) {
                     Ok(list) => Some(list),
-                    Err(e) if matches!(e.exit_code(), 3 | 4) => None,
+                    Err(e) if refused(&e) => None,
                     Err(e) => return Err(e),
                 }
             }

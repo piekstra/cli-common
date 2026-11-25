@@ -2201,9 +2201,15 @@ fn details_name_the_parent_of_a_folder_and_of_a_file() {
 
     assert!(d.details("a/none").unwrap().is_none());
     assert!(d.details("none/none").unwrap().is_none());
+    // An id Drive does not know is exit 4 with a remedy, as everywhere else.
     let missing = DriveSpec::new(ProfileName::parse(PROFILE).unwrap(), "1Nothing_here").unwrap();
-    assert!(h.drive_at(&missing).details("").unwrap().is_none());
-    assert!(h.drive_at(&missing).permissions("").unwrap().is_none());
+    for e in [
+        h.drive_at(&missing).details("").unwrap_err(),
+        h.drive_at(&missing).permissions("").unwrap_err(),
+    ] {
+        assert_eq!(e.exit_code(), 4, "{e}");
+        assert!(e.remedy().unwrap().contains("check the id"), "{e}");
+    }
 
     // Where Drive names no parent, none is made up.
     h.fake.hide_parent(&f2(&h));
@@ -2357,6 +2363,29 @@ fn where_the_folder_above_is_out_of_sight_the_source_of_a_grant_is_unknown() {
     let s = sharing(&d, "a/f.txt");
     assert_eq!(s.item.parent, None);
     assert_eq!(grant(&s, "direct@example.test").inherited, None);
+
+    // Nor is the sign-in's loss, or a scope it lacks, while asking for the
+    // folder above: both are reported with their remedy, not "unknown".
+    let h = Harness::new();
+    h.signed_in();
+    let a = h.fake.add_folder(ROOT_ID, "a");
+    let f = h.fake.add_file(&a, "f.txt", b"x");
+    h.fake.share(&f, "user", "reader", "direct@example.test");
+    let parent = format!("/files/{a}/permissions");
+    h.fake
+        .fail_next(&parent, 403, "insufficientPermissions", 1, When::Before);
+    let e = h.drive().permissions("a/f.txt").unwrap_err();
+    assert_eq!(e.exit_code(), 3);
+    assert!(e.remedy().unwrap().contains("login"), "{e}");
+    h.fake.fail_next(&parent, 401, "authError", 9, When::Before);
+    h.fake.revoke_refresh_token();
+    let e = h.drive().permissions("a/f.txt").unwrap_err();
+    assert_eq!(
+        (e.exit_code(), e.reason()),
+        (3, Some(Reason::CredentialRefused)),
+        "{e}"
+    );
+    assert_eq!(e.remedy().is_some(), true);
 
     // A failure that may pass is reported, not taken for "unknown".
     let h = Harness::new();

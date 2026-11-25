@@ -16,7 +16,8 @@
   `permissions_hidden`.
 - `pk-cli-drive`: `ListedItem` gains a `parent` field, the Drive id of the folder the item is
   listed in (for a followed shortcut, the folder holding the shortcut). Code that builds the struct by
-  hand adds it; a reader needs no change.
+  hand adds it; a reader needs no change. It and the new `ItemDetails`, `Permission` and `Sharing` are
+  `#[non_exhaustive]`, so a later field adds nothing to fix; no CLI in the family builds `ListedItem`.
 - `pk-cli-drive` (feature `fake-google`): the fake server answers `permissions.list` and gives each
   file's metadata `ownedByMe`, `shared`, `capabilities.canShare` and `inheritedPermissionsDisabled`.
   Grants on a folder reach what it holds. `FakeDrive::share`, `discoverable`, `view_only`,
