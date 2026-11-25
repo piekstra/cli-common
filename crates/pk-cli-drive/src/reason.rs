@@ -47,3 +47,7 @@ pub const DRIVE_STORAGE_FULL: Reason = Reason::Provider("drive_storage_full");
 
 /// A Drive profile has no OAuth client imported. Exit 2.
 pub const NO_CLIENT: Reason = Reason::Provider("no_client");
+
+/// Drive would not list who may open an item, to an account that may not
+/// change that. Exit 3.
+pub const PERMISSIONS_HIDDEN: Reason = Reason::Provider("permissions_hidden");

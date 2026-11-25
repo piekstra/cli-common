@@ -9,10 +9,11 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use pk_cli_config::profile::ProfileName;
-use pk_cli_core::CliError;
+use pk_cli_core::{CliError, Reason};
 
 use super::api::Api;
 use super::files::{md5_file, quote, About, DriveFile, Source, Target};
+use super::sharing::{ItemDetails, Sharing};
 use crate::backend::{check_deletable, occupied, FileEntry};
 use crate::remote::{RemoteRead, RemoteStore};
 
@@ -174,6 +175,9 @@ pub struct ListedItem {
     pub rel: String,
     /// Its Drive id; for a shortcut that was followed, its target's.
     pub id: String,
+    /// The Drive id of the folder the item is listed in: for a shortcut
+    /// that was followed, the folder holding the shortcut.
+    pub parent: String,
     pub kind: ItemKind,
     pub size: Option<u64>,
     /// Unix seconds.
@@ -976,12 +980,15 @@ impl Drive {
                     }
                     // Every parent the batch holds: a file in two of them
                     // is in each.
-                    let places: Vec<(&str, bool)> = f
+                    let places: Vec<(&str, &str, bool)> = f
                         .parents
                         .iter()
-                        .filter_map(|p| holders.get(p.as_str()).copied())
+                        .filter_map(|p| {
+                            let (under, via) = holders.get(p.as_str())?;
+                            Some((p.as_str(), *under, *via))
+                        })
                         .collect();
-                    let Some(&(first_under, _)) = places.first() else {
+                    let Some(&(_, first_under, _)) = places.first() else {
                         continue;
                     };
                     let item = if shortcut {
@@ -997,7 +1004,7 @@ impl Drive {
                     } else {
                         ItemKind::Document
                     };
-                    for (under, via) in places {
+                    for (parent, under, via) in places {
                         let rel = Self::join(under, &f.name);
                         let via = via || shortcut;
                         if kind == ItemKind::Folder && recursive && walked.insert(item.id.clone()) {
@@ -1006,6 +1013,7 @@ impl Drive {
                         out.push(ListedItem {
                             rel,
                             id: item.id.clone(),
+                            parent: parent.to_string(),
                             kind,
                             size: item.size(),
                             modified: item.modified(),
@@ -1290,6 +1298,73 @@ impl Drive {
         let gone = self.api.trash(&what, &found.file.id)?;
         self.forget(rel);
         Ok(gone)
+    }
+
+    /// What Drive says of the item at `rel`, beyond a listing: its parent,
+    /// its owner, whether this account may share it. `None` when nothing is
+    /// there. The empty path is the folder id the spec names, or the folder
+    /// at the spec's own path. A path that two items share is an error
+    /// (`duplicate_name`). Under [`Listing::Whole`] a shortcut on the path is
+    /// followed to its target.
+    ///
+    /// Trashed items are reached only by the id a spec names, and say so.
+    pub fn details(&self, rel: &str) -> Result<Option<ItemDetails>, CliError> {
+        match self.locate(rel)? {
+            Some((id, via)) => self.api.details(&self.reading(rel), &id, via),
+            None => Ok(None),
+        }
+    }
+
+    /// Everyone who may open the item at `rel`, and where each grant comes
+    /// from. `None` when nothing is there. Read only: nothing is shared.
+    ///
+    /// Drive lists grants only for an account that may change them, as
+    /// [`ItemDetails::can_share`] says; another may be refused (reason
+    /// `permissions_hidden`). Where a grant comes from is Drive's own
+    /// answer when it gives one, and otherwise the folder above's grants,
+    /// which is one more request.
+    pub fn permissions(&self, rel: &str) -> Result<Option<Sharing>, CliError> {
+        let Some((id, via)) = self.locate(rel)? else {
+            return Ok(None);
+        };
+        let what = self.reading(rel);
+        let Some(item) = self.api.details(&what, &id, via)? else {
+            return Ok(None);
+        };
+        let can_share = item.can_share;
+        self.api
+            .sharing(&what, item)
+            .map(Some)
+            .map_err(|e| hidden(e, can_share))
+    }
+
+    fn reading(&self, rel: &str) -> String {
+        format!("reading {}", self.shown(&self.abs(rel)))
+    }
+
+    /// The Drive id of the item at `rel`, and whether the path went through
+    /// a shortcut.
+    fn locate(&self, rel: &str) -> Result<Option<(String, bool)>, CliError> {
+        if self.spec.path.is_empty() && Self::segments(rel)?.is_empty() {
+            // A spec's own id names any item, a folder or a file.
+            return Ok(Some((self.spec.folder.clone(), false)));
+        }
+        let abs = &self.abs(rel);
+        if Self::segments(rel)?.is_empty() {
+            return Ok(self.folder_node(abs, false)?.map(|n| (n.id, n.via)));
+        }
+        let (dir, name) = Self::split(abs)?;
+        let Some(parent) = self.folder_node(&dir, false)? else {
+            return Ok(None);
+        };
+        let follow = self.follows();
+        let file = self.child(&dir, &parent.id, &name, false, follow)?;
+        let folder = self.child(&dir, &parent.id, &name, true, follow)?;
+        match (file, folder) {
+            (Some(a), Some(b)) => Err(self.duplicate(&dir, &name, &[a.file, b.file])),
+            (Some(f), None) | (None, Some(f)) => Ok(Some((f.file.id, parent.via || f.via))),
+            (None, None) => Ok(None),
+        }
     }
 
     /// The account and its storage (replaces `rclone about`).
@@ -1663,6 +1738,22 @@ impl Drive {
         }
         Ok(())
     }
+}
+
+/// Drive's refusal to list who may open an item. A refusal of the sign-in's
+/// scopes keeps its own remedy; one of the item is its owner's to fix.
+fn hidden(e: CliError, can_share: bool) -> CliError {
+    if e.exit_code() != 3 || e.reason() != Some(Reason::Forbidden) || e.remedy().is_some() {
+        return e;
+    }
+    e.because(crate::reason::PERMISSIONS_HIDDEN)
+        .with_remedy(if can_share {
+            "this account may share the item, but Google Drive would not list who can open it; \
+             sign in again, or look in Google Drive (Share)"
+        } else {
+            "this account may not share the item, so Google Drive lists who can open it only to \
+             an account that may; ask its owner, or look as that account"
+        })
 }
 
 fn entry(rel: String, f: &DriveFile) -> FileEntry {

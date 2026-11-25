@@ -14,7 +14,7 @@ use pk_cli_drive::google::fake::{FakeDrive, When, ACCOUNT, MY_DRIVE, ROOT_ID};
 use pk_cli_drive::google::{
     client_entry, token_entry, ClientCommand, Drive, DriveCli, DriveCommand, DriveProfile,
     DriveSpec, Duplicate, Existing, FolderCommand, ItemKind, Listing, LoginArgs, LogoutArgs,
-    ProfileStore, ProfilesCommand, Retry, Scope, StatusArgs, MAX_TRANSFERS,
+    Permission, ProfileStore, ProfilesCommand, Retry, Scope, Sharing, StatusArgs, MAX_TRANSFERS,
 };
 use pk_cli_drive::{reason, Backend, CachePolicy, CachedRemote, RemoteRead, RemoteStore};
 
@@ -2118,4 +2118,333 @@ fn threads_writing_one_new_file_make_one_file() {
     assert_eq!(h.fake.count("inbox", "same.txt"), 1);
     let last = String::from_utf8(h.fake.content("inbox/same.txt").unwrap()).unwrap();
     assert!(last.starts_with("writer "), "{last}");
+}
+
+// ── parents and grants ──────────────────────────────────────────────────
+
+fn sharing(d: &Drive, rel: &str) -> Sharing {
+    d.permissions(rel).unwrap().expect("there")
+}
+
+fn grant<'a>(s: &'a Sharing, email: &str) -> &'a Permission {
+    s.permissions
+        .iter()
+        .find(|p| p.email.as_deref() == Some(email))
+        .unwrap_or_else(|| panic!("no grant for {email}: {:?}", s.permissions))
+}
+
+#[test]
+fn a_listing_names_each_items_parent() {
+    let h = Harness::new();
+    h.signed_in();
+    let a = h.fake.add_folder(ROOT_ID, "a");
+    let b = h.fake.add_folder(&a, "b");
+    h.fake.add_file(&b, "f.txt", b"x");
+    h.fake.add_file(ROOT_ID, "top.txt", b"y");
+    let d = h.drive();
+    let top = d.list_items("", false).unwrap();
+    assert!(top.iter().all(|i| i.parent == ROOT_ID), "{top:?}");
+    let all = d.list_items("", true).unwrap();
+    let parent = |rel: &str| all.iter().find(|i| i.rel == rel).unwrap().parent.clone();
+    assert_eq!(parent("a"), ROOT_ID);
+    assert_eq!(parent("a/b"), a);
+    assert_eq!(parent("a/b/f.txt"), b);
+
+    // A shortcut that was followed is listed where the shortcut sits.
+    let target = h.fake.add_folder(&b, "target");
+    h.fake.add_shortcut(ROOT_ID, "link", &target);
+    let whole = h.drive().listing(Listing::Whole);
+    let link = whole
+        .list_items("", false)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.rel == "link")
+        .unwrap();
+    assert_eq!((link.id, link.parent.as_str()), (target, ROOT_ID));
+}
+
+#[test]
+fn details_name_the_parent_of_a_folder_and_of_a_file() {
+    let h = Harness::new();
+    h.signed_in();
+    let a = h.fake.add_folder(ROOT_ID, "a");
+    let b = h.fake.add_folder(&a, "b");
+    let f = h.fake.add_file(&b, "f.txt", b"hello");
+    let d = h.drive();
+
+    let got = d.details("a/b").unwrap().unwrap();
+    assert_eq!(
+        (got.id.as_str(), got.parent.as_deref()),
+        (b.as_str(), Some(a.as_str()))
+    );
+    assert_eq!(got.kind, ItemKind::Folder);
+    assert_eq!(got.name, "b");
+    assert!(got.can_share && got.owned_by_me == Some(true) && got.shared == Some(false));
+    let got = d.details("a/b/f.txt").unwrap().unwrap();
+    assert_eq!(
+        (got.id.as_str(), got.parent.as_deref()),
+        (f.as_str(), Some(b.as_str()))
+    );
+    assert_eq!(
+        (got.kind, got.size, got.trashed),
+        (ItemKind::File, Some(5), false)
+    );
+
+    // The spec's own id names any item: a file here, with no folder needed.
+    let by_id = DriveSpec::new(ProfileName::parse(PROFILE).unwrap(), &f).unwrap();
+    let got = h.drive_at(&by_id).details("").unwrap().unwrap();
+    assert_eq!((got.id, got.parent), (f, Some(b)));
+    // My Drive has no parent.
+    let mine = DriveSpec::new(ProfileName::parse(PROFILE).unwrap(), "root").unwrap();
+    let got = h.drive_at(&mine).details("").unwrap().unwrap();
+    assert_eq!((got.id.as_str(), got.parent), (MY_DRIVE, None));
+
+    assert!(d.details("a/none").unwrap().is_none());
+    assert!(d.details("none/none").unwrap().is_none());
+    let missing = DriveSpec::new(ProfileName::parse(PROFILE).unwrap(), "1Nothing_here").unwrap();
+    assert!(h.drive_at(&missing).details("").unwrap().is_none());
+    assert!(h.drive_at(&missing).permissions("").unwrap().is_none());
+
+    // Where Drive names no parent, none is made up.
+    h.fake.hide_parent(&f2(&h));
+    let d = h.drive();
+    assert_eq!(d.details("hidden.txt").unwrap().unwrap().parent, None);
+}
+
+fn f2(h: &Harness) -> String {
+    h.fake.add_file(ROOT_ID, "hidden.txt", b"z")
+}
+
+#[test]
+fn details_follow_a_path_like_any_other_and_refuse_a_shared_name() {
+    let h = Harness::new();
+    h.signed_in();
+    h.fake.add_file(ROOT_ID, "x", b"1");
+    h.fake.add_folder(ROOT_ID, "x");
+    let d = h.drive();
+    let e = d.details("x").unwrap_err();
+    assert_eq!(e.reason(), Some(reason::DUPLICATE_NAME));
+    let e = d.permissions("x").unwrap_err();
+    assert_eq!(e.reason(), Some(reason::DUPLICATE_NAME));
+
+    let target = h.fake.add_folder(ROOT_ID, "target");
+    h.fake.add_shortcut(ROOT_ID, "link", &target);
+    let got = h
+        .drive()
+        .listing(Listing::Whole)
+        .details("link")
+        .unwrap()
+        .unwrap();
+    assert_eq!((got.id, got.via_shortcut), (target, true));
+    // The default listing does not go through a shortcut.
+    assert!(h.drive().details("link").unwrap().is_none());
+
+    let gone = h.fake.add_file(ROOT_ID, "gone.txt", b"g");
+    h.fake.trash(&gone);
+    assert!(h.drive().details("gone.txt").unwrap().is_none());
+}
+
+#[test]
+fn permissions_list_who_may_open_an_item_and_where_each_grant_comes_from() {
+    let h = Harness::new();
+    h.signed_in();
+    let a = h.fake.add_folder(ROOT_ID, "a");
+    let f = h.fake.add_file(&a, "f.txt", b"x");
+    h.fake.share(&a, "user", "reader", "above@example.test");
+    h.fake.share(&a, "user", "reader", "both@example.test");
+    h.fake.share(&f, "user", "writer", "both@example.test");
+    h.fake.share(&f, "group", "commenter", "team@example.test");
+    h.fake.share(&f, "domain", "reader", "example.test");
+    h.fake.discoverable(&f, "domain", "example.test");
+    h.fake.share(&f, "anyone", "reader", "");
+    let d = h.drive();
+
+    let s = sharing(&d, "a/f.txt");
+    assert_eq!(
+        (s.item.id.as_str(), s.item.parent.as_deref()),
+        (f.as_str(), Some(a.as_str()))
+    );
+    assert!(s.item.can_share && s.item.shared == Some(true));
+    let owner = &s.permissions[0];
+    assert_eq!(
+        (owner.role.as_str(), owner.email.as_deref()),
+        ("owner", Some(ACCOUNT))
+    );
+    assert_eq!(owner.inherited, Some(false));
+    // Reaches the file from the folder above.
+    let above = grant(&s, "above@example.test");
+    assert_eq!(
+        (above.role.as_str(), above.inherited),
+        ("reader", Some(true))
+    );
+    assert_eq!(above.inherited_from.as_deref(), Some(a.as_str()));
+    // Given on the file at a higher role than the folder's.
+    let both = grant(&s, "both@example.test");
+    assert_eq!(
+        (both.role.as_str(), both.inherited),
+        ("writer", Some(false))
+    );
+    assert_eq!(both.inherited_from, None);
+    let team = grant(&s, "team@example.test");
+    assert_eq!((team.kind.as_str(), team.inherited), ("group", Some(false)));
+    let links: Vec<&Permission> = s.permissions.iter().filter(|p| p.by_link()).collect();
+    assert_eq!(links.len(), 2, "{links:?}");
+    let domain = links.iter().find(|p| p.kind == "domain").unwrap();
+    assert_eq!(domain.domain.as_deref(), Some("example.test"));
+    assert_eq!(domain.discoverable, Some(true));
+    let anyone = links.iter().find(|p| p.kind == "anyone").unwrap();
+    assert_eq!(
+        (anyone.email.as_deref(), anyone.discoverable),
+        (None, Some(false))
+    );
+
+    // The folder itself: its grants are on it, so none is inherited.
+    let s = sharing(&d, "a");
+    assert!(
+        s.permissions.iter().all(|p| p.inherited == Some(false)),
+        "{:?}",
+        s.permissions
+    );
+}
+
+#[test]
+fn a_grant_is_read_from_drives_own_details_when_it_gives_them() {
+    let h = Harness::new();
+    h.signed_in();
+    let a = h.fake.add_folder(ROOT_ID, "a");
+    let f = h.fake.add_file(&a, "f.txt", b"x");
+    h.fake.share(&a, "user", "reader", "above@example.test");
+    h.fake.share(&f, "user", "reader", "direct@example.test");
+    h.fake.grant_details();
+    let d = h.drive();
+    h.fake.clear_requests();
+    let s = sharing(&d, "a/f.txt");
+    let above = grant(&s, "above@example.test");
+    assert_eq!(above.inherited, Some(true));
+    assert_eq!(above.inherited_from.as_deref(), Some(a.as_str()));
+    assert_eq!(grant(&s, "direct@example.test").inherited, Some(false));
+    // Drive said where each comes from, so the folder above is not asked.
+    let asked: Vec<String> = h
+        .fake
+        .requests()
+        .into_iter()
+        .filter(|r| r.contains("/permissions"))
+        .collect();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+}
+
+#[test]
+fn where_the_folder_above_is_out_of_sight_the_source_of_a_grant_is_unknown() {
+    let h = Harness::new();
+    h.signed_in();
+    let a = h.fake.add_folder(ROOT_ID, "a");
+    let f = h.fake.add_file(&a, "f.txt", b"x");
+    h.fake.share(&f, "user", "reader", "direct@example.test");
+    // The sign-in cannot list who may open the folder above.
+    h.fake.unlistable(&a);
+    let d = h.drive();
+    let s = sharing(&d, "a/f.txt");
+    let direct = grant(&s, "direct@example.test");
+    assert_eq!(
+        (direct.inherited, direct.inherited_from.as_deref()),
+        (None, None)
+    );
+    // The owner's own grant is never inherited, whatever is unknown.
+    assert_eq!(grant(&s, ACCOUNT).inherited, Some(false));
+
+    // No parent named: the same.
+    h.fake.hide_parent(&f);
+    let s = sharing(&d, "a/f.txt");
+    assert_eq!(s.item.parent, None);
+    assert_eq!(grant(&s, "direct@example.test").inherited, None);
+
+    // A failure that may pass is reported, not taken for "unknown".
+    let h = Harness::new();
+    h.signed_in();
+    let a = h.fake.add_folder(ROOT_ID, "a");
+    let f = h.fake.add_file(&a, "f.txt", b"x");
+    h.fake.share(&f, "user", "reader", "direct@example.test");
+    h.fake.fail_next(
+        &format!("/files/{a}/permissions"),
+        503,
+        "backendError",
+        99,
+        When::Before,
+    );
+    let e = h.drive().permissions("a/f.txt").unwrap_err();
+    assert_eq!(e.exit_code(), 5);
+}
+
+#[test]
+fn limited_access_means_a_grant_is_direct_except_the_metadata_view() {
+    let h = Harness::new();
+    h.signed_in();
+    let a = h.fake.add_folder(ROOT_ID, "a");
+    h.fake.share(&a, "user", "reader", "above@example.test");
+    let locked = h.fake.add_folder(&a, "locked");
+    h.fake.limit_access(&locked);
+    h.fake
+        .share(&locked, "user", "writer", "inside@example.test");
+    h.fake.view_only(&locked, "above@example.test");
+    let d = h.drive();
+    let s = sharing(&d, "a/locked");
+    assert!(s.item.limited_access);
+    assert_eq!(grant(&s, "inside@example.test").inherited, Some(false));
+    let view = grant(&s, "above@example.test");
+    assert_eq!(
+        (view.view.as_deref(), view.inherited),
+        (Some("metadata"), Some(true))
+    );
+
+    // A file inside is reached from the limited folder, not from above it,
+    // and the metadata view gives nobody its content.
+    let f = h.fake.add_file(&locked, "f.txt", b"x");
+    let s = sharing(&d, "a/locked/f.txt");
+    assert!(s.item.can_share);
+    assert_eq!(s.item.id, f);
+    let inside = grant(&s, "inside@example.test");
+    assert_eq!(
+        (inside.inherited, inside.role.as_str()),
+        (Some(true), "writer")
+    );
+    assert!(
+        !s.permissions
+            .iter()
+            .any(|p| p.email.as_deref() == Some("above@example.test")),
+        "{:?}",
+        s.permissions
+    );
+}
+
+#[test]
+fn a_long_list_of_grants_is_read_to_its_end() {
+    let h = Harness::new();
+    h.signed_in();
+    let f = h.fake.add_file(ROOT_ID, "f.txt", b"x");
+    for n in 0..9 {
+        h.fake
+            .share(&f, "user", "reader", &format!("person{n}@example.test"));
+    }
+    h.fake.page_size(4);
+    let s = sharing(&h.drive(), "f.txt");
+    assert_eq!(s.permissions.len(), 10);
+}
+
+#[test]
+fn an_item_not_shared_by_this_account_may_hide_who_can_open_it() {
+    let h = Harness::new();
+    h.signed_in();
+    let f = h.fake.add_file(ROOT_ID, "f.txt", b"x");
+    h.fake.owned_by_another(&f);
+    h.fake.unlistable(&f);
+    let e = h.drive().permissions("f.txt").unwrap_err();
+    assert_eq!(
+        (e.exit_code(), e.reason()),
+        (3, Some(reason::PERMISSIONS_HIDDEN))
+    );
+    let remedy = e.remedy().unwrap();
+    assert!(remedy.contains("ask its owner"), "{remedy}");
+    // And the details still say so.
+    let got = h.drive().details("f.txt").unwrap().unwrap();
+    assert!(!got.can_share && got.owned_by_me == Some(false));
 }
